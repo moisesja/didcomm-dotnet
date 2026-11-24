@@ -128,7 +128,7 @@ public sealed class MessagePickupLiveBudgetTests
     public async Task Pushes_that_arrive_at_the_same_time_are_admitted_up_to_the_quota_and_only_the_admitted_are_pushed()
     {
         const int arrivals = 40;
-        MessagePickupLive.RaiseThreadPoolFloor(arrivals);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(arrivals);
         await using var fixture = PickupFixture.Create(pickup: o => o.MaxQueueMessages = Fits);
         var (mediator, peer) = await fixture.EnrolledAsync();
         var socket = fixture.Session(peer, mediator, live: true);

@@ -186,7 +186,7 @@ public sealed class DeliveredUnpackAdv4Tests
         // (the test host holds threads of its own) nothing else in the process, this test's own
         // steps included, runs until new threads arrive, which can take longer than the gate's
         // 10 s hang guard (#120's windows failure; #98).
-        MessagePickupLive.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(2);
         var marker = "adv4-unobserved-" + Guid.NewGuid().ToString("N");
         var unobserved = 0;
         EventHandler<UnobservedTaskExceptionEventArgs> handler = (_, e) =>

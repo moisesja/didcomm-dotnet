@@ -181,27 +181,16 @@ internal sealed class HostCallLog
 
 /// <summary>
 /// Raises the thread pool's floor for a test that parks pool threads (L-065 corollary), and puts it
-/// back when disposed, unless something else changed it meanwhile.
+/// back when disposed (<see cref="ThreadPoolFloor"/>: not while another test still holds a raise, and
+/// not over a raise something else made meanwhile).
 /// </summary>
 internal sealed class PoolFloor : IDisposable
 {
-    private readonly int _worker;
-    private readonly int _io;
-    private readonly int _raised;
+    private readonly IDisposable _raise;
 
-    public PoolFloor(int parked)
-    {
-        ThreadPool.GetMinThreads(out _worker, out _io);
-        _raised = Math.Max(_worker, Environment.ProcessorCount + parked + 8);
-        ThreadPool.SetMinThreads(_raised, _io);
-    }
+    public PoolFloor(int parked) => _raise = ThreadPoolFloor.Raise(Environment.ProcessorCount + parked + 8);
 
-    public void Dispose()
-    {
-        ThreadPool.GetMinThreads(out var worker, out _);
-        if (worker == _raised)
-            ThreadPool.SetMinThreads(_worker, _io);
-    }
+    public void Dispose() => _raise.Dispose();
 }
 
 /// <summary>

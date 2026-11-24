@@ -90,62 +90,66 @@ public sealed class MediatorClientOptions
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The messages of a delivery are opened four at a time, and each gets an equal share of the
-    /// time: this value divided by the number of rounds of four the delivery needs (the whole of it
-    /// for up to four messages, half for five to eight, a third for nine to twelve). A message that
-    /// is not open when its share is up — its sender's DID resolves slowly, or never — is reported
-    /// as a failed item with a <see cref="TimeoutException"/> (naming the request, never a message)
-    /// and is not acknowledged, and the next message takes its place; so slow messages cannot keep
-    /// the ones behind them from being opened. The rest of the delivery is returned and acknowledged
-    /// as usual. A live stream
-    /// opens a delivery before it yields any of its items, so the time you spend on an item never
-    /// counts against this.
+    /// The messages of a delivery are opened four at a time, and each gets a share of the time left
+    /// when it starts: what is left of this value divided by the rounds of four that it and the
+    /// messages after it still need, never less than this value divided by the rounds the whole
+    /// delivery needs (the whole of it for up to four messages, half for five to eight), and never
+    /// less than a quarter of it. A message starts only while at least that quarter is left. A
+    /// message that is not open when its share is up — its sender's DID resolves slowly, or never —
+    /// is reported as a failed item with a <see cref="TimeoutException"/> (naming the request, never a
+    /// message) and is not acknowledged, and the next message takes its place; so slow messages
+    /// cannot keep the ones behind them from being opened, and the time messages failing at once did
+    /// not use goes to the ones after them. The rest of the delivery is returned and acknowledged as
+    /// usual. A live stream opens a delivery before it yields any of its items, so the time you spend
+    /// on an item never counts against this.
+    /// </para>
+    /// <para>
+    /// <strong>Messages that were slow to open are remembered</strong> (per mediator and mailbox): a
+    /// message that ran out of its share, or failed after at least 3 percent of this value, is not
+    /// opened again when it is delivered again, for a pause of 30 times this value (10 minutes by
+    /// default), doubling each time it is slow again up to 180 times (1 hour). Such a message is
+    /// returned at once as a failed item and is not acknowledged. So a loop that fetches until drained,
+    /// or a live stream's drain, gets past any number of slow messages: each delivery learns some of
+    /// them within this value, and the ones it remembers cost nothing. See
+    /// <see cref="PickupClient.FetchAsync"/> for the details and for what remains with slow senders.
     /// </para>
     /// <para>
     /// <strong>Resolvers that block.</strong> Each message is opened on a thread-pool work item of its
     /// own, so the fetch or stream gets its result at this limit even when a DID or secrets resolver
     /// blocks its thread. Blocking host code cannot be bounded, though: the outcome is decided here,
-    /// but the blocked thread and its work stay the resolver's until it returns, and meanwhile it
-    /// holds one of the abandoned-unpack slots (below). Use resolvers that are asynchronous and
-    /// honour their cancellation token.
+    /// but the blocked thread and its work stay the resolver's until it returns, and the opening keeps
+    /// its reservation meanwhile (below). Use resolvers that are asynchronous and honour their
+    /// cancellation token.
     /// </para>
     /// <para>
     /// <strong>Keep it well below the mediator's lease.</strong> A mediator sets aside what it
     /// delivered for a while (this library's mediator for <c>MessagePickupOptions.LeaseTimeout</c>,
     /// 60 seconds by default) and delivers it again only after that. While a message the client gave
-    /// up on is still set aside, the next fetch passes over it and gets what is queued behind it, so
-    /// a loop that fetches until drained gets past slow messages, as many as its fetches pass over
-    /// within one lease (see the known limits below). The default, a third of this
-    /// library's default lease, leaves room for the fetch's request and acknowledgement. For a
-    /// third-party mediator, keep it below that mediator's lease. If the lease runs out first, the
-    /// mediator hands the messages still being opened to the next fetch as well (a message can then
-    /// reach you twice), though this library's mediator still accepts the acknowledgement of the
-    /// ones that were opened.
+    /// up on is still set aside, the next fetch passes over it and gets what is queued behind it, and
+    /// a live stream's drain learns as many rounds of slow messages per cycle as fit in one lease. The
+    /// default, a third of this library's default lease, leaves room for the fetch's request and
+    /// acknowledgement. For a third-party mediator, keep it below that mediator's lease. If the lease
+    /// runs out first, the mediator hands the messages still being opened to the next fetch as well (a
+    /// message can then reach you twice), though this library's mediator still accepts the
+    /// acknowledgement of the ones that were opened; and a live stream then learns only one round of
+    /// slow messages per cycle.
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing.</strong> Discard it with
     /// <see cref="PickupClient.AckAsync"/>. A mediator that does not set fetched messages aside
-    /// delivers it first on every fetch, and this limit alone does not get you past it.
+    /// delivers it first on every fetch, and neither this limit nor the memory of slow messages gets
+    /// you past more of them than one fetch holds.
     /// </para>
     /// <para>
-    /// <strong>A DID resolver that ignores cancellation.</strong> A message whose opening ran out of
-    /// time keeps one of the container's 16 slots for abandoned unpacks until its sender's DID
-    /// lookup really ends. A resolver that ignores cancellation can hold all 16 (one slow sender is
-    /// enough), and until those lookups end every delivered message fails at once, for every DID
-    /// and tenant of the container. Use a resolver that honours its cancellation token.
-    /// </para>
-    /// <para>
-    /// <strong>Known limits with slow senders</strong>, to be hardened in
-    /// <see href="https://github.com/moisesja/didcomm-dotnet/issues/111">#111</see>. The client does
-    /// not remember slow messages from one fetch to the next: a fetch of slow messages takes this
-    /// whole limit, so within one lease a loop passes over about three fetches' worth of them, and
-    /// more slow messages than that in front of yours keep a loop that fetches until drained, or a
-    /// live stream's drain, from reaching what is behind them (discard what keeps failing with
-    /// <see cref="PickupClient.AckAsync"/>). A message's share is fixed from the delivery's size, so
-    /// messages that fail at once leave an honest message only its share, not the time they did not
-    /// use. The bound of 16 abandoned unpacks is checked when an unpack starts, not reserved, so
-    /// deliveries opened at the same moment can together leave more than 16 running. And the slots
-    /// are shared by the whole container, as above.
+    /// <strong>A DID resolver that ignores cancellation.</strong> The library hands every lookup the
+    /// token of the message's share. A resolver that honours it ends at once. The lookup is host code
+    /// and may outlive its share: one that does not honour the token keeps its reservation until it
+    /// returns. Each opening is reserved before it starts, and at most 4 are held at a time per sender,
+    /// 16 per mailbox for messages whose outer envelope names no sender, and 64 per container; a
+    /// message beyond a bound fails at once ("unpack capacity exhausted") and comes back later. Many
+    /// senders whose lookups ignore cancellation can still hold all 64, and until those lookups end
+    /// every delivered message fails at once, for every DID and tenant of the container. Use a
+    /// resolver that honours its cancellation token.
     /// </para>
     /// </remarks>
     public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(20);

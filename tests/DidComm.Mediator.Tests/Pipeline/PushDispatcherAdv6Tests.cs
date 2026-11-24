@@ -126,7 +126,7 @@ public sealed class PushDispatcherAdv6Tests
     public async Task Forwards_racing_the_live_on_change_are_each_either_counted_in_its_status_or_pushed_live_exactly_once()
     {
         const int Forwards = 24;
-        MessagePickupLive.RaiseThreadPoolFloor(Forwards);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(Forwards);
         for (var round = 0; round < 4; round++)
         {
             await using var peers = new PipelinePeers();

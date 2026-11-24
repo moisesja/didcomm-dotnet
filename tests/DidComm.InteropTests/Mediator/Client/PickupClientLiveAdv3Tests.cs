@@ -107,30 +107,19 @@ public sealed class PickupClientLiveAdv3Tests
     }
 
     /// <summary>
-    /// ADV3-6 (defect, Medium; a known limit deferred to #111, skipped until it is fixed). Property broken — <see cref="PickupClient.FetchAsync"/>
-    /// remarks: "A message that failed stays leased to you for the mediator's lease, so a loop that
-    /// fetches until drained gets past failures to what is behind them" and "while the mediator still
-    /// sets the slow ones aside the next fetch reaches what is queued behind them";
-    /// <see cref="MediatorClientOptions.UnpackTimeout"/>: "so a loop that fetches until drained gets
-    /// past slow messages"; owner decision 2-A ("messages not opened by then are failures and stay
-    /// queued, so the next fetch passes over them while their lease lasts").
-    /// <para>
-    /// Attack (L-058: a per-request budget against a lease, with more blocked items than the budget
-    /// covers): a fetch whose messages are slow takes the whole budget (20 s), so within one lease
-    /// (60 s) the loop makes three fetches and passes over at most 3 × <c>limit</c> slow messages;
-    /// by the fourth fetch the first ones' lease has run out and, being the oldest, they are
-    /// delivered first again. Mallory, whose DID never resolves, queues 16 messages ahead of
-    /// Alice's (well inside <c>MaxQueueMessages</c>, 100). A loop of <c>FetchAsync(limit: 4)</c>
-    /// until drained, the mediator's clock moving with the client's, sees only Mallory's failures,
-    /// fetch after fetch, and never reaches Alice's message — for as long as Mallory's messages are
-    /// queued (the client never discards them; <c>MaxMessageAge</c> is 30 days). With the documented
-    /// <c>limit: 10</c> it takes 31 slow messages; the live stream's drain (limit 10) is in the same
-    /// position. Before fix round 2 this was ADV2-1 for one batch; the per-delivery budget bounds a
-    /// batch but not the loop.
-    /// </para>
+    /// ADV3-6 (defect, Medium; fixed by #111: the client remembers messages that were slow to open,
+    /// per mailbox, and holds them back while their pause lasts). Mallory, whose DID never resolves,
+    /// queues sixteen messages ahead of Alice's (well inside <c>MaxQueueMessages</c>, 100): more than
+    /// the three fetches of <c>limit: 4</c> that fit in one of the mediator's leases (60 s) can pass
+    /// over. A loop of <c>FetchAsync(limit: 4)</c> until drained reaches Alice's message within
+    /// <c>ceil(16 / 4)</c> = 4 fetches that each take one budget (80 s, 1.3 leases); the other fetches
+    /// meet only messages the client remembers, take no time and open nothing. Each fetch waits until
+    /// it completes or its four new messages are being opened (a remembered message is never opened,
+    /// so it never reaches the seam); only then does the client's clock move, by one budget, and the
+    /// mediator's clock moves by the client's elapsed time, nothing else.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): the client does not remember slow messages between fetches, so more than about three fetches' worth keep a fetch-until-drained loop from what is behind them.")]
-    public async Task ADV3_6_a_fetch_until_drained_loop_never_gets_past_more_slow_messages_than_three_fetches_hold()
+    [Fact]
+    public async Task ADV3_6_a_fetch_until_drained_loop_reaches_the_message_behind_more_slow_messages_than_one_lease_of_fetches_passes_within_the_bound()
     {
         await using var mediator = await MediatorTestServer.StartAsync();
         var time = new QaManualTimeProvider();
@@ -149,33 +138,49 @@ public sealed class PickupClientLiveAdv3Tests
         var alice = await harness.NewAliceAsync();
         var mallory = await harness.NewAliceAsync();
         const int limit = 4;
-        for (var i = 0; i < 4 * limit; i++)
+        const int slowMessages = 4 * limit;
+        for (var i = 0; i < slowMessages; i++)
             await PickupE2E.SendAsync(mediator, mallory, recipient, "slow");
         var behind = await PickupE2E.SendAsync(mediator, alice, recipient, "behind");
         var budget = harness.Channel.Options.UnpackTimeout;
-        var fetches = 4 * (int)(new DidComm.Mediator.Pickup.MessagePickupOptions().LeaseTimeout.Ticks / budget.Ticks); // four leases' worth
+        var lease = new DidComm.Mediator.Pickup.MessagePickupOptions().LeaseTimeout;
+        const int bound = slowMessages / limit; // ceil(16 / min(limit, 16))
+        (bound * budget).Should().BeGreaterThan(lease, "the case under test: more slow messages than the loop passes over within one lease");
 
         var got = new List<PickupItem>();
-        var drained = false;
-        for (var f = 0; f < fetches && !drained; f++)
+        var learning = 0;
+        var fetches = 0;
+        var elapsed = TimeSpan.Zero;
+        while (!got.Any(i => i.Unpacked?.Message.Id == behind.Id) && learning <= bound && fetches < 10 * bound)
         {
+            var started = time.GetUtcNow();
+            var entered = slow.Entered;
             var fetch = harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit);
-            await slow.EnteredAsync(limit * (f + 1)); // the four of this fetch are being opened
-            time.Advance(budget);
+            await MediatorTestServer.WaitUntilAsync(() => fetch.IsCompleted || slow.Entered >= entered + limit, "the fetch completes, or its four new messages are being opened");
+            if (!fetch.IsCompleted)
+            {
+                learning++;
+                time.Advance(budget);
+            }
             var batch = await PickupE2E.Within(fetch);
             got.AddRange(batch.Items);
-            drained = batch.Drained;
-            mediator.Clock.Advance(budget); // the mediator's lease runs on its own clock, in step
+            fetches++;
+            var spent = time.GetUtcNow() - started;
+            elapsed += spent;
+            mediator.Clock.Advance(spent); // the mediator's clock moves only by the client's elapsed time
         }
 
         got.Should().Contain(i => i.Unpacked != null && i.Unpacked.Message.Id == behind.Id,
-            "a loop that fetches until drained must get past the slow messages to Alice's message; after {0} fetches over four leases it has seen only {1} failures", fetches, got.Count);
+            "a loop that fetches until drained reaches Alice's message within {0} fetches that take time; after {1} ({2} fetches, {3}) it had seen only failures", bound, learning, fetches, elapsed);
+        learning.Should().BeLessThanOrEqualTo(bound);
+        elapsed.Should().BeLessThanOrEqualTo(bound * budget, "{0} budgets, {1:0.##} leases", bound, bound * budget / lease);
+        slow.Entered.Should().Be(slowMessages, "each slow message is opened once, then held back while its pause lasts");
     }
 
     /// <summary>
     /// ADV3-6 control (passes): with fewer slow messages than three fetches hold (two fetches' worth),
-    /// the same loop gets past them to Alice's message inside the first lease — the bound is the
-    /// lease ÷ budget × limit arithmetic, not the seam.
+    /// the same loop gets past them to Alice's message inside the first lease, the fetches passing
+    /// over messages the mediator still has leased to the client.
     /// </summary>
     [Fact]
     public async Task With_fewer_slow_messages_than_three_fetches_hold_the_loop_reaches_the_message_behind_them()

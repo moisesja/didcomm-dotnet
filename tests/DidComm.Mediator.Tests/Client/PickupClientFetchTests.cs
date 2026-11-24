@@ -774,8 +774,10 @@ public sealed class PickupClientFetchTests
 
 /// <summary>
 /// A mediator queue with leases, for the drain-loop tests: a <c>delivery-request</c> takes, oldest
-/// first, up to <c>limit</c> messages not under a lease and leases them for <see cref="Lease"/>; a
-/// <c>messages-received</c> removes them; nothing left to deliver is answered with a <c>status</c>.
+/// first, up to <c>limit</c> messages not under a lease and leases them for <see cref="LeaseTime"/>
+/// (<see cref="Lease"/> by default); a <c>messages-received</c> removes them; nothing left to deliver
+/// is answered with a <c>status</c>. Each delivery is recorded (<see cref="Delivered"/>) before it is
+/// answered, so a test knows what the client is opening.
 /// </summary>
 internal sealed class FakeMailbox
 {
@@ -783,15 +785,38 @@ internal sealed class FakeMailbox
 
     private readonly object _gate = new();
     private readonly List<(string Id, string Payload, DateTimeOffset LeasedUntil)> _queue = new();
+    private readonly List<IReadOnlyList<string>> _delivered = new();
 
     public FakeMailbox(ManualTimeProvider time, params (string Id, string Payload)[] messages)
+        : this(time, Lease, messages)
+    {
+    }
+
+    public FakeMailbox(ManualTimeProvider time, TimeSpan lease, params (string Id, string Payload)[] messages)
     {
         Time = time;
+        LeaseTime = lease;
         foreach (var (id, payload) in messages)
             _queue.Add((id, payload, DateTimeOffset.MinValue));
     }
 
     public ManualTimeProvider Time { get; }
+
+    /// <summary>How long a delivered message stays leased.</summary>
+    public TimeSpan LeaseTime { get; }
+
+    /// <summary>The ids of every delivery answered so far (not the <c>status</c> answers), in order.</summary>
+    public IReadOnlyList<IReadOnlyList<string>> Delivered
+    {
+        get
+        {
+            lock (_gate)
+                return _delivered.ToArray();
+        }
+    }
+
+    /// <summary>Runs inside each delivery's answer, after it is recorded and before the client gets it.</summary>
+    public Action<IReadOnlyList<string>>? OnDeliver { get; set; }
 
     public IReadOnlyList<string> Remaining
     {
@@ -818,11 +843,16 @@ internal sealed class FakeMailbox
             {
                 if (_queue[i].LeasedUntil > now)
                     continue;
-                _queue[i] = (_queue[i].Id, _queue[i].Payload, now + Lease);
+                _queue[i] = (_queue[i].Id, _queue[i].Payload, now + LeaseTime);
                 taken.Add((_queue[i].Id, _queue[i].Payload));
             }
+            if (taken.Count > 0)
+                _delivered.Add(taken.Select(t => t.Item1).ToArray());
         }
-        return taken.Count == 0 ? FakePickupExchange.Status(request, Count()) : FakePickupExchange.Delivery(request, taken.ToArray());
+        if (taken.Count == 0)
+            return FakePickupExchange.Status(request, Count());
+        OnDeliver?.Invoke(taken.Select(t => t.Item1).ToArray());
+        return FakePickupExchange.Delivery(request, taken.ToArray());
     }
 
     private InboundMessageSnapshot Acknowledge(SentRequest request)
