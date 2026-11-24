@@ -148,10 +148,14 @@ public sealed class PickupClientLiveCycleTests
     [Fact]
     public async Task The_drain_stops_at_a_status_or_after_50_rounds()
     {
-        // Every round delivers the same message again (as a mediator that keeps redelivering would):
-        // the first time it is yielded; later rounds find it remembered and acknowledge it.
+        // Every round delivers the same message again under a new queue id (as a mediator that keeps
+        // a replayed forward would): the first time it is yielded; later rounds bring a new id, so the
+        // drain goes on, and find the message remembered and acknowledge it. Updated in #111 (QA2-3):
+        // it used the same id every round, which now ends the drain at its second round, since that id
+        // was already taken in this drain.
         var (exchange, client) = Live();
-        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        var round = 0;
+        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ($"q{Interlocked.Increment(ref round)}", "ok:m1")));
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
         (await Next(stream)).Id.Should().Be("q1");
@@ -160,8 +164,34 @@ public sealed class PickupClientLiveCycleTests
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
 
         exchange.SentOf(MessagePickup.DeliveryRequestType).Should().HaveCount(LiveDeliveryStream.MaxDrainRounds);
-        exchange.AcknowledgedIds.Should().HaveCount(LiveDeliveryStream.MaxDrainRounds).And.OnlyContain(id => id == "q1");
+        exchange.AcknowledgedIds.Should().Equal(Enumerable.Range(1, LiveDeliveryStream.MaxDrainRounds).Select(n => $"q{n}"));
         waiting.IsCompleted.Should().BeFalse("a repeat is acknowledged, never yielded again");
+        await StopAsync(stream, waiting, cts);
+    }
+
+    /// <summary>
+    /// QA2-3: a mediator that keeps a message after its acknowledgement and delivers it again under
+    /// the same id in the next round. The id was taken in this drain, so the round brings nothing new
+    /// and ends the drain: two delivery requests, the message opened and yielded once, acknowledged
+    /// once.
+    /// </summary>
+    [Fact]
+    public async Task A_round_that_brings_again_an_id_taken_in_this_drain_ends_the_drain()
+    {
+        var (exchange, client) = Live();
+        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        (await Next(stream)).Id.Should().Be("q1");
+
+        var mark = exchange.Clock.Mark();
+        var waiting = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForTimerAsync(exchange.Options.LivePollInterval, mark, PickupTest.Timeout); // the drain ended: the next cycle's alarm
+
+        Types(exchange).Should().Equal(new[] { LiveOn, Drain, Ack, Drain }, "the second round brings only an id already taken in this drain");
+        exchange.Unpacked.Should().Equal("ok:m1");
+        exchange.AcknowledgedIds.Should().Equal("q1");
+        waiting.IsCompleted.Should().BeFalse();
         await StopAsync(stream, waiting, cts);
     }
 

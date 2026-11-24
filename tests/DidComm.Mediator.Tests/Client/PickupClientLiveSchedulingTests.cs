@@ -336,15 +336,16 @@ public sealed class PickupClientLiveSchedulingTests
     }
 
     /// <summary>
-    /// I-18 (ADV5-3): progress ends the run of failures, so the next failure backs off one second
-    /// again, not the run's next step. Each case has one failure, then one kind of progress, then a
-    /// failure: an acknowledgement the mediator accepted (the failure before it was that
-    /// acknowledgement's first attempt), or a push that brings a new message during the back-off.
+    /// I-18 (ADV5-3, owner decision B1): each case has one failure, then one kind of progress, then a
+    /// failure. After an acknowledgement the mediator accepted (the failure before it was that
+    /// acknowledgement's first attempt) — a request that succeeded — the next failure backs off one
+    /// second again. After a push that brings a new message during the back-off, the back-off goes on:
+    /// the next failure backs off two seconds, the run's next step.
     /// </summary>
     [Theory]
     [InlineData("an acknowledgement the mediator accepted")]
     [InlineData("a push that brings a new message")]
-    public async Task After_progress_the_next_failure_backs_off_one_second_again(string progress)
+    public async Task After_a_successful_request_the_next_failure_backs_off_one_second_again_and_after_a_push_the_back_off_goes_on(string progress)
     {
         var (exchange, client) = Live(o => o.LivePollInterval = Interval);
         var liveOns = 0;
@@ -394,7 +395,10 @@ public sealed class PickupClientLiveSchedulingTests
         exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff).Should().Be(1);
         var next = await Adv5Wait.BackoffAlarmAsync(exchange.Clock, move);
         Types(exchange).Should().Equal(byAck ? new[] { LiveOn, Drain, Ack, Ack, LiveOn } : new[] { LiveOn, LiveOn });
-        next.Should().Be(LiveDeliveryStream.FirstBackoff, "{0} ended the run, so the failure after it is the first of a new run", progress);
+        if (byAck)
+            next.Should().Be(LiveDeliveryStream.FirstBackoff, "{0} ended the run, so the failure after it is the first of a new run", progress);
+        else
+            next.Should().Be(LiveDeliveryStream.Backoff(2), "{0} lets the give-up alarm go but keeps the back-off", progress);
         await StopAsync(stream, move, cts);
     }
 
