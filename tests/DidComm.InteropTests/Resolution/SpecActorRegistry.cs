@@ -113,7 +113,7 @@ internal sealed class SpecActorRegistry
     {
         private readonly Dictionary<string, Jwk> _byKid;
         public DictionarySenderKeyLookup(Dictionary<string, Jwk> byKid) => _byKid = byKid;
-        public Jwk? TryGet(string skid) => _byKid.GetValueOrDefault(skid);
+        public ValueTask<Jwk?> ResolveAsync(string skid, CancellationToken ct) => new(_byKid.GetValueOrDefault(skid));
     }
 
     private sealed class DictionarySecretsResolver : ISecretsResolver

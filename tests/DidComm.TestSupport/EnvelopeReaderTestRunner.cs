@@ -25,8 +25,10 @@ internal static class EnvelopeReaderTestRunner
         var keyOps = new KeyOperationResolver(secrets, secrets as IOpaqueKeyResolver, crypto);
         Func<string, string, string, CancellationToken, Task<bool>>? asyncCheck =
             resolverCheck is null ? null : (a, b, c, _) => Task.FromResult(resolverCheck(a, b, c));
+        Func<string, CancellationToken, ValueTask<Jwk?>>? asyncSigner =
+            signerLookup is null ? null : (kid, _) => new ValueTask<Jwk?>(signerLookup(kid));
         return EnvelopeReader
-            .UnpackAsync(packed, keyOps, senderLookup, signerLookup, crypto, asyncCheck,
+            .UnpackAsync(packed, keyOps, senderLookup, asyncSigner, crypto, asyncCheck,
                 ownDidSubjects: ownDidSubjects)
             .GetAwaiter().GetResult();
     }

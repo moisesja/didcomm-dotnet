@@ -57,5 +57,5 @@ internal sealed class DictionarySenderKeyLookup : IInternalSenderKeyLookup
         _byKid = publicJwks.ToDictionary(j => j.Kid!, StringComparer.Ordinal);
     }
 
-    public Jwk? TryGet(string skid) => _byKid.GetValueOrDefault(skid);
+    public ValueTask<Jwk?> ResolveAsync(string skid, CancellationToken ct) => new(_byKid.GetValueOrDefault(skid));
 }

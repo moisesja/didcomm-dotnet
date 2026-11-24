@@ -909,16 +909,15 @@ public sealed partial class DidCommClient
     /// never rejects the message).
     /// </summary>
     /// <remarks>
-    /// <strong>Support boundary:</strong> the recipient (secret-key) decrypt path runs natively async
-    /// as of 1.1.0 — ECDH key agreement flows through opaque-or-extractable <c>IEcdhKey</c> handles
-    /// (FR-SEC-06), so the consumer-supplied <see cref="ISecretsResolver"/> is now <c>await</c>ed
-    /// directly (no sync-over-async bridge, no deadlock risk under a captured
-    /// <see cref="System.Threading.SynchronizationContext"/>). The remaining sync-over-async at the
-    /// seam is confined to <em>public-key</em> DID resolution (<see cref="IDidKeyService"/>) feeding
-    /// DataProofs' synchronous JWS-verify / sender-key contracts; that is safe in hosts with no
-    /// synchronization context — ASP.NET Core, console, generic-host worker services (the supported
-    /// targets) — and, as before, such a host should still ensure resolver implementations use
-    /// <c>ConfigureAwait(false)</c>.
+    /// <strong>Key lookups:</strong> every key lookup of an unpack is <c>await</c>ed with
+    /// <paramref name="ct"/>. The recipient (secret-key) decrypt path runs ECDH key agreement through
+    /// opaque-or-extractable <c>IEcdhKey</c> handles (FR-SEC-06) over the consumer-supplied
+    /// <see cref="ISecretsResolver"/>. The authcrypt sender's and the JWS signer's <em>public</em> keys
+    /// are resolved through <see cref="IDidKeyService"/> (or <see cref="IDidKeyBindingService"/>)
+    /// before DataProofs' synchronous JWS-verify / sender-key callbacks need them, and those callbacks
+    /// answer from the result. A cancelled <paramref name="ct"/> therefore ends the unpack with an
+    /// <see cref="OperationCanceledException"/> while a lookup is pending, provided the lookup itself
+    /// honours the token it is given.
     /// </remarks>
     /// <param name="packed">The packed DIDComm message.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -998,11 +997,11 @@ public sealed partial class DidCommClient
         var signerLookup = bindingContext.SignerLookup;
         var resolverCheck = BuildResolverAuthorizationPredicate();
 
-        // The recipient (secret-key) path is now fully async: ECDH key agreement runs through the
-        // KeyOperationResolver's opaque-or-extractable IEcdhKey handles, so the pre-1.1.0
-        // SyncSecretsAdapter sync-over-async bridge is gone. Sender/signer lookups stay sync — they are
-        // public-key DID resolutions and DataProofs' IJweSenderKeyResolver / JwsParser contracts for
-        // them are synchronous (not a secret-key path).
+        // Every key lookup is awaited with this call's token. The recipient (secret-key) path runs
+        // ECDH key agreement through the KeyOperationResolver's opaque-or-extractable IEcdhKey
+        // handles. The sender and signer public keys are resolved by the envelope layer before
+        // DataProofs' synchronous IJweSenderKeyResolver / JwsParser callbacks need them, and those
+        // callbacks answer from the result (EnvelopeReader.ParseJweAsync / VerifyJwsAsync).
         // The restricted shape supplies no sender or signer lookup: no DID a sender chose is resolved.
         var internalResult = await EnvelopeReader.UnpackAsync(
             packed, _keyOps,
