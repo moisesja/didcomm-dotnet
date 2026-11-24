@@ -57,6 +57,23 @@ internal sealed class ManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>The earliest instant a scheduled timer is due at, or <c>null</c> when none is scheduled (to move the clock one firing at a time).</summary>
+    public DateTimeOffset? NextDueAt
+    {
+        get
+        {
+            lock (_gate)
+                return _timers.Where(t => t.DueAt is not null).Select(t => t.DueAt).Min();
+        }
+    }
+
+    /// <summary>Whether a timer is scheduled whose relative due time was last set to exactly <paramref name="dueTime"/>.</summary>
+    public bool IsScheduled(TimeSpan dueTime)
+    {
+        lock (_gate)
+            return _timers.Any(t => t.DueAt is not null && t.DueTime == dueTime);
+    }
+
     /// <summary>How many timers created after <paramref name="mark"/> (a <see cref="Mark"/>) are scheduled to fire.</summary>
     public int ScheduledTimersSince(long mark)
     {
