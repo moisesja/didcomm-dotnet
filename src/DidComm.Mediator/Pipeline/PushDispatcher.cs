@@ -48,7 +48,7 @@ namespace DidComm.Mediator.Pipeline;
 /// recipient's next <c>delivery-request</c> (<c>Push-Failed</c>), never to be pushed again; what
 /// happens next depends on the answer. A 4xx other than 408 and 429 — the endpoint's definite "not
 /// this message" — moves on to the next message with no pause, so messages anyone stored ahead of a
-/// real one cannot hold it back (ADV-110-1a-4); an operation that met one and delivered nothing
+/// real one cannot hold it back (ADV-110-1a-4); an operation that met one and delivered nothing, live or direct,
 /// ends at its <see cref="MessagePickupOptions.MaxDeliveryBatch"/> bound without the yield, so a real
 /// message waits behind refused ones only when a whole run of them delivers nothing (more than
 /// <see cref="MessagePickupOptions.MaxDeliveryBatch"/> in a row): then until the next wake-up, or
@@ -606,7 +606,10 @@ internal sealed class PushDispatcher : IAsyncDisposable, IDisposable
                     return;
                 }
                 failed |= direct && directStep == DirectStep.Refused;
-                deliveredAny |= direct && directStep == DirectStep.Delivered;
+                // A delivery either way is progress: a session that came back during the run (a
+                // downgraded one that resumed) takes the pushes after a direct refusal, and the run
+                // still yields at its bound.
+                deliveredAny |= direct ? directStep == DirectStep.Delivered : live == LiveStep.Sent;
                 if (!(direct ? RecordDirect(grant, directStep, attempted) : RecordLive(live, attempted)))
                     return;
                 attempted = true;
