@@ -85,9 +85,11 @@ internal sealed class DeliveredMessageUnpacker
     // B − F, so a delivery of up to 100 fast failures starts every message (I-8).
     private const int SlowDivisor = 25;
 
-    // T0 = 30·B and Cap = 180·B (D-2).
+    // T0 = 30·B (D-2) and Cap = Q·B (QA1-1): with the longest pause as long as Q budgets, the
+    // memory can hold a whole mailbox's Q entries paused at once, even when a fetch of one learns
+    // one message per budget.
     private const int FirstPauseInBudgets = 30;
-    private const int LongestPauseInBudgets = 180;
+    private const int LongestPauseInBudgets = SlowMemory.EntriesPerPartition;
 
     // The scope of the overloads without one: their messages have no ids, so nothing is remembered.
     private static readonly DeliveryScope DefaultScope = new(string.Empty, string.Empty);
@@ -142,7 +144,7 @@ internal sealed class DeliveredMessageUnpacker
     /// </summary>
     internal TimeSpan SlowThreshold { get; }
 
-    /// <summary>The messages remembered as slow to open, per (mediator, mailbox); pauses of 30·B doubling up to 180·B (D-2).</summary>
+    /// <summary>The messages remembered as slow to open, per (mediator, mailbox); pauses of 30·B doubling up to Q·B = 256·B (D-2, QA1-1).</summary>
     internal SlowMemory Memory { get; }
 
     /// <summary>The reservations of host unpack calls: per container, and per (mediator, mailbox, sender).</summary>
