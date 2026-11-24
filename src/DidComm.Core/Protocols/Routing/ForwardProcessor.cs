@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DidComm.Consistency;
 using DidComm.Exceptions;
@@ -230,7 +232,7 @@ public sealed class ForwardProcessor
             throw new ConsistencyException(
                 $"Forward message carries {attachments.Count} attachments; this mediator relays exactly one packed payload per forward (FR-ROUTE-05). Re-send each payload in its own forward.");
 
-        var innerPayloadBytes = ExtractAttachmentBytes(attachments[0]);
+        var innerPayloadBytes = ExtractAttachmentBytes(attachments[0], _client.Options.MaxReceiveBytes);
         var expiresTime = unpacked.Message.ExpiresTime;
         // FR-ROUTE-10: resolve the hint to an absolute not-before once, on the mediator's clock —
         // here when the public overload is the receipt point, or earlier by the handler, which
@@ -291,8 +293,8 @@ public sealed class ForwardProcessor
             throw new ConsistencyException(
                 $"Forward message carries {attachments.Count} attachments; a forward addressed to this mediator must carry exactly one packed message (FR-ROUTE-05).");
         }
-        var inner = ExtractAttachmentBytes(attachments[0]);
-        return await _client.UnpackAnoncryptedPlaintextAsync(Encoding.UTF8.GetString(inner), ct).ConfigureAwait(false);
+        var inner = ExtractAttachmentText(attachments[0], _client.Options.MaxReceiveBytes);
+        return await _client.UnpackAnoncryptedPlaintextAsync(inner, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -332,17 +334,60 @@ public sealed class ForwardProcessor
     /// So bytes that are not a UTF-8 JSON object are not a message to relay. Passing them on would
     /// also break the next hop's WebSocket: a DIDComm message goes out as a text frame, and a
     /// receiver fails the whole connection on a text frame that is not UTF-8 (RFC 6455 §5.6, §8.1).
+    /// <para>
+    /// A <c>data.json</c> attachment is written straight to UTF-8 with the relaxed encoder the
+    /// library writes every DIDComm message with (<c>DidCommJson</c>), so a packed message this
+    /// library wrote comes back byte for byte, and any other comes back as equivalent JSON (a JWE or
+    /// JWS in JSON form reads the same either way). It is written into a pooled buffer and refused
+    /// the moment it is longer than <paramref name="maxBytes"/>, with the refusal an oversized message
+    /// gets (FR-API-06), so what is kept never passes the receive limit. While it writes a string the
+    /// encoder still escapes longer than it arrived (a control character, a character outside the
+    /// basic plane), the JSON writer borrows a scratch buffer sized for the worst case of that string:
+    /// up to about eight times the limit, briefly, returned before the next attachment is written.
+    /// </para>
     /// </remarks>
     /// <param name="attachment">The forward's single attachment.</param>
-    internal static byte[] ExtractAttachmentBytes(Messages.Attachment attachment)
-    {
-        if (attachment.Data.Json is JsonNode json)
-        {
-            if (json is not JsonObject)
-                throw new MalformedMessageException(NotADidCommMessage);
-            return Encoding.UTF8.GetBytes(json.ToJsonString());
-        }
+    /// <param name="maxBytes">The receive limit (<see cref="DidCommOptions.MaxReceiveBytes"/>): longer bytes are refused.</param>
+    /// <exception cref="MalformedMessageException">Not a DIDComm message (see above), or longer than <paramref name="maxBytes"/>.</exception>
+    /// <exception cref="ConsistencyException">Neither <c>data.json</c> nor <c>data.base64</c>.</exception>
+    internal static byte[] ExtractAttachmentBytes(Messages.Attachment attachment, long maxBytes)
+        => attachment.Data.Json is JsonNode json
+            ? WriteJsonAttachment(json, maxBytes, static written => written.ToArray())
+            : DecodeBase64Attachment(attachment, maxBytes);
 
+    /// <summary>
+    /// <see cref="ExtractAttachmentBytes"/> as the text an unpack reads: decoded once from the
+    /// written bytes, with no intermediate copy of them.
+    /// </summary>
+    /// <param name="attachment">The forward's single attachment.</param>
+    /// <param name="maxBytes">The receive limit (<see cref="DidCommOptions.MaxReceiveBytes"/>): longer bytes are refused.</param>
+    /// <exception cref="MalformedMessageException">Not a DIDComm message, or longer than <paramref name="maxBytes"/>.</exception>
+    /// <exception cref="ConsistencyException">Neither <c>data.json</c> nor <c>data.base64</c>.</exception>
+    internal static string ExtractAttachmentText(Messages.Attachment attachment, long maxBytes)
+        => attachment.Data.Json is JsonNode json
+            ? WriteJsonAttachment(json, maxBytes, static written => Encoding.UTF8.GetString(written))
+            : Encoding.UTF8.GetString(DecodeBase64Attachment(attachment, maxBytes));
+
+    /// <summary>What the caller makes of the written bytes, while they are still in the pooled buffer.</summary>
+    private delegate T WrittenBytesReader<T>(ReadOnlySpan<byte> written);
+
+    // The encoder the library writes DIDComm messages with (DidCommJson): a packed message this
+    // library wrote is written back byte for byte.
+    private static readonly JsonWriterOptions AttachmentWriterOptions = new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
+    private static T WriteJsonAttachment<T>(JsonNode json, long maxBytes, WrittenBytesReader<T> read)
+    {
+        if (json is not JsonObject)
+            throw new MalformedMessageException(NotADidCommMessage);
+        using var output = new CappedAttachmentBuffer(maxBytes);
+        // Disposing the writer flushes what it still holds into the buffer, where the cap is checked.
+        using (var writer = new Utf8JsonWriter(output, AttachmentWriterOptions))
+            json.WriteTo(writer);
+        return read(output.WrittenSpan);
+    }
+
+    private static byte[] DecodeBase64Attachment(Messages.Attachment attachment, long maxBytes)
+    {
         if (!string.IsNullOrEmpty(attachment.Data.Base64))
         {
             byte[] decoded;
@@ -364,6 +409,8 @@ public sealed class ForwardProcessor
             // payload is not one (#95 Q-7). The sender's mistake, not the mediator's fault.
             if (decoded.Length == 0)
                 throw new MalformedMessageException("Forward attachment 'data.base64' decodes to no bytes; there is no packed message to relay.");
+            if (decoded.Length > maxBytes)
+                throw Oversized(maxBytes);
             if (!Messages.DidCommWireShape.IsUtf8JsonObject(decoded))
                 throw new MalformedMessageException(NotADidCommMessage);
             return decoded;
@@ -371,6 +418,80 @@ public sealed class ForwardProcessor
 
         throw new ConsistencyException(
             "Forward attachment is missing both 'data.json' and 'data.base64'. The mediator has nothing to relay.");
+    }
+
+    /// <summary>The refusal an oversized message gets at unpack (FR-API-06), word for word.</summary>
+    /// <param name="maxBytes">The receive limit.</param>
+    private static MalformedMessageException Oversized(long maxBytes)
+        => new($"Packed message exceeds DidCommOptions.MaxReceiveBytes (FR-API-06). Limit={maxBytes} bytes.");
+
+    /// <summary>
+    /// The pooled buffer one <c>data.json</c> attachment is written into: refused with
+    /// <see cref="Oversized"/> as soon as more than the limit has been written. A writer asks for
+    /// room by its worst case before it knows the real length, so room is given (rented) whatever
+    /// the request; only what is written counts against the limit. Once refused, nothing more is
+    /// counted (the writer's own disposal flushes again on the way out).
+    /// </summary>
+    /// <param name="maxBytes">The receive limit.</param>
+    private sealed class CappedAttachmentBuffer(long maxBytes) : System.Buffers.IBufferWriter<byte>, IDisposable
+    {
+        private byte[] _buffer = System.Buffers.ArrayPool<byte>.Shared.Rent(4096);
+        private int _written;
+        private bool _refused;
+
+        /// <summary>What has been written so far.</summary>
+        public ReadOnlySpan<byte> WrittenSpan => _buffer.AsSpan(0, _written);
+
+        /// <inheritdoc />
+        public void Advance(int count)
+        {
+            if (_refused)
+                return;
+            ArgumentOutOfRangeException.ThrowIfNegative(count);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(count, _buffer.Length - _written);
+            _written += count;
+            if (_written > maxBytes)
+            {
+                _refused = true;
+                throw Oversized(maxBytes);
+            }
+        }
+
+        /// <inheritdoc />
+        public Memory<byte> GetMemory(int sizeHint = 0)
+        {
+            Ensure(sizeHint);
+            return _buffer.AsMemory(_written);
+        }
+
+        /// <inheritdoc />
+        public Span<byte> GetSpan(int sizeHint = 0)
+        {
+            Ensure(sizeHint);
+            return _buffer.AsSpan(_written);
+        }
+
+        private void Ensure(int sizeHint)
+        {
+            var needed = (long)_written + Math.Max(sizeHint, 1);
+            if (needed <= _buffer.Length)
+                return;
+            var size = Math.Min(Math.Max(needed, 2L * _buffer.Length), Array.MaxLength);
+            if (needed > size)
+                throw Oversized(maxBytes);
+            var next = System.Buffers.ArrayPool<byte>.Shared.Rent((int)size);
+            _buffer.AsSpan(0, _written).CopyTo(next);
+            System.Buffers.ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = next;
+        }
+
+        /// <inheritdoc />
+        public void Dispose()
+        {
+            System.Buffers.ArrayPool<byte>.Shared.Return(_buffer);
+            _buffer = Array.Empty<byte>();
+            _written = 0;
+        }
     }
 
     private (TimeSpan? Delay, DateTimeOffset? NotBefore) ResolveSchedule(Messages.Message message)

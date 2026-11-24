@@ -25,6 +25,7 @@ public sealed class OutboundEndpointGuard
 {
     private readonly OutboundEndpointPolicy _policy;
     private readonly Func<string, IPAddress[]> _resolveDns;
+    private readonly Func<string, CancellationToken, Task<IPAddress[]>>? _resolveDnsAsync;
 
     /// <summary>Initialize the guard.</summary>
     /// <param name="policy">The policy to enforce.</param>
@@ -34,6 +35,9 @@ public sealed class OutboundEndpointGuard
         ArgumentNullException.ThrowIfNull(policy);
         _policy = policy;
         _resolveDns = resolveDns ?? Dns.GetHostAddresses;
+        // A test's lookup seam answers the asynchronous check too.
+        if (resolveDns is not null)
+            _resolveDnsAsync = (host, _) => Task.FromResult(resolveDns(host));
     }
 
     /// <summary>
@@ -41,59 +45,132 @@ public sealed class OutboundEndpointGuard
     /// address. No-op when <see cref="OutboundEndpointPolicy.BlockPrivateNetworks"/> is <c>false</c>
     /// or the host is allowlisted. IP-literal hosts are classified directly; DNS names are resolved
     /// when <see cref="OutboundEndpointPolicy.ResolveDnsNames"/> is enabled and rejected if
-    /// <em>any</em> resolved address is private/reserved. The host is classified as it is sent on
-    /// the wire (<see cref="Uri.IdnHost"/>, after IDNA mapping), so a host written with look-alike
-    /// characters that maps to an IP literal (<c>127。0。0。1</c>) is classified as that literal.
+    /// <em>any</em> resolved address is private/reserved. A name that does not resolve, or that the
+    /// lookup refuses outright (longer than 255 characters), is refused too. The host is classified
+    /// as it is sent on the wire (<see cref="Uri.IdnHost"/>, after IDNA mapping), so a host written
+    /// with look-alike characters that maps to an IP literal (<c>127。0。0。1</c>) is classified as
+    /// that literal.
+    /// </summary>
+    /// <remarks>
+    /// The name lookup blocks the calling thread and takes no cancellation token. The library's own
+    /// sends use an asynchronous form of this check that honours the send's cancellation token.
+    /// </remarks>
+    /// <param name="endpoint">The fully resolved outbound endpoint URI.</param>
+    /// <exception cref="TransportException">The destination is blocked, or its name cannot be put in its wire form or resolved.</exception>
+    public void Validate(Uri endpoint)
+    {
+        if (HostToCheck(endpoint) is not { } host)
+            return;
+        if (IPAddress.TryParse(host, out var literal))
+        {
+            Check(endpoint, host, new[] { literal });
+            return;
+        }
+        if (!_policy.ResolveDnsNames)
+            return;
+
+        IPAddress[] candidates;
+        try
+        {
+            candidates = _resolveDns(host);
+        }
+        catch (Exception ex) when (ex is SocketException or ArgumentException)
+        {
+            throw LookupFailed(endpoint, host, ex);
+        }
+        Check(endpoint, host, candidates);
+    }
+
+    /// <summary>
+    /// <see cref="Validate"/>, with the name looked up asynchronously: the same refusals, and a
+    /// cancellation of <paramref name="ct"/> ends the wait for the lookup at once.
     /// </summary>
     /// <param name="endpoint">The fully resolved outbound endpoint URI.</param>
-    public void Validate(Uri endpoint)
+    /// <param name="ct">The send's cancellation token.</param>
+    /// <exception cref="TransportException">The destination is blocked, or its name cannot be put in its wire form or resolved.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="ct"/> was cancelled during the lookup.</exception>
+    internal async ValueTask ValidateAsync(Uri endpoint, CancellationToken ct)
+    {
+        if (HostToCheck(endpoint) is not { } host)
+            return;
+        if (IPAddress.TryParse(host, out var literal))
+        {
+            Check(endpoint, host, new[] { literal });
+            return;
+        }
+        if (!_policy.ResolveDnsNames)
+            return;
+
+        IPAddress[] candidates;
+        try
+        {
+            var resolve = _resolveDnsAsync ?? _policy.ResolveDnsAsync ?? Dns.GetHostAddressesAsync;
+            var lookup = resolve(host, ct);
+            if (!lookup.IsCompleted)
+            {
+                // The wait ends with the token, whether or not the lookup itself does; a lookup left
+                // behind that fails later is observed here, never by the finalizer.
+                _ = lookup.ContinueWith(static t => _ = t.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            candidates = await lookup.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is SocketException or ArgumentException)
+        {
+            throw LookupFailed(endpoint, host, ex);
+        }
+        Check(endpoint, host, candidates);
+    }
+
+    /// <summary>
+    /// The host of <paramref name="endpoint"/> in its wire form when it has to be classified;
+    /// <c>null</c> when the policy lets it through as it is (blocking off, an empty host, an
+    /// allow-listed host).
+    /// </summary>
+    /// <param name="endpoint">The endpoint.</param>
+    private string? HostToCheck(Uri endpoint)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
         if (!_policy.BlockPrivateNetworks)
-            return;
+            return null;
 
         // The wire form: what the HTTP stack writes in the request line or the CONNECT authority, and
         // what a proxy acts on. DnsSafeHost keeps the written Unicode form, which can hide a literal.
-        var host = NormalizeHost(endpoint.IdnHost);
+        var host = HostForm(endpoint, static e => e.IdnHost);
         if (string.IsNullOrEmpty(host) || _policy.AllowedHosts.Contains(host)
-            || _policy.AllowedHosts.Contains(NormalizeHost(endpoint.DnsSafeHost)))
+            || _policy.AllowedHosts.Contains(HostForm(endpoint, static e => e.DnsSafeHost)))
         {
             // An entry matches either spelling of the same host (an ASCII host is spelled the same
             // both ways; a Unicode entry keeps matching its written form).
-            return;
+            return null;
         }
+        return host;
+    }
 
-        IPAddress[] candidates;
-        if (IPAddress.TryParse(host, out var literal))
-        {
-            candidates = new[] { literal };
-        }
-        else if (_policy.ResolveDnsNames)
-        {
-            try
-            {
-                candidates = _resolveDns(host);
-            }
-            catch (SocketException ex)
-            {
-                throw new TransportException(
-                    $"Refusing to send to '{endpoint}': host '{host}' did not resolve ({ex.SocketErrorCode}).",
-                    ex,
-                    httpStatusCode: null,
-                    scheme: endpoint.Scheme);
-            }
-        }
-        else
-        {
-            return;
-        }
-
+    /// <summary>Refuse <paramref name="endpoint"/> when any of <paramref name="candidates"/> is private or reserved.</summary>
+    /// <param name="endpoint">The endpoint.</param>
+    /// <param name="host">Its host, in wire form.</param>
+    /// <param name="candidates">The literal, or the addresses the name resolved to.</param>
+    private static void Check(Uri endpoint, string host, IPAddress[] candidates)
+    {
         foreach (var address in candidates)
         {
             if (IsPrivateOrReserved(address))
                 throw Blocked(endpoint, host, address, endpoint.Scheme);
         }
     }
+
+    /// <summary>The refusal of a name the lookup could not resolve (<see cref="SocketException"/>) or would not take (<see cref="ArgumentException"/>).</summary>
+    /// <param name="endpoint">The endpoint.</param>
+    /// <param name="host">Its host, in wire form.</param>
+    /// <param name="ex">What the lookup threw.</param>
+    private static TransportException LookupFailed(Uri endpoint, string host, Exception ex) =>
+        ex is SocketException socket
+            ? new TransportException(
+                $"Refusing to send to '{endpoint}': host '{host}' did not resolve ({socket.SocketErrorCode}).",
+                socket,
+                httpStatusCode: null,
+                scheme: endpoint.Scheme)
+            : HostNotUsable(endpoint, ex);
 
     /// <summary>
     /// Resolve <paramref name="endpoint"/>, drop any private/reserved addresses (honoring the
@@ -209,6 +286,33 @@ public sealed class OutboundEndpointGuard
 
         return false;
     }
+
+    /// <summary>
+    /// One spelling of <paramref name="endpoint"/>'s host, normalized; a host that cannot be put in
+    /// that form is refused with <see cref="HostNotUsable"/>.
+    /// </summary>
+    /// <param name="endpoint">The endpoint.</param>
+    /// <param name="form">Reads the spelling (<see cref="Uri.IdnHost"/> or <see cref="Uri.DnsSafeHost"/>).</param>
+    private static string HostForm(Uri endpoint, Func<Uri, string> form)
+    {
+        try
+        {
+            return NormalizeHost(form(endpoint));
+        }
+        catch (Exception ex) when (ex is FormatException or ArgumentException)
+        {
+            throw HostNotUsable(endpoint, ex);
+        }
+    }
+
+    /// <summary>
+    /// The refusal of a destination host name the guard cannot put in its wire form or look up. The
+    /// text names no host: such a name is unbounded and comes from a DID document or a wire message.
+    /// </summary>
+    /// <param name="endpoint">The endpoint (only its scheme is used).</param>
+    /// <param name="inner">What refused the name.</param>
+    private static TransportException HostNotUsable(Uri endpoint, Exception inner) =>
+        new("Refusing to send: the destination host name cannot be looked up.", inner, httpStatusCode: null, scheme: endpoint.Scheme);
 
     // Strip a single trailing dot (the DNS root label). "127.0.0.1." would otherwise fail the
     // IP-literal check and be treated as a DNS name, and "example.com." would not match an

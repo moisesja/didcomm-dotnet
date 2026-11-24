@@ -686,7 +686,7 @@ public sealed partial class DidCommClient
             // therefore attacker-influenced. Reject private / loopback / metadata destinations
             // before POSTing the packed envelope. The ServiceEndpointOverride branch above is
             // caller-supplied and trusted, so it intentionally skips this gate.
-            new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpointUri);
+            await new OutboundEndpointGuard(_options.OutboundEndpointPolicy).ValidateAsync(endpointUri, ct).ConfigureAwait(false);
         }
 
         // JC-18: connection affinity only for an authcrypt send delivered directly (no forward
@@ -868,7 +868,7 @@ public sealed partial class DidCommClient
                 throw new TransportException(QueueTransport.RefusalMessage, httpStatusCode: null, scheme: "didcomm");
 
             // Always: a relay target is attacker-influenced (JC-20).
-            new OutboundEndpointGuard(_options.OutboundEndpointPolicy).Validate(endpoint);
+            await new OutboundEndpointGuard(_options.OutboundEndpointPolicy).ValidateAsync(endpoint, ct).ConfigureAwait(false);
 
             // A bounded vocabulary (https/wss/...), never the endpoint host or path (NFR-04).
             activity?.SetTag(DidCommDiagnostics.TransportSchemeTag, endpoint.Scheme);
@@ -1014,7 +1014,7 @@ public sealed partial class DidCommClient
 
         // from_prior names an issuer DID to resolve; the restricted shape refuses it before that.
         if (anoncryptOfPlaintextOnly && message.FromPrior is not null)
-            throw new MalformedMessageException("This layer must not carry 'from_prior'.");
+            throw new MalformedMessageException("This layer must not carry 'from_prior'.") { RefusedShape = true };
 
         if (message.From is not null)
             _keyService.RejectUnsupportedMethod(message.From);

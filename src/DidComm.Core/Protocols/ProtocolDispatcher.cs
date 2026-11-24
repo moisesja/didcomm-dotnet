@@ -420,6 +420,18 @@ public sealed class ProtocolDispatcher : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Whether this dispatcher has a handler for messages of type <paramref name="messageType"/>:
+    /// the registry lookup <see cref="DispatchAsync(UnpackResult, DidCommClient?, DidCommOptions, Task, IReturnRouteSession?, CancellationToken)"/>
+    /// makes for such a message. The registry-aware receiving endpoints ask it before they open a
+    /// <c>forward</c> re-wrapped for this agent (#110, owner decision OD-3): with a handler for
+    /// forwards registered — the routing role, whose <see cref="Routing.ForwardHandler"/> opens a
+    /// forward addressed to its own DID under its own rules — every forward goes to that handler as
+    /// it arrived. Reads state only.
+    /// </summary>
+    /// <param name="messageType">The message's <c>type</c>.</param>
+    internal bool HasHandlerFor(string? messageType) => _registry.TryResolve(messageType, out _);
+
+    /// <summary>
     /// Test/diagnostic seam: complete when every observation enqueued before this call has been
     /// delivered to its observer. Observer delivery is otherwise asynchronous and off the dispatch
     /// path, so tests use this to make observation deterministic. A never-completing observer will

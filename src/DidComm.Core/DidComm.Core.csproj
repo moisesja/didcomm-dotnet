@@ -46,8 +46,11 @@
     <InternalsVisibleTo Include="DidComm.Mediator.Client" />
     <InternalsVisibleTo Include="DidComm.Mediator.Tests" />
     <InternalsVisibleTo Include="DidComm.TestSupport" />
-    <!-- IInboundReceivingTransport only (#96): the mediator client asks the transport whether pushes reach the inbound consumer. -->
+    <!-- IInboundReceivingTransport (#96): the mediator client asks the transport whether pushes reach the inbound
+         consumer. OutboundEndpointGuard.ValidateAsync (#110): the pre-send check with the send's cancellation token. -->
     <InternalsVisibleTo Include="DidComm.Transports.WebSocket" />
+    <!-- OutboundEndpointGuard.ValidateAsync (#110): the per-hop destination check through a TrustedProxy. -->
+    <InternalsVisibleTo Include="DidComm.Transports.Http" />
   </ItemGroup>
 
 </Project>

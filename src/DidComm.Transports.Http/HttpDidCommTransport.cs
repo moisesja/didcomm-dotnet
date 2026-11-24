@@ -11,17 +11,32 @@ namespace DidComm.Transports.Http;
 /// <summary>
 /// HTTPS-flavored <see cref="IDidCommTransport"/> (PRD §9.2 / FR-TRN-04..08). Sends one packed
 /// envelope per <c>HTTP POST</c>; treats any 2xx as success (FR-TRN-05); follows 307 redirects
-/// only (FR-TRN-06) and refuses 301/308 + non-2xx with <see cref="TransportException"/>. The
-/// underlying <see cref="HttpClient"/> chain carries a Polly resilience pipeline
-/// (retry + circuit-breaker + timeout — FR-TRN-08) injected via
-/// <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/>.
+/// only (FR-TRN-06) and refuses 301/308 + non-2xx with <see cref="TransportException"/>; and
+/// retries, breaks the circuit and times out each attempt through its own Polly resilience
+/// pipeline (FR-TRN-08), built from <see cref="HttpTransportOptions"/>.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Where the connection guarantees come from.</b> The transport sends through the named
+/// <c>"didcomm"</c> client of the <see cref="IHttpClientFactory"/> it is given. Three guarantees
+/// belong to that client's handler as <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/>
+/// configures it, not to this class: only 307 redirects are followed (the handler never follows
+/// one on its own), every connection is checked against the
+/// <see cref="HttpTransportOptions.OutboundEndpointPolicy"/> when it opens (the first and each
+/// followed 307), and no proxy from the environment is used (FR-TRN-13). Register the transport
+/// with <c>UseHttpTransport()</c> to get them. A transport built by hand with the public
+/// constructor gets whatever its client does: over a client the host set up another way (for
+/// example <c>AddHttpClient()</c> with its default handler, which follows 301, 302 and 308
+/// redirects itself, checks no address and uses the environment's proxy), those redirects are
+/// followed before this class sees them and no address is checked when a connection opens.
+/// </para>
+/// <para>
 /// Delivery-only (FR-TRN-03) unless the request asks for an in-band response
 /// (<see cref="TransportRequest.MaxResponseBytes"/>, set by <c>DidCommClient.SendAsync</c> for a
 /// return-route send, FR-RR-07): a final <c>200</c> with a DIDComm <c>Content-Type</c> then has its
 /// body read, capped and time-bounded, into <see cref="TransportResult.ResponsePayload"/>. Any other
 /// response body is never read.
+/// </para>
 /// <para>
 /// Its own log lines carry the scheme and the status, never the endpoint URI: an endpoint can be a
 /// secret (a capability URL) or identify a recipient. The <see cref="IHttpClientFactory"/> request
@@ -48,14 +63,19 @@ public sealed class HttpDidCommTransport : IDidCommTransport
     private readonly OutboundEndpointGuard? _destinationCheck;
 
     /// <summary>Initialize the transport with a factory and bound options.</summary>
-    /// <param name="httpClientFactory">Factory for the named <c>"didcomm"</c> HTTP client.</param>
+    /// <param name="httpClientFactory">Factory for the named <c>"didcomm"</c> HTTP client. The 307-only redirect rule, the connect-time address check and direct connections come from that client's handler as <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/> configures it; with a client set up another way the transport gets whatever that client does (see the class remarks).</param>
     /// <param name="options">Bound <see cref="HttpTransportOptions"/>.</param>
     /// <param name="logger">Optional logger; pass <see cref="NullLogger{T}.Instance"/> outside DI.</param>
     /// <remarks>
+    /// Prefer <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/>, which registers the
+    /// transport together with the client it relies on. Built by hand, the transport is only as
+    /// careful as the <c>"didcomm"</c> client of <paramref name="httpClientFactory"/>.
+    /// <para>
     /// With <see cref="HttpTransportOptions.TrustedProxy"/> set, the destination check uses
     /// <see cref="HttpTransportOptions.OutboundEndpointPolicy"/>, or the default policy when it is
     /// unset (built this way, the transport does not see <c>DidCommOptions</c>; the
     /// <see cref="HttpDidCommBuilderExtensions.UseHttpTransport"/> registration inherits it).
+    /// </para>
     /// </remarks>
     /// <exception cref="InvalidOperationException"><see cref="HttpTransportOptions.TrustedProxy"/> is set but invalid.</exception>
     public HttpDidCommTransport(
@@ -129,7 +149,8 @@ public sealed class HttpDidCommTransport : IDidCommTransport
         {
             // FR-TRN-13: through a TrustedProxy, vet this hop's destination before anything is sent.
             // Deterministic, so it is thrown before the pipeline: never retried, never counted.
-            _destinationCheck?.Validate(currentUri);
+            if (_destinationCheck is not null)
+                await _destinationCheck.ValidateAsync(currentUri, ct).ConfigureAwait(false);
 
             // Build a fresh HttpRequestMessage on every Polly attempt — the BCL HttpClient
             // refuses to re-send the same instance, so the retry loop would otherwise fail
