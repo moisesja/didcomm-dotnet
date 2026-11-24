@@ -22,6 +22,25 @@ public sealed class PickupClientSlowSenderRt1CTests(ITestOutputHelper output)
     private static readonly TimeSpan ShortLease = TimeSpan.FromSeconds(10);
 
     /// <summary>
+    /// Ninety-nine messages (the mediator's quota, less Alice's) name one sender's key; that sender's
+    /// lookup takes <paramref name="ticksBelow"/> ticks less than τ, then each fails to decrypt.
+    /// Alice's message follows. A fetch-until-drained loop reaches it within
+    /// <c>ceil(99 / min(limit, 16))</c> budgets of the client's time, the bound for the same number
+    /// of messages that never open.
+    /// </summary>
+    [Theory(Skip = "RT1 defect: a fetch loop at a short lease does not reach a message behind failures that each take just under the slow threshold")]
+    [InlineData(4, 1)]
+    [InlineData(4, 1_000_000)]
+    [InlineData(10, 1)]
+    [InlineData(10, 1_000_000)]
+    public async Task A_fetch_loop_at_a_short_lease_reaches_the_message_behind_failures_just_under_the_slow_threshold(int limit, int ticksBelow)
+    {
+        var result = await RunAsync(limit, lookup: Threshold - TimeSpan.FromTicks(ticksBelow));
+
+        result.Reached.Should().BeTrue("Alice's message is reached within {0} of the client's time", result.Bound);
+    }
+
+    /// <summary>
     /// The same queue with a lookup of exactly τ: each message is remembered after one opening, and
     /// the loop reaches Alice's message within the bound.
     /// </summary>

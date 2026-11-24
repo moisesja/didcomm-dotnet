@@ -26,6 +26,20 @@ public sealed class LiveStreamSlowSenderRt1CTests(ITestOutputHelper output)
     private const int Junk = 99;
     private static readonly TimeSpan Horizon = TimeSpan.FromMinutes(20);
 
+    /// <summary>
+    /// Ninety-nine messages that each fail <paramref name="ticksBelow"/> ticks before τ, then Alice's:
+    /// at a 10 s lease the stream yields Alice's message within twenty minutes of simulated time.
+    /// </summary>
+    [Theory(Skip = "RT1 defect: the live stream at a short lease does not reach a queued message behind failures that each take just under the slow threshold")]
+    [InlineData(1)]
+    [InlineData(1_000_000)]
+    public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_just_under_the_slow_threshold(int ticksBelow)
+    {
+        var result = await RunAsync(TimeSpan.FromSeconds(10), late: Rt1CExchange.Threshold - TimeSpan.FromTicks(ticksBelow));
+
+        result.Reached.Should().BeTrue("the queued message is reached within {0}", Horizon);
+    }
+
     /// <summary>The same queue, each failing at exactly τ: every one is remembered, and the honest message is reached.</summary>
     [Fact]
     public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_at_the_slow_threshold()
