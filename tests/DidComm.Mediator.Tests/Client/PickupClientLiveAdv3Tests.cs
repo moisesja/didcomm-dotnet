@@ -239,7 +239,7 @@ public sealed class PickupClientLiveAdv3Tests
         foreach (var id in new[] { "p1", "p2", "p3", "p4", "p5" })
             exchange.Duplicates.Contains(L, DefaultOutcome($"ok:{id}").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
-        SpinWait.SpinUntil(() => exchange.Clock.ScheduledTimers == 0 && exchange.Budgeted!.Abandoned == 0, PickupTest.Timeout)
+        SpinWait.SpinUntil(() => exchange.Clock.ScheduledTimers == 0 && exchange.Budgeted!.Reserved == 0, PickupTest.Timeout)
             .Should().BeTrue("the budget's and the shares' timers are disposed and every unpack let its slot go");
     }
 
