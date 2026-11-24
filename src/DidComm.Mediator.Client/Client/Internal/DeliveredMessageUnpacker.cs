@@ -35,8 +35,18 @@ namespace DidComm.Mediator.Client.Internal;
 /// <item><description>Its sender is read from the outer envelope (<see cref="SenderPartition"/>) and one host call is reserved for it (I-1, I-2). A refusal fails it at once ("unpack capacity exhausted").</description></item>
 /// <item><description>Its share is <c>min(B − e, max(S(n), F, (B − e) / ceil((n − p) / 4)))</c>, with S(n) = <see cref="ShareOf"/> (I-7). So every message that starts has at least F.</description></item>
 /// <item><description>Under the delivery's lock, and only while the delivery is open, its host call is created as a thread-pool work item holding only the unpack step, the packed text and the share's token (I-3, I-4). A call whose token is cancelled before it runs never runs.</description></item>
-/// <item><description>The worker waits for the call through its share. Opened: a success. Failed: a failure. Out of its share: a failure, and the call is let go; it keeps its reservation until it ends.</description></item>
+/// <item><description>The worker waits for the call through its share. Opened: a success. Failed: a failure. Cut at its share: a failure, and the call is let go; it keeps its reservation until it ends.</description></item>
 /// </list>
+/// <para>
+/// <strong>Cut only if others wait (owner decision A1).</strong> When a message's share ends, the
+/// delivery decides before any host code sees a cancellation. The message is cut only if another
+/// message of the delivery is not yet taken and could still start (the start rule: e ≤ B − F), or if
+/// a take was refused for its partition or for the container since it was reserved (a message waits
+/// for the reservation it holds). Otherwise it keeps the rest of the budget: it ends on its own, at
+/// the budget's end, or when a later refusal for its partition (or for the container) cuts it
+/// (<see cref="UnpackReservations"/>). The time-left share and its floors are unchanged. The cost: a
+/// delivery whose last messages never open lasts its whole budget, which is still inside the lease.
+/// </para>
 /// <para>
 /// <strong>The end of a delivery (I-5).</strong> The first of "every message ended" and "the budget
 /// ended" closes the delivery, under one lock. The budget is linked to the caller's token and to the
@@ -49,7 +59,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// <strong>What is remembered (I-9).</strong> A message whose host call ran and did not open is
 /// struck when the call started after the budget did and ran for at least <see cref="SlowThreshold"/>
-/// until its outcome was decided: by its own failure, by its share's end, or by the budget's end.
+/// until its outcome was decided: by its own failure, by its cut, or by the budget's end.
 /// A message that opens is forgotten. Nothing is written for a refusal, a message that did not
 /// start, a call whose token was cancelled before its work item ran (it never runs), a malformed
 /// message, or a message still running when the caller cancelled or the shutdown came. Whoever records an outcome makes its write, and every write is made before the delivery's
@@ -440,17 +450,19 @@ internal sealed class DeliveredMessageUnpacker
                     continue;
                 }
 
-                // This message's share (I-7): its own guarded deadline, linked to the budget, so a slow
-                // message gives up its worker and the messages behind it get their turn.
+                // This message's share (I-7): its own deadline, linked to the budget. When its time is
+                // up the message is cut only if another message waits for a worker or for its
+                // reservation (A1, OnShareDue); otherwise it keeps the rest of the budget.
                 var share = _owner.ShareAt(_order.Length, position, elapsed);
-                GuardedDeadline? deadline = null;
+                ShareDeadline? deadline = null;
                 CancellationToken shareToken;
                 long startedAt;
                 HostCall? call = null;
                 Task<DeliveredUnpack>? work = null;
                 try
                 {
-                    deadline = new GuardedDeadline(_owner.Time, share, _budgetToken);
+                    var taken = reservation;
+                    deadline = new ShareDeadline(_owner.Time, share, _budgetToken, due => OnShareDue(due, taken));
                     shareToken = deadline.Token;
                     startedAt = _owner.Time.GetTimestamp();
 
@@ -512,8 +524,9 @@ internal sealed class DeliveredMessageUnpacker
                 }
                 catch (OperationCanceledException) when (shareToken.IsCancellationRequested)
                 {
-                    // The message's share ran out before the budget: the call is let go and keeps
-                    // its reservation until it ends.
+                    // The message was cut before the budget ended (its share ended while another
+                    // message waited, or a refusal cut it, A1): the call is let go and keeps its
+                    // reservation until it ends.
                     ReleaseShare(deadline);
                     var cut = _owner.Time.GetTimestamp();
                     if (!Complete(index, OutOfShare(_requestId, share), call.Ran && _owner.WasSlow(_budgetStart, startedAt, cut) ? MemoryWrite.Strike : MemoryWrite.None))
@@ -539,6 +552,28 @@ internal sealed class DeliveredMessageUnpacker
             }
         }
 
+        // A1, on the share's timer thread, before any host code sees a cancellation: the message is
+        // cut at its share only while another message of this delivery is not yet taken and could
+        // still start (I-6), or when a take was refused for its partition or for the container since
+        // it was reserved (something waits behind it). Otherwise it is extended: it keeps running
+        // until the budget ends, unless a later refusal for its partition or the container cuts it.
+        private void OnShareDue(ShareDeadline share, UnpackReservations.Reservation reservation)
+        {
+            var elapsed = Elapsed();
+            bool open, waiting;
+            lock (_gate)
+            {
+                open = _ending == Ending.Open;
+                waiting = open && _next < _order.Length;
+            }
+            if (!open)
+                return; // the budget's end, the caller or the shutdown decides
+            if (waiting && elapsed <= _owner.Budget - _owner.Floor)
+                share.Cut();
+            else if (!reservation.TryExtend(share.Source))
+                share.Cut();
+        }
+
         // e: the time since the budget started, read once, clamped to [0, B] (a clock that steps
         // back reads 0; one that jumps reads B).
         private TimeSpan Elapsed()
@@ -552,7 +587,7 @@ internal sealed class DeliveredMessageUnpacker
         // A share whose token was cancelled — its timer, its budget, or the caller — may be running
         // its callbacks on this very thread, inside that Cancel(): on these paths it is disposed
         // later, on the pool. (The success and failure paths dispose their share directly.)
-        private static void ReleaseShare(GuardedDeadline share)
+        private static void ReleaseShare(ShareDeadline share)
             => ThreadPool.UnsafeQueueUserWorkItem(static deadline => deadline.Dispose(), share, preferLocal: false);
 
         // Record one outcome and make its memory write; the last outcome closes the delivery. False

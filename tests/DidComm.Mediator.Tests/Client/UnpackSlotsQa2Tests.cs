@@ -427,7 +427,7 @@ public sealed class UnpackSlotsQa2Tests
     /// <summary>How a delivery ends while one of its host calls keeps running.</summary>
     public enum Ending
     {
-        /// <summary>The call is cut at its share; the rest of the delivery opens.</summary>
+        /// <summary>The call is cut at its share while another message waits for a worker (A1); the rest of the delivery opens.</summary>
         ShareCut,
 
         /// <summary>The budget runs out.</summary>
@@ -462,10 +462,16 @@ public sealed class UnpackSlotsQa2Tests
         using var gate = new ManualResetEventSlim(false);
         using var entered = new SemaphoreSlim(0);
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var busy = new Busy();
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
-        var unpacker = new DeliveredMessageUnpacker((text, _) =>
+        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
         {
+            if (text.StartsWith("busy", StringComparison.Ordinal))
+            {
+                busy.Calls.Enter(text, ct);
+                return busy.Release.Task.ContinueWith(_ => UnpackFakes.Opened(text), TaskScheduler.Default);
+            }
             if (!text.StartsWith("kept", StringComparison.Ordinal))
                 return Task.FromResult(UnpackFakes.Opened(text));
             entered.Release();
@@ -478,7 +484,7 @@ public sealed class UnpackSlotsQa2Tests
         bool kept;
         try
         {
-            refs = await OpenAndEndAsync(unpacker, time, entered, ending, shutdown, caller);
+            refs = await OpenAndEndAsync(unpacker, time, entered, ending, shutdown, caller, busy);
             unpacker.Reserved.Should().Be(1, "the call still runs and keeps its reservation");
             SpinWait.SpinUntil(() => time.ScheduledTimers == 0 && unpacker.Opening == 0, RealTime).Should().BeTrue("the delivery left no timer behind");
             kept = refs.Any(r => !BecomesUnreachable(r));
@@ -487,25 +493,41 @@ public sealed class UnpackSlotsQa2Tests
         {
             gate.Set();
             never.TrySetCanceled();
+            busy.Release.TrySetResult();
         }
         SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
         refs.Should().OnlyContain(r => BecomesUnreachable(r), "the control: the test holds nothing of the delivery");
         kept.Should().BeFalse("a host call that outlives its delivery references only the unpack step, its text and its token ({0})", ending);
     }
 
-    // A delivery of five: "kept-0", whose call outlives the delivery, and four that open at once. It
-    // ends the given way; only weak references leave this frame.
-    private static async Task<WeakReference[]> OpenAndEndAsync(DeliveredMessageUnpacker unpacker, ManualTimeProvider time, SemaphoreSlim entered, Ending ending, CancellationTokenSource shutdown, CancellationTokenSource caller)
+    // The three calls that keep the other workers busy in the ShareCut ending, until released.
+    private sealed class Busy
     {
-        var (messages, other, settled) = Start(unpacker);
+        public HostCallLog Calls { get; } = new();
+
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    }
+
+    // A delivery of five: "kept-0", whose call outlives the delivery, and four that open at once. It
+    // ends the given way; only weak references leave this frame. For the ShareCut ending three of the
+    // others keep the other workers busy until released, so the fifth still waits for a worker when
+    // kept-0's share ends (A1: it is cut only while another message waits).
+    private static async Task<WeakReference[]> OpenAndEndAsync(DeliveredMessageUnpacker unpacker, ManualTimeProvider time, SemaphoreSlim entered, Ending ending, CancellationTokenSource shutdown, CancellationTokenSource caller, Busy busy)
+    {
+        var (messages, other, settled) = Start(unpacker, busyOthers: ending == Ending.ShareCut);
         var batch = unpacker.UnpackAllAsync(new DeliveryScope(M1, Bob), messages, "request-1", ending == Ending.Caller ? caller.Token : default);
         (await entered.WaitAsync(RealTime)).Should().BeTrue();
-        SpinWait.SpinUntil(() => unpacker.Settled == settled + 4, RealTime).Should().BeTrue("the four others opened");
+        if (ending == Ending.ShareCut)
+            await busy.Calls.WaitForAsync(3, RealTime);
+        else
+            SpinWait.SpinUntil(() => unpacker.Settled == settled + 4, RealTime).Should().BeTrue("the four others opened");
         var refs = new List<WeakReference> { new(messages), new(other) };
         switch (ending)
         {
             case Ending.ShareCut:
-                time.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5)); // its share, half the budget
+                time.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5)); // its share, half the budget, with the fifth still waiting
+                SpinWait.SpinUntil(() => unpacker.Settled == settled + 2, RealTime).Should().BeTrue("kept-0 was cut and the fifth opened");
+                busy.Release.TrySetResult();
                 break;
             case Ending.Budget:
                 time.Advance(Budget);
@@ -534,15 +556,16 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static (DeliveredInput[] Messages, byte[] Other, long Settled) Start(DeliveredMessageUnpacker unpacker)
+    private static (DeliveredInput[] Messages, byte[] Other, long Settled) Start(DeliveredMessageUnpacker unpacker, bool busyOthers)
     {
-        var other = Encoding.UTF8.GetBytes("honest-1");
+        var name = busyOthers ? "busy" : "honest";
+        var other = Encoding.UTF8.GetBytes(name + "-1");
         var messages = new[]
         {
             new DeliveredInput("q-0", Encoding.UTF8.GetBytes("kept-0")),
             new DeliveredInput("q-1", other),
-            new DeliveredInput("q-2", Encoding.UTF8.GetBytes("honest-2")),
-            new DeliveredInput("q-3", Encoding.UTF8.GetBytes("honest-3")),
+            new DeliveredInput("q-2", Encoding.UTF8.GetBytes(name + "-2")),
+            new DeliveredInput("q-3", Encoding.UTF8.GetBytes(name + "-3")),
             new DeliveredInput("q-4", Encoding.UTF8.GetBytes("honest-4")),
         };
         return (messages, other, unpacker.Settled);

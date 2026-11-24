@@ -371,10 +371,11 @@ public sealed class SlowSenderFetchQa1Tests
 
     /// <summary>
     /// Either side of the floor, the other side: an honest message first in a fetch of 100 whose 99
-    /// others fail at once, its lookup taking 5.1 s. The 99 take no time, so most of the budget is
-    /// left: it opens, and it is not remembered.
+    /// others fail at once, its lookup taking 5.1 s. The 99 take no time, so when its share (the
+    /// floor) ends no other message waits: it keeps the rest of the budget (owner decision A1), opens,
+    /// and is not remembered.
     /// </summary>
-    [Theory(Skip = "QA defect: an honest message first among fast failures is cut at the floor while most of the budget is left, and is then remembered")]
+    [Theory]
     [InlineData(100)]
     [InlineData(13)]
     public async Task An_honest_sender_just_over_the_floor_first_among_fast_failures_opens_while_most_of_the_budget_is_left(int limit)

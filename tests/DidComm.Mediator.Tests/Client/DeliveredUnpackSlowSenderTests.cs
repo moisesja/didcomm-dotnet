@@ -59,9 +59,9 @@ public sealed class DeliveredUnpackSlowSenderTests
     /// T3 (I-6): a message taken when less than the floor of the budget is left does not start; one
     /// taken with exactly the floor left does. Seventeen stalling messages under 20 s (floor 5 s):
     /// rounds start at 0, 5 and 10 s; one of the third round fails on its own at 12 s, so its worker
-    /// starts the thirteenth message then (share 5 s, to 17 s); the rest of the third round end at
-    /// 15 s and their workers start the last three with exactly 5 s left. At 17 s the thirteenth
-    /// message's worker takes the seventeenth with 3 s left: it fails as out of time before its
+    /// starts the thirteenth message then; the rest of the third round are cut at 15 s (messages still
+    /// wait) and their workers start three more with exactly 5 s left. The thirteenth fails on its own
+    /// at 16 s, and its worker takes the seventeenth with 4 s left: it fails as out of time before its
     /// turn, and its host code never runs.
     /// </summary>
     [Fact]
@@ -69,11 +69,12 @@ public sealed class DeliveredUnpackSlowSenderTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
+        var failsAfter = new Dictionary<string, TimeSpan> { ["s-8"] = TimeSpan.FromSeconds(2), ["s-12"] = TimeSpan.FromSeconds(4) };
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
-            if (text == "s-8")
+            if (failsAfter.TryGetValue(text, out var after))
             {
-                var delay = Task.Delay(TimeSpan.FromSeconds(2), time, ct);
+                var delay = Task.Delay(after, time, ct);
                 using (calls.Enter(text, ct))
                     await delay;
                 throw new CryptoException("JWE could not be decrypted.");
@@ -92,14 +93,14 @@ public sealed class DeliveredUnpackSlowSenderTests
         await calls.WaitForAsync(12, RealTime);
         time.Advance(TimeSpan.FromSeconds(2)); // 12 s: s-8 fails, s-12 starts
         await calls.WaitForAsync(13, RealTime);
-        time.Advance(TimeSpan.FromSeconds(3)); // 15 s: s-13..s-15 start with exactly the floor left
+        time.Advance(TimeSpan.FromSeconds(3)); // 15 s: s-9..s-11 are cut, s-13..s-15 start with exactly the floor left
         await calls.WaitForAsync(16, RealTime);
-        time.Advance(TimeSpan.FromSeconds(2)); // 17 s: s-12's share ends; s-16 is taken
+        time.Advance(TimeSpan.FromSeconds(1)); // 16 s: s-12 fails; s-16 is taken
         SpinWait.SpinUntil(() => unpacker.Settled >= 14 || calls.Count > 16, RealTime).Should().BeTrue();
 
         calls.Count.Should().Be(16, "the seventeenth message was taken with less than the floor left");
         calls.Labels.Should().NotContain("s-16");
-        time.Advance(TimeSpan.FromSeconds(3));
+        time.Advance(TimeSpan.FromSeconds(4));
         var outcomes = await batch.WaitAsync(RealTime);
         outcomes[16].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("before its turn came");
         outcomes.Skip(13).Take(3).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"), "taken with exactly the floor left, they started");
