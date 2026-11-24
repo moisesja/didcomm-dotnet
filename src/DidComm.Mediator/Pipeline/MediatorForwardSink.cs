@@ -10,9 +10,11 @@ namespace DidComm.Mediator.Pipeline;
 /// <summary>
 /// The mediator's <see cref="IForwardSink"/> (FR-ROUTE-11, FR-PICK-08/09): every forward the
 /// routing mediator relays is stored in the recipient's pickup queue, and when the stored message is
-/// due and the recipient has a live connection with live delivery on, its grant is woken in
-/// <see cref="PushDispatcher"/>, whose workers push what the store then holds over that connection.
-/// Otherwise it waits for a <c>delivery-request</c>.
+/// due and the recipient has a live connection with live delivery on — or, with
+/// <see cref="MediatorOptions.DirectPush"/> on, whether or not it has one — its grant is woken in
+/// <see cref="PushDispatcher"/>, whose workers push what the store then holds: over that connection,
+/// else to the endpoint the host registered for the recipient. Otherwise it waits for a
+/// <c>delivery-request</c>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -36,11 +38,15 @@ namespace DidComm.Mediator.Pipeline;
 /// that is slow to take a push never holds up the storing of other recipients' messages. Pushing is
 /// a separate, best-effort step after the message is stored: the grant is woken only for a message
 /// that is queued and already due, and only when the recipient has a live session with live
-/// delivery on right now; the wake-up is O(1) and never blocks, it carries nothing of the message
-/// (the push takes what the store holds), and a message whose push fails stays queued for pickup.
-/// It is tried live again at the grant's next wake-up only when the session answered that it did
-/// not take it, or the push was never attempted; a push whose send was attempted and then faulted
-/// or timed out is delivered through pickup only (owner decision 2026-11-21, OD-5).
+/// delivery on right now, or when direct push is on (the push then goes to the recipient's own
+/// endpoint when it finds no live session); the wake-up is O(1) and never blocks, it carries
+/// nothing of the message but its grant's DID (the push takes what the store holds), and a message
+/// whose push fails stays queued for pickup. It is tried live again at the grant's next wake-up only
+/// when the session answered that it did not take it, or the push was never attempted; a push whose
+/// send was attempted and then faulted, timed out or was refused (live or direct) is delivered
+/// through pickup only (owner decisions 2026-11-21, OD-5, and OD-2 on #110). A message held by
+/// <c>delay_milli</c> wakes nothing when it is stored and is never pushed early; once due it goes
+/// with the grant's next push, or by pickup (no due-time scheduler, D2).
 /// </para>
 /// <para>
 /// <strong>Dependencies (L-017).</strong> The queue, the push dispatcher and the counter; nothing
@@ -68,7 +74,7 @@ internal sealed class MediatorForwardSink : IForwardSink
 
     /// <summary>Create the sink.</summary>
     /// <param name="queue">The pickup queue every forward goes into.</param>
-    /// <param name="pushes">The push workers, for live pushes.</param>
+    /// <param name="pushes">The push workers, for live pushes and, with direct push on, direct ones.</param>
     /// <param name="metrics">The forward outcome counter shared with the forward handler.</param>
     /// <param name="logger">Optional logger.</param>
     public MediatorForwardSink(
@@ -157,9 +163,10 @@ internal sealed class MediatorForwardSink : IForwardSink
     }
 
     // Best-effort and after the message is stored: a not-yet-due message wakes nothing and is never
-    // pushed early; once due it goes with the grant's next push or is picked up. A message for a
-    // recipient with no live session now wakes nothing; a failure here changes nothing about the
-    // forward, which is already counted as Queued. Synchronous: it never awaits a session.
+    // pushed early; once due it goes with the grant's next push or is picked up. With direct push
+    // off, a message for a recipient with no live session now wakes nothing; with it on, every due
+    // message wakes its grant, and the push decides live or direct. A failure here changes nothing
+    // about the forward, which is already counted as Queued. Synchronous: it never awaits a session.
     private void HandToPush(ForwardProcessingResult result, ProtocolContext context, string subject, PickupDeliveryResult delivery, string forwardId)
     {
         if (delivery.MessageId is null || delivery.GrantPeerDid is not { } grantPeerDid)
@@ -171,7 +178,7 @@ internal sealed class MediatorForwardSink : IForwardSink
                 MediatorLog.Write(_logger, LogLevel.Debug, "Forward {ForwardId} is not due yet: not pushed; it waits in the queue.", forwardId);
                 return;
             }
-            if (!_queue.Coordinator.HasLiveTarget(grantPeerDid))
+            if (!_pushes.PushesWithoutLiveSession && !_queue.Coordinator.HasLiveTarget(grantPeerDid))
                 return;
             _pushes.Wake(grantPeerDid);
         }

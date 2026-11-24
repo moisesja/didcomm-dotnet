@@ -18,11 +18,11 @@ namespace DidComm.Mediator.Pickup;
 /// <item><description><strong>A record is in exactly one place.</strong> It is stored once by <see cref="EnqueueAsync"/> and leaves by <see cref="AcknowledgeAsync"/> or a purge. A lease is a mark on the record (the lease's id, an owner token and an expiry instant), never a move: ending a lease — by <see cref="ReleaseAsync"/>, <see cref="ReturnUnsentAsync"/>, <see cref="ReleaseLeasesAsync"/> or the passing of its expiry — never copies, re-inserts or re-orders the record.</description></item>
 /// <item><description><strong>A lease is given back only by its taker.</strong> <see cref="ReleaseAsync"/> (and <see cref="ReturnUnsentAsync"/>) names the lease it ends (<see cref="MessageLease.Id"/>) and leaves a record alone when it carries another lease by now — the first one ran out and somebody else took the record — so a late clean-up can never make a message that was just delivered deliverable again.</description></item>
 /// <item><description><strong>A record that was passed over stays where it is.</strong> <see cref="PassOverAsync"/> marks a record the taker could not deliver for now: it stays stored and counted, in its position, and <see cref="LeaseAsync"/> does not hand it out again before the instant given — whatever happens to leases, sessions or connections in the meantime. The mark and the number of times it was set (<see cref="QueuedMessage.PassOvers"/>) belong to the record and last as long as it does; they are what lets a recipient's later requests get past such records instead of meeting the same ones first every time.</description></item>
-/// <item><description><strong>A message a live push took is never pushed live again, unless that push was not sent.</strong> A message pushed live and returned unconfirmed waits until the recipient asks for it with a <c>delivery-request</c> (owner decision on #100, 2026-11-20; Message Pickup 4.0 L304: "Messages already in the queue are not affected by Live Mode; they MUST still be requested with delivery-request messages", L308; 3.0 L203). The mediator says which leases are for a live push (<see cref="MessageLease.LivePush"/>). The store sets the live-push mark (<see cref="QueuedMessage.LivePushReturned"/>) when such a lease takes a record — every record <see cref="LeaseAsync"/> takes under it, and the record <see cref="EnqueueAsync"/> admits under it — in the same step as the lease, and remembers which lease set it (the lease's <see cref="MessageLease.Id"/>). From then on the mark stays for as long as the record is stored, whatever ends that lease (<see cref="ReleaseAsync"/>, <see cref="ReleaseLeasesAsync"/>, the passing of its expiry) and whatever takes the record afterwards. Only the lease that set the mark clears it, and only by saying its push was not sent: <see cref="ReturnUnsentAsync"/>, or <see cref="PassOverAsync"/> (the record did not fit). Either clears a mark only on a record whose mark was set by the lease it names — also when that lease has ended by then, so the outcome never depends on whether a connection's close or the mediator's own call lands first — and never a mark set by another lease. <see cref="LeaseAsync"/> never hands a marked record to a request whose lease is a live-push lease; any other request (a <c>delivery-request</c>, over HTTP or a WebSocket) takes it exactly as before, in its position and within the same budgets. A <c>delivery-request</c>'s lease never sets a mark and has none to clear. The mark changes no count, bound or status. The records <see cref="LeaseAsync"/> returns describe each record as it was before the take, so the records of a live push come back unmarked. A store that loses the mark, or clears it any other way, makes the mediator push such a message live again; a record it hands to a live-push request while it carries the mark is refused by the mediator (not pushed; pickup still works).</description></item>
+/// <item><description><strong>A message a push took is never pushed again, unless that push was not sent.</strong> A message pushed and returned unconfirmed waits until the recipient asks for it with a <c>delivery-request</c> (owner decision on #100, 2026-11-20; Message Pickup 4.0 L304: "Messages already in the queue are not affected by Live Mode; they MUST still be requested with delivery-request messages", L308; 3.0 L203). The mediator says which leases are push leases (<see cref="MessageLease.ForPush"/>): the lease of a push over a live connection, or of a push to the recipient's registered endpoint (direct push, #110). A push lease may have no owner. The store sets the push mark (<see cref="QueuedMessage.PushTaken"/>) when such a lease takes a record — every record <see cref="LeaseAsync"/> takes under it, and the record <see cref="EnqueueAsync"/> admits under it — in the same step as the lease, and remembers which lease set it (the lease's <see cref="MessageLease.Id"/>). From then on the mark stays for as long as the record is stored, whatever ends that lease (<see cref="ReleaseAsync"/>, <see cref="ReleaseLeasesAsync"/>, the passing of its expiry) and whatever takes the record afterwards. Only the lease that set the mark clears it, and only by saying its push was not sent: <see cref="ReturnUnsentAsync"/>, or <see cref="PassOverAsync"/> (the record did not fit). Either clears a mark only on a record whose mark was set by the lease it names — also when that lease has ended by then, so the outcome never depends on whether a connection's close or the mediator's own call lands first — and never a mark set by another lease. <see cref="LeaseAsync"/> never hands a marked record to a request whose lease is a push lease, whichever kind of push set the mark and whichever kind asks; any other request (a <c>delivery-request</c>, over HTTP or a WebSocket) takes it exactly as before, in its position and within the same budgets. A <c>delivery-request</c>'s lease never sets a mark and has none to clear. The mark changes no count, bound or status. The records <see cref="LeaseAsync"/> returns describe each record as it was before the take, so the records of a push come back unmarked. A record it hands to a push lease's request while it carries the mark is refused by the mediator (not pushed; pickup still works). <strong>A store that loses the mark, or clears it any other way, loses the one-attempt guarantee.</strong> The mediator then pushes such a message again, and bounds it only by a push worker's run and by the pause that follows a direct push that fails: a message the endpoint refuses with a 4xx (other than 408 and 429) is sent up to 2 × <see cref="MessagePickupOptions.MaxDeliveryBatch"/> − 1 times per wake-up (a push worker's run that delivered something ahead of it yields once more), one that fails otherwise at most once per pause (twice <see cref="MediatorOptions.PushTimeout"/>); it promises nothing more: a refused or failed message at the head of the queue can then keep the messages behind it from being pushed at all (they wait for pickup).</description></item>
 /// <item><description><strong>Enqueue is one atomic check-and-insert</strong> against the store's bounds, reported by <see cref="EnqueueOutcome"/>, never by throwing. Every retained record counts against the bounds whatever its state: waiting, leased, or not yet due. A record that is expired at the instant of the call does not: expired records never keep a new message out.</description></item>
 /// <item><description><strong>Every record has an arrival sequence the store assigns.</strong> When <see cref="EnqueueAsync"/> stores a record, the store gives it a <see cref="QueuedMessage.Sequence"/> greater than that of every record it stored before (one counter for the whole store will do; a value the caller set is ignored), returns it with the record, reports the highest one assigned so far in every status (<see cref="QueueStatus.HighWaterSequence"/>) and honours <see cref="MessageLeaseRequest.AfterSequence"/>. The mediator decides "arrived after" by it — whether a record arrived after a session turned live delivery on — never by comparing two clock readings. Records a store hands out outside it are refused by the mediator (not pushed; pickup still works).</description></item>
 /// <item><description><strong>Lease is one atomic select-and-mark.</strong> Two concurrent calls never return the same record. Selection is in arrival order (the order of the enqueue calls, which is that of <see cref="QueuedMessage.Sequence"/>, not that of <see cref="QueuedMessage.ReceivedAt"/>).</description></item>
-/// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>.</description></item>
+/// <item><description><strong>Time comes from the caller.</strong> Every time-dependent operation takes the instant to judge by; the store reads no clock. A record is expired when <c>now &gt;= ExpiresAt</c>, not yet due when <c>NotBefore &gt; now</c>, and leased when its lease's <c>ExpiresAt &gt; now</c>. A store that judges by a clock of its own can hand a push a record the mediator finds expired; the mediator gives it back unsent and ends that push's run, so such a record costs at most one take per wake-up.</description></item>
 /// <item><description><strong>Expiry is the only clock rule a store applies.</strong> <see cref="QueuedMessage.ExpiresAt"/> already carries both the message's own expiry and the mailbox age limit (<see cref="MessagePickupOptions.MaxMessageAge"/>): the queue sets it to the earlier of the two when it stores the record. An expired record is never handed out, never reported and never counts against a bound, whatever its state (waiting, leased or passed over), and may be removed at any time. A store needs nothing beyond <c>ExpiresAt</c> to enforce the age limit; the limit in force when a record was stored stays fixed on it.</description></item>
 /// <item><description><strong>No throw after a partial change.</strong> A method that changes several records either throws before anything changed, or its return value is the truth.</description></item>
 /// <item><description><strong>Payloads are opaque.</strong> The bytes are kept as given and returned unchanged.</description></item>
@@ -55,10 +55,10 @@ public interface IMessageStore
     /// Store <paramref name="message"/> under its grant, at the end of the grant's arrival order —
     /// already leased when <paramref name="lease"/> is given (a live delivery: the record is
     /// admitted and leased in one step, so no <see cref="LeaseAsync"/> can take it in between).
-    /// When that lease is a live-push lease (<see cref="MessageLease.LivePush"/>), the record also
-    /// gets the live-push mark in the same step (<see cref="QueuedMessage.LivePushReturned"/>), set
-    /// by that lease. Records that are expired at <paramref name="now"/> do not count against the
-    /// bounds, the grant's or the store's.
+    /// When that lease is a push lease (<see cref="MessageLease.ForPush"/>; the mediator admits a
+    /// record leased only for a live push), the record also gets the push mark in the same step
+    /// (<see cref="QueuedMessage.PushTaken"/>), set by that lease. Records that are expired
+    /// at <paramref name="now"/> do not count against the bounds, the grant's or the store's.
     /// </summary>
     /// <param name="message">The record to store. Its <see cref="QueuedMessage.Id"/> is unique within the grant.</param>
     /// <param name="lease">The lease the record starts with, or <c>null</c> for a record that is simply waiting.</param>
@@ -73,18 +73,19 @@ public interface IMessageStore
     /// when it is set — and takes each record that is not expired, is due and is not under a live
     /// lease and is not passed over for now (<see cref="PassOverAsync"/>) — and, when
     /// <see cref="MessageLeaseRequest.AfterSequence"/> is set, has a greater <see cref="QueuedMessage.Sequence"/>, and, when
-    /// the request's lease is a live-push lease (<see cref="MessageLease.LivePush"/>), did not come
-    /// back unacknowledged from a live push (<see cref="QueuedMessage.LivePushReturned"/>) — until
+    /// the request's lease is a push lease (<see cref="MessageLease.ForPush"/>: a live or a direct
+    /// push), does not carry the push mark of an earlier push (<see cref="QueuedMessage.PushTaken"/>) — until
     /// <see cref="MessageLeaseRequest.MaxMessages"/> are taken or the next one would
     /// carry the payload total past <see cref="MessageLeaseRequest.MaxPayloadBytes"/>. It stops
     /// there and does not look for a smaller record further on, so the result is always a prefix of
     /// what is deliverable; the first deliverable record is taken whatever its size. Expired
-    /// records are never returned. Under a live-push lease, every record taken also gets the
-    /// live-push mark in the same step, set by that lease (see <see cref="IMessageStore"/>).
+    /// records are never returned. Under a push lease, every record taken also gets the push mark
+    /// in the same step, set by that lease, whether or not the lease has an owner (see
+    /// <see cref="IMessageStore"/>).
     /// </summary>
     /// <param name="request">Whose records, how many, how many bytes, judged at which instant, under which lease.</param>
     /// <param name="ct">Cancellation token.</param>
-    /// <returns>The leased records in arrival order, each as it was before the take (a live push's records without the mark it just set); empty when nothing is deliverable.</returns>
+    /// <returns>The leased records in arrival order, each as it was before the take (a push's records without the mark it just set); empty when nothing is deliverable.</returns>
     ValueTask<IReadOnlyList<QueuedMessage>> LeaseAsync(MessageLeaseRequest request, CancellationToken ct);
 
     /// <summary>
@@ -103,10 +104,10 @@ public interface IMessageStore
     /// <paramref name="grantPeerDid"/> with these ids that still carry that lease are deliverable
     /// again at once, in their original position. Ids the grant does not hold are ignored, and so
     /// is a record that is not leased or carries a different lease — it was taken again since, and
-    /// that lease is not this caller's to end. It never clears the live-push mark
-    /// (<see cref="QueuedMessage.LivePushReturned"/>): a live push given back this way may have
-    /// reached the connection, so it stays out of live pushes. A push that was not sent is given
-    /// back with <see cref="ReturnUnsentAsync"/> instead.
+    /// that lease is not this caller's to end. It never clears the push mark
+    /// (<see cref="QueuedMessage.PushTaken"/>): a push given back this way may have reached
+    /// the connection or the recipient's endpoint, so it stays out of pushes, live or direct. A push
+    /// that was not sent is given back with <see cref="ReturnUnsentAsync"/> instead.
     /// </summary>
     /// <param name="grantPeerDid">The grant the ids belong to.</param>
     /// <param name="messageIds">The ids to release.</param>
@@ -118,15 +119,16 @@ public interface IMessageStore
     /// <summary>
     /// Give back records taken under the lease <paramref name="leaseId"/> whose push the taker knows
     /// was not sent: what <see cref="ReleaseAsync"/> does, and in addition, for each of the records
-    /// of <paramref name="grantPeerDid"/> with these ids whose live-push mark
-    /// (<see cref="QueuedMessage.LivePushReturned"/>) was set by <paramref name="leaseId"/>, the mark
-    /// is cleared, so a later live push may take the record again. The mark is cleared also when
+    /// of <paramref name="grantPeerDid"/> with these ids whose push mark
+    /// (<see cref="QueuedMessage.PushTaken"/>) was set by <paramref name="leaseId"/>, the mark
+    /// is cleared, so a later push, live or direct, may take the record again. The mark is cleared also when
     /// that lease has already ended — by the connection's close (<see cref="ReleaseLeasesAsync"/>),
     /// by its expiry, or by a <c>delivery-request</c> that took the record since — so the outcome
     /// never depends on which of those lands first; a lease that is not <paramref name="leaseId"/>
     /// is never ended, and a mark set by another lease is never cleared. Ids the grant does not hold
     /// are ignored. The mediator calls it only for a push it never handed to the connection, or that
-    /// the connection refused (<see cref="DidComm.Transports.ReturnRoute.ReturnRouteSendResult.NotSent"/>).
+    /// the connection refused (<see cref="DidComm.Transports.ReturnRoute.ReturnRouteSendResult.NotSent"/>),
+    /// and for a direct push it never handed to the transport.
     /// </summary>
     /// <param name="grantPeerDid">The grant the ids belong to.</param>
     /// <param name="messageIds">The ids to give back.</param>
@@ -144,8 +146,8 @@ public interface IMessageStore
     /// not ended by <see cref="ReleaseAsync"/> or <see cref="ReleaseLeasesAsync"/>: only the passing
     /// of <paramref name="until"/> ends it. Ids the grant does not hold are ignored, and so is a
     /// record that carries a different lease by now. A record that did not fit was not sent, so,
-    /// as <see cref="ReturnUnsentAsync"/> does, each of these records whose live-push mark
-    /// (<see cref="QueuedMessage.LivePushReturned"/>) was set by <paramref name="leaseId"/> has
+    /// as <see cref="ReturnUnsentAsync"/> does, each of these records whose push mark
+    /// (<see cref="QueuedMessage.PushTaken"/>) was set by <paramref name="leaseId"/> has
     /// that mark cleared — also when the lease has ended by now; a mark set by another lease is
     /// never cleared.
     /// </summary>
@@ -160,9 +162,10 @@ public interface IMessageStore
     /// <summary>
     /// End every lease whose <see cref="MessageLease.Owner"/> is <paramref name="leaseOwner"/>,
     /// across all grants: the records delivered over a connection that has now closed become
-    /// deliverable again. It never clears the live-push mark (<see cref="QueuedMessage.LivePushReturned"/>):
-    /// a record a live push took keeps it, so only a request whose lease is not a live-push lease
-    /// takes it from now on.
+    /// deliverable again. It never clears the push mark (<see cref="QueuedMessage.PushTaken"/>):
+    /// a record a live push took keeps it, so only a request whose lease is not a push lease takes
+    /// it from now on. A lease without an owner (a direct push's, or a <c>delivery-request</c>'s over
+    /// HTTP) is never ended here.
     /// </summary>
     /// <param name="leaseOwner">The owner token the leases were taken with.</param>
     /// <param name="ct">Cancellation token.</param>
@@ -232,19 +235,20 @@ public sealed record QueuedMessage(
     public long Sequence { get; init; }
 
     /// <summary>
-    /// The live-push mark: a live push took the message (a lease with
-    /// <see cref="MessageLease.LivePush"/> leased or admitted it) and has not said that push was not
-    /// sent. Set by the store in the same step as that lease; cleared only by that same lease, with
+    /// The push mark: a push took the message — over a live connection, or to the recipient's
+    /// registered endpoint (direct push, #110); a push lease, <see cref="MessageLease.ForPush"/>,
+    /// leased or admitted it — and has not said that push was not sent. Set by the store in the
+    /// same step as that lease; cleared only by that same lease, with
     /// <see cref="IMessageStore.ReturnUnsentAsync"/> or <see cref="IMessageStore.PassOverAsync"/>;
     /// otherwise kept for as long as the record is stored, whatever ends the lease (an
-    /// acknowledgement removes the record). Such a record is never handed to a live-push lease
-    /// request, only to a <c>delivery-request</c>: a message pushed live and returned unconfirmed
-    /// is never pushed live again (see <see cref="IMessageStore"/>). Returned with the record as it
-    /// was before the take, so the records of a live push come back without the mark that push
+    /// acknowledgement removes the record). Such a record is never handed to a push lease's
+    /// request, live or direct, only to a <c>delivery-request</c>: a message pushed and returned
+    /// unconfirmed is never pushed again (see <see cref="IMessageStore"/>). Returned with the record
+    /// as it was before the take, so the records of a push come back without the mark that push
     /// just set. A value set by the caller of <see cref="IMessageStore.EnqueueAsync"/> is ignored:
     /// a new record has never been pushed.
     /// </summary>
-    public bool LivePushReturned { get; init; }
+    public bool PushTaken { get; init; }
 
     /// <summary>The payload length and the times only: no DID, id or payload is printed, so a logged instance carries no wire value.</summary>
     public override string ToString()
@@ -255,7 +259,7 @@ public sealed record QueuedMessage(
 /// A lease on stored messages: they were handed to a recipient and are not handed out again until
 /// the lease ends (FR-PICK-04).
 /// </summary>
-/// <param name="Owner">An opaque token for the connection the messages were delivered over, so that all of its leases can be ended when it closes (<see cref="IMessageStore.ReleaseLeasesAsync"/>); <c>null</c> for a lease that ends by time only (a delivery over HTTP).</param>
+/// <param name="Owner">An opaque token for the connection the messages were delivered over, so that all of its leases can be ended when it closes (<see cref="IMessageStore.ReleaseLeasesAsync"/>); <c>null</c> for a lease that ends by time only (a delivery over HTTP, or a direct push to the recipient's registered endpoint), or by its taker's own call.</param>
 /// <param name="ExpiresAt">The first instant at which the lease no longer holds.</param>
 public sealed record MessageLease(string? Owner, DateTimeOffset ExpiresAt)
 {
@@ -268,21 +272,23 @@ public sealed record MessageLease(string? Owner, DateTimeOffset ExpiresAt)
     /// The taker passes it to <see cref="IMessageStore.ReleaseAsync"/>,
     /// <see cref="IMessageStore.ReturnUnsentAsync"/> or <see cref="IMessageStore.PassOverAsync"/>
     /// to act on exactly what it took; a store remembers it as the lease that set a record's
-    /// live-push mark. Never on the wire.
+    /// push mark. Never on the wire.
     /// </summary>
     public string Id { get; init; } = Guid.NewGuid().ToString("N");
 
     /// <summary>
-    /// Whether this lease is for a live push: the mediator sets it on the lease of a record it
-    /// pushes over a live connection, never on a <c>delivery-request</c>'s lease. The store marks
-    /// every record such a lease takes (<see cref="QueuedMessage.LivePushReturned"/>), in the same
-    /// step, and keeps the mark whatever ends the lease — its connection's close, its expiry, a
-    /// release by id — unless this same lease says its push was not sent
-    /// (<see cref="IMessageStore.ReturnUnsentAsync"/>, <see cref="IMessageStore.PassOverAsync"/>).
-    /// A request under a live-push lease never takes a marked record (see <see cref="IMessageStore"/>).
-    /// A <c>with</c> copy keeps it.
+    /// Whether this lease is a push lease: the mediator sets it on the lease of a record it pushes
+    /// over a live connection or to the recipient's registered endpoint (direct push, #110), never
+    /// on a <c>delivery-request</c>'s lease. A push lease may have no owner (a direct push's has
+    /// none). The store marks every record such a lease takes
+    /// (<see cref="QueuedMessage.PushTaken"/>), in the same step, and keeps the mark whatever
+    /// ends the lease — its connection's close, its expiry, a release by id — unless this same lease
+    /// says its push was not sent (<see cref="IMessageStore.ReturnUnsentAsync"/>,
+    /// <see cref="IMessageStore.PassOverAsync"/>). A request under a push lease never takes a marked
+    /// record, whichever kind of push marked it (see <see cref="IMessageStore"/>). A <c>with</c>
+    /// copy keeps it.
     /// </summary>
-    public bool LivePush { get; init; }
+    public bool ForPush { get; init; }
 }
 
 /// <summary>What <see cref="IMessageStore.LeaseAsync"/> is asked for.</summary>

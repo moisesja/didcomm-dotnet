@@ -42,7 +42,8 @@ public static class MediatorBuilderExtensions
     /// <see cref="MessagePickupOptions.EnableV4"/> is <c>false</c>), the built-in protocols (Trust
     /// Ping answers health checks; Discover Features discloses the mediator roles), and the delivery
     /// pipeline that puts each relayed message in the recipient's queue (pushing it live when the
-    /// recipient has a live session). Map its endpoints with
+    /// recipient has a live session, and, with <see cref="MediatorOptions.DirectPush"/> on, to the
+    /// endpoint the host registered for it otherwise). Map its endpoints with
     /// <c>MapDidCommMediator()</c> from the <c>DidComm.Mediator.AspNetCore</c> package.
     /// </summary>
     /// <remarks>
@@ -74,6 +75,19 @@ public static class MediatorBuilderExtensions
     /// <c>DidCommClient</c> in its constructor (resolve them from <see cref="IServiceProvider"/>
     /// when called). This method configures the routing mediator itself: do not call
     /// <c>AddRoutingMediator()</c> as well, and do not register an <see cref="IForwardSink"/>.
+    /// </para>
+    /// <para>
+    /// <strong>Direct push.</strong> With <see cref="MediatorOptions.DirectPush"/> on (it is off by
+    /// default), the host registers an <see cref="IRecipientEndpointDirectory"/> before this call
+    /// and calls <c>UseHttpTransport()</c> on the same builder; the push uses the mediator's own
+    /// single-attempt instance of the HTTP transport, never the host's. The directory follows the
+    /// same constructor rule as the stores, and must not take the mediator's forward sink or push
+    /// workers either. Nothing of either is built while direct push is off. Without a directory, the
+    /// mediator refuses to build its push workers; without the HTTP transport, or with an invalid
+    /// trusted proxy, it refuses to start (outside a generic host, the first direct push fails
+    /// instead). With <see cref="RewrapMode.ReanoncryptToNext"/> the push carries the mediator's own
+    /// forward addressed to the recipient, which the recipient's endpoint opens (see
+    /// <see cref="MediatorOptions.DirectPush"/>).
     /// </para>
     /// <para>
     /// <strong>Start-up.</strong> In a generic host (<c>WebApplication</c>, <c>Host</c>) a hosted
@@ -115,18 +129,20 @@ public static class MediatorBuilderExtensions
     /// <see cref="MessagePickupOptions.MaxDeliveryBytes"/>.</description></item>
     /// <item><description>Every relayed message is stored first; live pushes follow on
     /// background workers (<see cref="MediatorOptions.PushConcurrency"/>), one at a time per
-    /// recipient and oldest first, so a recipient that is slow to take a push holds up no one else. A
+    /// recipient and oldest first, so a recipient that is slow to take a push (or, with direct push,
+    /// an endpoint that is slow to answer) holds up no one else. A
     /// live session is pushed what arrives after the status that answered its turning live delivery
     /// on (by the store's arrival order, whatever the clock does); no message is pushed before it is
     /// due; one whose live push fails stays queued for pickup and is tried again when its recipient
     /// next receives a message.</description></item>
     /// <item><description>Expiry of relayed and queued messages is judged with
     /// <c>DidCommOptions.ExpiresClockSkew</c>, not with the replay clock skew.</description></item>
-    /// <item><description>The mediator pushes only over live sessions; every other message waits for
-    /// pickup. A built-in direct push to a recipient's own endpoint is tracked in #110; until then a
-    /// host that needs one pushes forwarded messages itself through its own
-    /// <see cref="IForwardSink"/> (the #90 seam), with <c>AddRoutingMediator()</c> rather than this
-    /// method.</description></item>
+    /// <item><description>By default the mediator pushes only over live sessions; every other message
+    /// waits for pickup. With <see cref="MediatorOptions.DirectPush"/> on, a message for a recipient
+    /// without a live session is pushed once to the endpoint the host's
+    /// <see cref="IRecipientEndpointDirectory"/> names for it, and one that is not answered with a
+    /// 2xx waits for pickup. Keep the directory to endpoints the operator has agreed with each
+    /// recipient: a push goes to them with the mediator's own network position.</description></item>
     /// </list>
     /// </remarks>
     /// <param name="builder">The DIDComm builder.</param>
@@ -187,6 +203,9 @@ public static class MediatorBuilderExtensions
         services.TryAdd(ServiceDescriptor.Singleton(typeof(IRecipientRoutingKeyProvider), s_noRecipientRoutingKeys));
         services.TryAddSingleton(sp => new ForwardMetrics(sp.GetService<IMeterFactory>()));
         services.TryAddSingleton(sp => new MediatorMetrics(sp.GetService<IMeterFactory>()));
+        // Direct push's single-attempt sender: registered always, built only when direct push is in
+        // effect (by the hosted service at start-up, else by the first direct push).
+        services.TryAddSingleton(sp => DirectPushSender.Create(sp));
 
         // The pipeline's parts take nothing that leads back to the dispatcher, the handlers or the
         // facade (L-017).
@@ -218,26 +237,43 @@ public static class MediatorBuilderExtensions
     [ThreadStatic]
     private static bool t_buildingPushDispatcher;
 
-    // The dispatcher is built from the stores; a store that asks for the dispatcher (or the sink)
-    // back would re-enter this factory without end. Fail on the first re-entry instead.
+    // The dispatcher is built from the stores (and, with direct push on, the endpoint directory); one
+    // that asks for the dispatcher (or the sink) back would re-enter this factory without end. Fail
+    // on the first re-entry instead.
     private static PushDispatcher BuildPushDispatcher(IServiceProvider sp)
     {
         if (t_buildingPushDispatcher)
         {
             throw new InvalidOperationException(
-                "AddMediator() found a circular dependency: an IMessageStore or IMediationStore (or something they depend on) takes the mediator's " +
-                "forward sink or push dispatcher in its constructor, and the push dispatcher is built from those stores. Resolve it from " +
+                "AddMediator() found a circular dependency: an IMessageStore, IMediationStore or IRecipientEndpointDirectory (or something they depend on) " +
+                "takes the mediator's forward sink or push dispatcher in its constructor, and the push dispatcher is built from those. Resolve it from " +
                 "IServiceProvider when it is needed instead.");
         }
         t_buildingPushDispatcher = true;
         try
         {
+            var options = sp.GetRequiredService<IOptions<MediatorOptions>>();
+            // The settings in effect (a host Configure<MediatorOptions> included), checked before
+            // anything of direct push is resolved: a refused combination resolves nothing.
+            var settings = options.Value;
+            settings.ValidatePipelineRanges();
+            DirectPushRoute? direct = null;
+            if (settings.DirectPush)
+            {
+                var directory = sp.GetService<IRecipientEndpointDirectory>() ?? throw new InvalidOperationException(
+                    "AddMediator(): MediatorOptions.DirectPush is on and no IRecipientEndpointDirectory is registered, so the mediator has no endpoint to " +
+                    "push to. Register one before AddMediator(), or turn DirectPush off.");
+                // The sender is built on first use: by the hosted service at start-up, else by the first direct push.
+                direct = new DirectPushRoute(directory, new Lazy<IDirectPushSender>(() => sp.GetRequiredService<DirectPushSender>()));
+            }
             return new PushDispatcher(
-                sp.GetRequiredService<IOptions<MediatorOptions>>(),
+                options,
                 sp.GetRequiredService<MessagePickupQueue>(),
                 sp.GetRequiredService<MediatorMetrics>(),
                 sp.GetService<ILogger<PushDispatcher>>(),
-                sp.GetService<TimeProvider>() ?? TimeProvider.System);
+                sp.GetService<TimeProvider>() ?? TimeProvider.System,
+                shutdownGrace: null,
+                direct);
         }
         finally
         {

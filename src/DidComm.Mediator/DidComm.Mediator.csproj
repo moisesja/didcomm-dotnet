@@ -21,6 +21,9 @@
   <ItemGroup>
     <ProjectReference Include="..\DidComm.Core\DidComm.Core.csproj" />
     <ProjectReference Include="..\DidComm.Extensions.DependencyInjection\DidComm.Extensions.DependencyInjection.csproj" />
+    <!-- Direct push (#110): the mediator's own single-attempt instance of the HTTP transport, built
+         through its public API only (a minimum-version dependency, not an InternalsVisibleTo edge). -->
+    <ProjectReference Include="..\DidComm.Transports.Http\DidComm.Transports.Http.csproj" />
     <!-- The recipient-side client and the message builders, parsers and records both roles share (#113). -->
     <ProjectReference Include="..\DidComm.Mediator.Client\DidComm.Mediator.Client.csproj" />
   </ItemGroup>
