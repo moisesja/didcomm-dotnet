@@ -435,10 +435,17 @@ public sealed class SlowMemoryFetchQa1Tests
 
     /// <summary>
     /// I-12 through fetches: between a strike and the redelivery the host's clock steps forward two
-    /// hours (the message is due and opened again), then back two hours (a reading below the strike
-    /// is due: opened again), then runs normally: the message is held back exactly for its pause
-    /// from the last strike, never longer, and never locked out.
+    /// hours (the message is due and opened again: a second strike), then back two hours (a reading
+    /// below the strike is due: opened again), then runs normally. The failure after the step back
+    /// is the same slow episode, not a third one (RT2B-2): the message is held back for the second
+    /// strike's pause again, counted from the stepped-back reading, never longer, and never locked
+    /// out.
     /// </summary>
+    /// <remarks>
+    /// Changed in #111 fix round 2 (RT2B-2): this test used to expect a third strike, and so a pause
+    /// of 40 min, from the failure after the step back. A repeat failure read below the last strike
+    /// now adds no strike, so the pause is the second strike's 20 min.
+    /// </remarks>
     [Fact]
     public async Task A_clock_stepping_forward_and_back_never_holds_a_message_past_its_pause_or_locks_it_out()
     {
@@ -458,12 +465,12 @@ public sealed class SlowMemoryFetchQa1Tests
         exchange.Clock.Step(TimeSpan.FromHours(2));
         (await OpenedAsync()).Should().BeTrue("the reading is two hours on: due (second strike, pause 20 min)");
         exchange.Clock.Step(-TimeSpan.FromHours(2));
-        (await OpenedAsync()).Should().BeTrue("a reading below the strike's is due (third strike, pause 40 min, stamped on the stepped-back clock)");
-        (await OpenedAsync()).Should().BeFalse("held back from its new strike");
-        exchange.Clock.Inner.Advance(memory.PauseAfter(3) - TimeSpan.FromTicks(1));
-        (await OpenedAsync()).Should().BeFalse("one tick before its pause ends, counted from the last strike");
+        (await OpenedAsync()).Should().BeTrue("a reading below the strike's is due (the same episode: still two strikes, pause 20 min, stamped on the stepped-back clock)");
+        (await OpenedAsync()).Should().BeFalse("held back from the stepped-back reading");
+        exchange.Clock.Inner.Advance(memory.PauseAfter(2) - TimeSpan.FromTicks(1));
+        (await OpenedAsync()).Should().BeFalse("one tick before its pause ends, counted from the stepped-back reading");
         exchange.Clock.Inner.Advance(TimeSpan.FromTicks(1));
-        (await OpenedAsync()).Should().BeTrue("its pause has ended");
+        (await OpenedAsync()).Should().BeTrue("its pause, the second strike's and not a third one's, has ended");
     }
 
     /// <summary>

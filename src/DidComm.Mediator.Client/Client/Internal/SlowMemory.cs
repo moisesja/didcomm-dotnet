@@ -17,15 +17,19 @@ namespace DidComm.Mediator.Client.Internal;
 /// <remarks>
 /// <para>
 /// <strong>What an entry counts:</strong> how many times the message was slow (its strikes) and the
-/// clock reading of the last strike. It is written only by the outcome of an unpack the client
-/// timed itself (<see cref="Strike"/>), and removed when the message opens (<see cref="Forget"/>).
-/// Nothing a sender writes enters a key or decides a write.
+/// clock reading its pause is counted from (<c>struckAt</c>: the last strike's, or a lower one read
+/// at a repeat failure after the clock stepped back). It is written only by the outcome of an unpack
+/// the client timed itself (<see cref="Strike"/>), and removed when the message opens
+/// (<see cref="Forget"/>). Nothing a sender writes enters a key or decides a write.
 /// </para>
 /// <para>
 /// <strong>The pause:</strong> a message is held back while
 /// <c>struckAt ≤ now &lt; struckAt + min(cap, t0 · 2^(strikes − 1))</c>. A reading below
 /// <c>struckAt</c> (a clock that stepped back) counts as due: a clock step can cost one more opening,
-/// never lock a message out (I-12).
+/// never lock a message out (I-12). When that opening fails too, it is the same slow episode, not a
+/// new one (<see cref="Strike"/>): the entry keeps its strikes and is stamped with the lower reading,
+/// so the message is held back for the same pause again, counted from there, not for the next,
+/// doubled one.
 /// </para>
 /// <para>
 /// <strong>Keys (D-3, D-8):</strong> a partition is SHA-256, truncated to 128 bits, over the mediator's
@@ -169,9 +173,14 @@ internal sealed class SlowMemory
 
     /// <summary>
     /// Remember that the message <paramref name="id"/> was slow: a new entry with one strike, or one
-    /// more strike on the entry it has, stamped with the clock's reading now. An entry still inside its
-    /// pause gets no further strike: deliveries of the same message that ran at the same time saw one
-    /// slow episode (RT1B-2). Does nothing for a <c>null</c> id.
+    /// more strike on the entry it has, stamped with the clock's reading now. Two cases add no strike,
+    /// because they are the slow episode the entry already counts. An entry still inside its pause is
+    /// left as it is: deliveries of the same message that ran at the same time saw one slow episode
+    /// (RT1B-2). An entry whose last strike was stamped with a higher reading than now (a host clock
+    /// that stepped back, or two deliveries whose readings reach the memory out of order) keeps its
+    /// strikes and is stamped with the reading now, so its pause, of the same length, is counted from
+    /// the lower reading. In every case the entry counts as seen (it moves to the back of its
+    /// partition's eviction order) and its partition as used. Does nothing for a <c>null</c> id.
     /// </summary>
     /// <param name="scope">The mediator and mailbox the message came from.</param>
     /// <param name="id">Its attachment id.</param>
@@ -193,16 +202,26 @@ internal sealed class SlowMemory
             }
             partition.Used = ++_seq;
             ref var entry = ref CollectionsMarshal.GetValueRefOrAddDefault(partition.Entries, key, out var existed);
-            if (existed && IsPaused(entry, now))
+            entry.Seen = ++_seq;
+            if (!existed)
             {
-                entry.Seen = ++_seq;
+                entry.Strikes = 1;
+                entry.StruckAt = now;
+                if (partition.Entries.Count > _q)
+                    partition.Entries.Remove(LeastRecentlySeenEntry(partition));
                 return;
             }
-            entry.Strikes = existed ? (entry.Strikes == int.MaxValue ? int.MaxValue : entry.Strikes + 1) : 1;
+            if (now < entry.StruckAt)
+            {
+                // The same episode on a clock that stepped back: no further strike, and the pause,
+                // of the same length, runs from the lower reading.
+                entry.StruckAt = now;
+                return;
+            }
+            if (IsPaused(entry, now))
+                return; // the same episode, seen by another delivery inside the pause (RT1B-2)
+            entry.Strikes = entry.Strikes == int.MaxValue ? int.MaxValue : entry.Strikes + 1;
             entry.StruckAt = now;
-            entry.Seen = ++_seq;
-            if (!existed && partition.Entries.Count > _q)
-                partition.Entries.Remove(LeastRecentlySeenEntry(partition));
         }
     }
 

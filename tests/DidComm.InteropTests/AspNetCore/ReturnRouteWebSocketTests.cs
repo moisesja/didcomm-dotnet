@@ -379,42 +379,63 @@ public sealed class ReturnRouteWebSocketTests
         });
         using var first = await OpenSessionAsync(host, host.Alice);
 
-        // Park the first connection's loop inside a dispatch.
+        // Park the first connection's loop inside a dispatch. The dispatch is held until the test
+        // opens the gate, or until the test ends (so a run that fails before it opens the gate still
+        // lets the host stop), never for a length of time: on a slow run the eviction still lands
+        // while the dispatch is held.
         var parked = host.Stamped(host.RecordingMessage(host.Alice, "parked")).Build();
         using var entered = new ManualResetEventSlim();
         using var release = new ManualResetEventSlim();
+        using var testEnded = new CancellationTokenSource();
+        var dispatched = 0;
         host.Recorder.OnEnter = message =>
         {
             if (message.Id != parked.Id)
                 return;
             entered.Set();
-            release.Wait(Timeout);
+            try
+            {
+                release.Wait(testEnded.Token);
+            }
+            catch (OperationCanceledException) when (testEnded.IsCancellationRequested)
+            {
+            }
+            Volatile.Write(ref dispatched, 1);
         };
-        await ReturnRouteTestHost.SendAsync(first, await host.AuthcryptAsync(host.Alice, parked));
-        entered.Wait(Timeout).Should().BeTrue();
+        try
+        {
+            await ReturnRouteTestHost.SendAsync(first, await host.AuthcryptAsync(host.Alice, parked));
+            entered.Wait(Timeout).Should().BeTrue();
 
-        // A second socket for Alice evicts the first while its loop is busy.
-        using var second = await OpenSessionAsync(host, host.Alice);
-        var close = await ReturnRouteTestHost.ReceiveAsync(first, Timeout);
-        close.Type.Should().Be(WebSocketMessageType.Close, "the evicted peer observes a normal close (FR-RR-03)");
-        first.CloseStatusDescription.Should().Be(WebSocketReturnRouteSession.EvictedDescription);
+            // A second socket for Alice evicts the first while its loop is busy.
+            using var second = await OpenSessionAsync(host, host.Alice);
+            var close = await ReturnRouteTestHost.ReceiveAsync(first, Timeout);
+            var heldWhenTheCloseArrived = Volatile.Read(ref dispatched) == 0;
+            close.Type.Should().Be(WebSocketMessageType.Close, "the evicted peer observes a normal close (FR-RR-03)");
+            first.CloseStatusDescription.Should().Be(WebSocketReturnRouteSession.EvictedDescription);
+            heldWhenTheCloseArrived.Should().BeTrue("precondition: the evicted connection's loop was still inside the dispatch when its close frame arrived");
 
-        release.Set();
-        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Recorder.Seen.Any(r => r.Message.Id == parked.Id), Timeout)).Should().BeTrue();
+            release.Set();
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.Recorder.Seen.Any(r => r.Message.Id == parked.Id), Timeout)).Should().BeTrue();
 
-        // The peer had one more message in flight before it saw the close; then it answers the close.
-        var inFlight = host.Stamped(host.RecordingMessage(host.Alice, "in-flight")).Build();
-        await ReturnRouteTestHost.SendAsync(first, await host.AuthcryptAsync(host.Alice, inFlight));
-        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Recorder.Seen.Any(r => r.Message.Id == inFlight.Id), Timeout))
-            .Should().BeTrue("the loop keeps reading until the peer's close frame arrives");
-        host.Recorder.Seen.Single(r => r.Message.Id == inFlight.Id).Session.Should().BeNull("the evicted session is gone");
-        await first.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", default);
-        (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, Timeout)).Should().BeTrue("the handshake completed and the connection ended");
+            // The peer had one more message in flight before it saw the close; then it answers the close.
+            var inFlight = host.Stamped(host.RecordingMessage(host.Alice, "in-flight")).Build();
+            await ReturnRouteTestHost.SendAsync(first, await host.AuthcryptAsync(host.Alice, inFlight));
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.Recorder.Seen.Any(r => r.Message.Id == inFlight.Id), Timeout))
+                .Should().BeTrue("the loop keeps reading until the peer's close frame arrives");
+            host.Recorder.Seen.Single(r => r.Message.Id == inFlight.Id).Session.Should().BeNull("the evicted session is gone");
+            await first.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", default);
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.EndedWebSocketConnections == 1, Timeout)).Should().BeTrue("the handshake completed and the connection ended");
 
-        host.Registry.Find(host.Alice.Did).Should().ContainSingle();
-        await second.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
-        (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 0, Timeout)).Should().BeTrue();
-        host.LeakingLogLines().Should().BeEmpty();
+            host.Registry.Find(host.Alice.Did).Should().ContainSingle();
+            await second.CloseAsync(WebSocketCloseStatus.NormalClosure, "done", default);
+            (await ReturnRouteTestHost.WaitUntilAsync(() => host.Registry.Count == 0, Timeout)).Should().BeTrue();
+            host.LeakingLogLines().Should().BeEmpty();
+        }
+        finally
+        {
+            await testEnded.CancelAsync();
+        }
     }
 
     [Fact]

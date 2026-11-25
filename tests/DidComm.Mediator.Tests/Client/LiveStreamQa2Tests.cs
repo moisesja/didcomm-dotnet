@@ -44,6 +44,12 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     /// read. No storm, no postponement, no early cycle: the cycles are one interval apart, and each
     /// back-off lasts until its alarm fires.
     /// </summary>
+    /// <remarks>
+    /// Changed in #111 fix round 2 (owner decision F): the baseline used to show back-offs of 1, 2,
+    /// 1 and 2 s, because the accepted acknowledgement of the pushed message started the back-off
+    /// again. An accepted acknowledgement now keeps the back-off, so the four failures are followed
+    /// by 1, 2, 4 and 8 s.
+    /// </remarks>
     [Theory]
     [InlineData(ClockMode.StepsBackAndForth)]
     [InlineData(ClockMode.ReadingsKeepFalling)]
@@ -51,8 +57,8 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     {
         var baseline = await ScheduleAsync(ClockMode.Steady);
         var liveOns = baseline.Where(r => r.Type == LiveOn).Select(r => r.At.TotalSeconds).ToArray();
-        liveOns.Should().Equal(new double[] { 0, 60, 120, 121, 123, 124, 126, 186, 246, 306, 366, 426, 486, 546, 606 },
-            "cycles one interval after each drain ended; back-offs of 1 and 2 s after the first two failures, then (the push during the back-off is progress) 1 and 2 s again");
+        liveOns.Should().Equal(new double[] { 0, 60, 120, 121, 123, 127, 135, 195, 255, 315, 375, 435, 495, 555, 615 },
+            "cycles one interval after each drain ended; back-offs of 1, 2, 4 and 8 s after the four failures: the push during the back-off and its accepted acknowledgement keep the back-off");
 
         var schedule = await ScheduleAsync(mode);
 
@@ -184,17 +190,24 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     /// <summary>
     /// I-18 (ADV5-3): five failures (at 0, 1, 3, 7 and 15 s) and then progress at 15 or 31 s. Progress
     /// lets the run's give-up alarm go: the stream does not end at the old run's give-up point (61 s)
-    /// but at the first attempt 60 s after the first failure that follows the progress. After a
-    /// request that succeeded the back-off starts again at 1 s, so that attempt is at 92 s (152 s after
-    /// a drain's end, whose next cycle is an interval later). After a push the back-off goes on (owner
-    /// decision B1: 30 s pauses from 31 s), so it is at 91 s. A push with nothing usable is not
-    /// progress: the stream ends at 61 s.
+    /// but at the first attempt 60 s after the first failure that follows the progress. After a drain
+    /// that ended or a drain round that brought something new the back-off starts again at 1 s, so
+    /// that attempt is at 92 s (152 s after a drain's end, whose next cycle is an interval later).
+    /// After a push or an accepted acknowledgement the back-off goes on (owner decisions B1 and F:
+    /// 30 s pauses from 31 s), so it is at 91 s. A push with nothing usable is not progress: the
+    /// stream ends at 61 s.
     /// </summary>
+    /// <remarks>
+    /// Changed in #111 fix round 2 (owner decision F): the accepted acknowledgement's row used to
+    /// expect 92 s, because an accepted acknowledgement started the back-off again. It now keeps the
+    /// back-off, as a push does, so its row expects 91 s. Were it not to let the give-up alarm go,
+    /// the stream would end at 61 s.
+    /// </remarks>
     [Theory]
     [InlineData(Progress.DrainEnd, 152)]
     [InlineData(Progress.DrainRoundWithNewMessage, 92)]
     [InlineData(Progress.PushWithNewMessage, 91)]
-    [InlineData(Progress.AcceptedAcknowledgement, 92)]
+    [InlineData(Progress.AcceptedAcknowledgement, 91)]
     [InlineData(Progress.PushWithNothingUsable, 61)]
     public async Task Progress_lets_the_give_up_alarm_go_and_the_next_failure_starts_a_new_run(Progress progress, int endsAtSeconds)
     {
@@ -353,10 +366,16 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
 
     /// <summary>
     /// I-19 against a mediator that gives the same bytes a new id at every delivery: every round is
-    /// new, so the drain runs its fifty rounds and ends there. What it remembers of the failures it
-    /// yielded is bounded (500 here, at most (50 + 50) × 10), and it starts again empty at the next
-    /// cycle.
+    /// new, so the drain runs its fifty rounds and ends there. What it remembers of the deliveries it
+    /// took is bounded (500 here: fifty rounds of ten, no push; at most
+    /// <see cref="LiveDeliveryStream.MaxDoneThisDrain"/>), and it is let go when the drain ends.
     /// </summary>
+    /// <remarks>
+    /// Changed in #111 fix round 2 (owner decision F): the set used to be read at each wait and to be
+    /// cleared when the next cycle started, so it still held the drain's ids while the stream waited.
+    /// It is now let go when the drain ends, so it is read while the drain's deliveries are taken and
+    /// yielded, and is empty at every wait between two drains.
+    /// </remarks>
     [Fact]
     public async Task A_mediator_minting_new_ids_for_the_same_bytes_gets_fifty_rounds_per_drain_and_the_reported_set_stays_bounded()
     {
@@ -366,7 +385,13 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
             mediator.Enqueue($"j{i}", $"bad:j{i}");
         await using var driver = new StreamDriver(exchange);
         var reportedAtEachWait = new List<int>();
-        await driver.RunAsync(() => exchange.Log.Count(r => r.Type == LiveOn) > 2, TimeSpan.FromMinutes(5), onWait: () =>
+        var peak = 0;
+        exchange.BeforeBatch = () => peak = Math.Max(peak, driver.Reported);
+        await driver.RunAsync(() =>
+        {
+            peak = Math.Max(peak, driver.Reported);
+            return exchange.Log.Count(r => r.Type == LiveOn) > 2;
+        }, TimeSpan.FromMinutes(5), onWait: () =>
         {
             reportedAtEachWait.Add(driver.Reported);
             return false;
@@ -379,9 +404,10 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         driver.Items.Count(i => i.At < exchange.Log[cycles[1]].At).Should().Be(500, "the first drain yields its fifty rounds of ten, each once");
         driver.Items.Count(i => i.At >= exchange.Log[cycles[1]].At && i.At < exchange.Log[cycles[2]].At).Should().Be(500, "and so does the second");
         driver.Items.Should().OnlyContain(i => i.Item.Error != null);
-        reportedAtEachWait.Should().NotBeEmpty();
-        reportedAtEachWait.Max().Should().BeInRange(490, 500, "bounded by the drain's rounds (the last round's failures are yielded once the drain has ended)");
-        driver.Reported.Should().BeLessThanOrEqualTo(10, "cleared at the third cycle's start");
+        peak.Should().Be(LiveDeliveryStream.MaxDrainRounds * LiveDeliveryStream.MaxPerDelivery, "the ids of the drain's fifty rounds, when the fiftieth is taken");
+        peak.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxDoneThisDrain);
+        reportedAtEachWait.Should().NotBeEmpty().And.OnlyContain(count => count == 0, "what a drain remembered is let go when it ends: nothing is kept while the stream waits for its next cycle");
+        driver.Reported.Should().BeLessThanOrEqualTo(10, "the third drain has taken one round at most");
     }
 
     /// <summary>
