@@ -52,8 +52,8 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     /// <summary>
-    /// I-1, I-2 (ADV3-2 with 8, 16 and 17 deliveries of four, opened at the same moment from as many
-    /// threads): every host call ignores its token and never ends. However the deliveries are spread
+    /// I-1, I-2 (ADV3-2 with 8, 16, C/4 and C/4 + 1 deliveries of four, opened at the same moment
+    /// from as many threads): every host call ignores its token and never ends. However the deliveries are spread
     /// over mailboxes, mediators and senders, exactly the bound of the partitions they fall in is
     /// reserved, never more than C; every other message is refused at once, for the bound that is
     /// full, and never starts. Once the calls end, every reservation is given back.
@@ -61,16 +61,18 @@ public sealed class UnpackSlotsQa2Tests
     [Theory]
     [InlineData(8, Layout.OwnMailboxEach, 32, 0, 0)]
     [InlineData(16, Layout.OwnMailboxEach, 64, 0, 0)]
-    [InlineData(17, Layout.OwnMailboxEach, 64, 0, 4)]
-    [InlineData(16, Layout.OwnMediatorEach, 64, 0, 0)]
-    [InlineData(17, Layout.OwnMediatorEach, 64, 0, 4)]
+    [InlineData(C / Four, Layout.OwnMailboxEach, C, 0, 0)]
+    [InlineData(C / Four + 1, Layout.OwnMailboxEach, C, 0, Four)]
+    [InlineData(C / Four, Layout.OwnMediatorEach, C, 0, 0)]
+    [InlineData(C / Four + 1, Layout.OwnMediatorEach, C, 0, Four)]
     [InlineData(8, Layout.OneMailboxAnonymous, 16, 16, 0)]
     [InlineData(16, Layout.OneMailboxAnonymous, 16, 48, 0)]
     [InlineData(8, Layout.OneMailboxOneSender, 4, 28, 0)]
     [InlineData(16, Layout.OneMailboxOneSender, 4, 60, 0)]
     [InlineData(8, Layout.OneMailboxSenderEach, 32, 0, 0)]
     [InlineData(16, Layout.OneMailboxSenderEach, 64, 0, 0)]
-    [InlineData(17, Layout.OneMailboxSenderEach, 64, 0, 4)]
+    [InlineData(C / Four, Layout.OneMailboxSenderEach, C, 0, 0)]
+    [InlineData(C / Four + 1, Layout.OneMailboxSenderEach, C, 0, Four)]
     public async Task Deliveries_opened_together_reserve_exactly_the_bounds_of_their_partitions(int deliveries, Layout layout, int reserved, int partitionRefusals, int containerRefusals)
     {
         var time = new ManualTimeProvider();
@@ -193,7 +195,7 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     /// <summary>
-    /// R-1 (the residual, pinned): 17, 20 and 32 named senders, each with four lookups that ignore
+    /// R-1 (the residual, pinned): C/4 + 1, C/4 + 4 and C/2 named senders, each with four lookups that ignore
     /// their tokens, opened at the same moment in one mailbox. Exactly C calls are reserved, never
     /// more; the rest are refused for the container. While those calls run, every partition is
     /// refused at once — a new sender, the anonymous partition, another mailbox, another mediator —
@@ -201,9 +203,9 @@ public sealed class UnpackSlotsQa2Tests
     /// all end, nothing is reserved.
     /// </summary>
     [Theory]
-    [InlineData(17)]
-    [InlineData(20)]
-    [InlineData(32)]
+    [InlineData(C / Four + 1)]
+    [InlineData(C / Four + 4)]
+    [InlineData(C / 2)]
     public async Task Named_senders_enough_to_fill_the_container_hold_exactly_C_and_then_every_partition_is_refused_at_once(int senders)
     {
         var time = new ManualTimeProvider();
@@ -627,12 +629,17 @@ public sealed class UnpackSlotsQa2Tests
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
         var calls = new HostCallLog();
+        // For the share cut, m-1..m-3 keep their workers until the cut has happened, so m-4 still
+        // waits for a worker when m-0's share ends and m-0 is cut (A1).
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             using (calls.Enter(text, ct))
             {
                 if (text == "m-0")
                     await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a lookup that honours its token
+                else if (ending == Ending.ShareCut && text is "m-1" or "m-2" or "m-3")
+                    await release.Task;
             }
             return UnpackFakes.Opened(text);
         }, Budget, clock, shutdown.Token);
@@ -690,6 +697,7 @@ public sealed class UnpackSlotsQa2Tests
         }
 
         SpinWait.SpinUntil(() => Volatile.Read(ref ended) == 1, RealTime).Should().BeTrue("the ending ran in its window");
+        release.TrySetResult();
         if (ending == Ending.ShareCut)
         {
             var outcomes = await batch.WaitAsync(RealTime);
@@ -745,7 +753,7 @@ public sealed class UnpackSlotsQa2Tests
 
     /// <summary>
     /// I-1, R-8 (the pool-thread bound): a resolver that blocks its thread and ignores its token,
-    /// under forty deliveries of ten messages spread over two mediators, four mailboxes, four named
+    /// under eighty deliveries of ten messages spread over two mediators, ten mailboxes, four named
     /// senders and the anonymous partitions, opened from eight threads at once. At most C threads are
     /// ever held by it, exactly C once the partitions are full; every other message is refused at
     /// once. When the threads return, nothing is reserved.
@@ -775,9 +783,9 @@ public sealed class UnpackSlotsQa2Tests
             }
             return Task.FromResult(UnpackFakes.Opened(TestJwe.LabelOf(packed)));
         }, Budget, time);
-        var scopes = new[] { new DeliveryScope(M1, Bob), new DeliveryScope(M1, Carol), new DeliveryScope(M2, Bob), new DeliveryScope(M2, "did:example:dave") };
+        var scopes = new[] { M1, M2 }.SelectMany(m => new[] { Bob, Carol, "did:example:dave", "did:example:erin", "did:example:frank" }.Select(l => new DeliveryScope(m, l))).ToArray();
         var senders = new string?[] { null, "did:example:alice#key-1", "did:example:sam#key-1", "did:example:mallory#key-1", "did:example:trent#key-1" };
-        var batches = new Task<IReadOnlyList<DeliveredOutcome>>[40];
+        var batches = new Task<IReadOnlyList<DeliveredOutcome>>[80];
         try
         {
             Parallel.For(0, batches.Length, new ParallelOptions { MaxDegreeOfParallelism = 8 }, d =>
@@ -789,7 +797,7 @@ public sealed class UnpackSlotsQa2Tests
                         return new DeliveredInput(label, TestJwe.Bytes(sender is null ? TestJwe.Anoncrypt(label) : TestJwe.Authcrypt(sender, label)));
                     }).ToArray(),
                     $"request-{d}", default));
-            // Per mailbox: 4 senders × 4 + 16 anonymous = 32; four mailboxes could take 128, C caps them at 64.
+            // Per mailbox (eight deliveries): 4 senders × 4 + 16 anonymous = 32; ten mailboxes could take 320, C caps them at 256.
             await calls.WaitForAsync(C, RealTime);
             SpinWait.SpinUntil(() => blocked.Count == C, RealTime).Should().BeTrue("C calls are blocked on their threads");
             time.Advance(Budget);
@@ -799,7 +807,7 @@ public sealed class UnpackSlotsQa2Tests
 
             unpacker.Reserved.Should().Be(C);
             calls.Count.Should().Be(C, "no other message started");
-            outcomes.Should().HaveCount(400).And.OnlyContain(o => !o.Succeeded);
+            outcomes.Should().HaveCount(800).And.OnlyContain(o => !o.Succeeded);
             outcomes.Count(o => o.Error is TimeoutException t && t.Message.Contains("capacity exhausted", StringComparison.Ordinal)).Should().BeGreaterThan(0);
         }
         finally

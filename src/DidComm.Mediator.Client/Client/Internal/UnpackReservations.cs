@@ -46,8 +46,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// </remarks>
 internal sealed class UnpackReservations
 {
-    /// <summary>C: host unpack calls started and not yet ended in one container, all mailboxes and senders together.</summary>
-    internal const int MaxReserved = 64;
+    /// <summary>C: host unpack calls started and not yet ended in one container, all mailboxes and senders together (256, owner decision D: so 64 mailboxes each with four slow lookups are needed to hold it all).</summary>
+    internal const int MaxReserved = 256;
 
     /// <summary>P for a named sender: host unpack calls started and not yet ended per (mediator, mailbox, sender DID).</summary>
     internal const int MaxPerSender = 4;
