@@ -1374,3 +1374,56 @@ Format per entry:
 - **How to apply:** Before a hand-back lists a finding as "out of scope", search the open issues. No
   issue → fix it here (size is not a stop). An open issue → leave it there and name it. A stop or a
   private item → raise it, don't fix or file it. See [[L-046]] and [[L-073]].
+
+## L-076 — An option or a report never says "closes X" without a named test that fails before and passes after.
+
+- **Lesson:** A claim of the form "X is closed / cannot happen / is bounded by N" is written only next
+  to the name of the test that proves it, and that test fails without the change it proves. This
+  holds for an option put to the owner as much as for a report, a commit message or a doc. When the
+  test does not exist yet, the sentence says "not verified".
+- **Why:** #111, 2026-11-24: two options were put to the owner with claims that later proved wrong
+  ("closes both findings by construction"; "honest senders are never cut"). Each had been reasoned,
+  not tested, and each cost a round.
+- **How to apply:** Before an option or a hand-back leaves the session, list its claims and write a
+  test name beside each. A claim with no test is removed or marked "not verified". Words such as "by
+  construction", "cannot" and "always" are a prompt to look for the test. See [[L-073]].
+
+## L-077 — Cancellation versus failure is decided by the token's state, never by the exception's type.
+
+- **Lesson:** When awaited work ends with an exception, decide whether it was ended from outside by
+  reading the tokens that end it (the deadline's, the caller's, the owner's shutdown), not by
+  catching `OperationCanceledException`. Host code may report its cancellation as a failure of its
+  own, and may do so from a callback that runs before ours.
+- **Why:** #111: a delivered message's lookup that reported its cancellation as a resolution failure
+  was recorded as the message's own failure, and the message was remembered. The same shape was in
+  the live stream's three request steps and in the channel's sends and endpoint lookup. Tests that
+  covered the case passed only because of the order in which two registrations happened to run.
+- **How to apply:** Write `catch (Exception) when (<the tokens say it is being ended>)` before the
+  catch for a failure of its own. Read every token that can end the work, the caller's included:
+  callbacks run last-registered first, so a callback host code registered on the caller's token runs
+  before the one that cancels ours. Prove each reading with a mutant that removes it.
+
+## L-078 — A test of cancellation ordering cancels from a thread-pool thread.
+
+- **Lesson:** A test that depends on which continuation runs inside a `Cancel()` makes the
+  cancellation (or the clock advance that fires the deadline) from `Task.Run`, and makes the order of
+  the registrations explicit with a gate the test opens.
+- **Why:** #111: xunit's synchronization context changes where continuations run, so a continuation
+  that runs inline in production did not run inline in the test, and the defect of [[L-077]] stayed
+  hidden behind a race between two registrations.
+- **How to apply:** Have the host code under test register its callback only after the test has seen
+  the call reach its wait; then cancel from `Task.Run` and await that task. Run the test 50 times.
+  See [[L-065]].
+
+## L-079 — A figure is measured by a named test, or it is not written.
+
+- **Lesson:** A time, a count or a bound that reaches the owner, a doc or a commit message comes from
+  a test that prints or asserts it, named with the figure. A hand trace or an estimate is labelled as
+  one, and is replaced by the measurement before a decision rests on it. Measure before and after.
+- **Why:** #111: the owner chose to remove the per-message time limits on a figure of "about 500 s at
+  limit 10" that nobody had measured. Measured afterwards on the manual clock, with 99 messages that
+  never open in front at the default lease: 200 s with the limits, 1340 s without, with a second
+  learning pass.
+- **How to apply:** When an option changes a rate or a bound, run the acceptance matrix on both sides
+  first and put both columns in the option. Give the test's name and the line that prints the figure.
+  Tune no constant to improve a figure; report the cell. See [[L-076]].
