@@ -115,9 +115,12 @@ public sealed class PickupClientFilterAdv3Tests : IAsyncLifetime
 
         var underT = await FetchAsync(F, recipientDid: T);
         underT.Items.Should().HaveCount(2).And.OnlyContain(i => i.Error != null, "neither was opened by T's key");
+        underT.Items.Single(i => i.Id == "claims-t").Error.Should().BeAssignableTo<DidCommException>("the addressing rule refuses a 'to' that does not name the decrypting DID");
 
         var underF = await FetchAsync(F, recipientDid: F);
-        underF.Items.Single(i => i.Id == "claims-t").Error.Should().BeAssignableTo<DidCommException>("the addressing rule refuses a 'to' that does not name the decrypting DID");
+        // It failed when it was delivered before, so it is held back now (#111, owner decision C):
+        // under F's filter it is still never returned opened.
+        underF.Items.Single(i => i.Id == "claims-t").Unpacked.Should().BeNull();
         underF.Items.Single(i => i.Id == "for-f").Unpacked!.Message.Id.Should().Be(forF.Id);
         _mediator.Queued(F).Should().Equal("claims-t");
     }

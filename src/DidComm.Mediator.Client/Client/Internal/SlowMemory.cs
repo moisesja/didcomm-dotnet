@@ -7,9 +7,10 @@ using System.Text;
 namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
-/// The memory of delivered messages that were slow to open (#111, I-9..I-12, D-2, D-3, D-8): per
-/// (mediator, mailbox), the mediator's attachment ids of messages whose unpack ran for at least the
-/// slow threshold and did not open, each with a pause that doubles each time it is slow again. While
+/// The memory of delivered messages that did not open (#111, I-9..I-12, D-2, D-3, D-8): per
+/// (mediator, mailbox), the mediator's attachment ids of messages whose unpack ran and failed, or ran
+/// for its share and was cut (the unpacker decides, I-9), each with a pause that doubles each time it
+/// does so again. While
 /// its pause lasts, a remembered message is not opened again (<see cref="HeldBack"/>), so a delivery
 /// made only of such messages ends at once and a fetch loop reaches what is behind them.
 /// </summary>

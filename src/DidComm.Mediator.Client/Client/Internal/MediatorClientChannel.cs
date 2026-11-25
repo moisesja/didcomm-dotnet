@@ -185,9 +185,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     /// <summary>
     /// The unpacker behind <see cref="UnpackDeliveredBatchAsync"/>, one per channel (container) and
     /// linked to this channel's shutdown: one budget per delivery, 4 messages at a time, each a share
-    /// of the time left; host unpack calls reserved before they start (64 per container, 4 per
+    /// of the time left; host unpack calls reserved before they start (256 per container, 4 per
     /// sender and 16 for messages without a named sender, per mediator and mailbox); and the memory
-    /// of messages that were slow to open, held back until their pause ends.
+    /// of messages that did not open, held back until their pause ends.
     /// </summary>
     internal DeliveredMessageUnpacker Unpacker { get; }
 

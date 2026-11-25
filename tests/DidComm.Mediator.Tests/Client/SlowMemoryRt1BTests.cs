@@ -8,9 +8,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// #111 red-team pass 1, RT1-B: what the slow memory remembers (I-9). A message is remembered only
-/// for its own slowness: its host code ran for at least the slow threshold τ and did not open. Time
-/// its work item spent waiting for a pool thread before any host code ran is not the message's own.
+/// #111 red-team pass 1, RT1-B: what the memory remembers (I-9 as amended, owner decision C: "every
+/// failure, fair to late starts"). A message cut without opening is remembered only when its own
+/// code ran for its share; time its work item spent waiting for a pool thread before any host code
+/// ran is not the message's own.
 /// Every timing is driven by the injected <see cref="ManualTimeProvider"/>; real time is only a hang
 /// guard. The pool is kept busy only while the manual clock moves, then released.
 /// </summary>
@@ -24,17 +25,16 @@ public sealed class SlowMemoryRt1BTests
     private const string AliceKid = "did:example:alice#key-x25519-1";
 
     /// <summary>
-    /// I-9: a message whose host code ran for less than τ is not remembered, even when its work item
-    /// waited for a pool thread for most of the budget and the budget then ended it. Here every pool
-    /// thread is busy and work is queued in front while the clock moves 19.7 s; the honest message's
-    /// host code then runs 0.3 s (under τ = 0.6 s) before the budget ends.
+    /// I-9: a message whose host code ran for less than its share is not remembered, even when its
+    /// work item waited for a pool thread for most of the budget and the budget then ended it. Here
+    /// every pool thread is busy and work is queued in front while the clock moves 19.7 s; the honest
+    /// message's host code then runs 0.3 s of its 20 s share before the budget ends.
     /// </summary>
-    [Fact(Skip = "RT1 defect: time queued for a pool thread counts toward the slow threshold")]
-    public async Task A_message_whose_host_code_ran_under_the_slow_threshold_is_not_remembered_after_waiting_for_a_pool_thread()
+    [Fact]
+    public async Task A_message_whose_host_code_ran_less_than_its_share_is_not_remembered_after_waiting_for_a_pool_thread()
     {
         var time = new ManualTimeProvider();
         var unpacker = new DeliveredMessageUnpacker(Honest(time, out var entered), Budget, time);
-        unpacker.SlowThreshold.Should().Be(TimeSpan.FromMilliseconds(600));
         var honest = new[] { new DeliveredInput("alice-1", TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, "alice-1"))) };
 
         Task<IReadOnlyList<DeliveredOutcome>> delivery;
@@ -52,26 +52,32 @@ public sealed class SlowMemoryRt1BTests
 
         outcomes.Single().Succeeded.Should().BeFalse("the budget ended while its 2 s lookup was running");
         time.GetElapsedTime(enteredAt).Should().Be(HostRan);
-        HostRan.Should().BeLessThan(unpacker.SlowThreshold);
+        HostRan.Should().BeLessThan(Budget - unpacker.StartAllowance);
         unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
-            "its host code ran {0} ms, under the slow threshold of {1} ms; remembered, it would not be opened again for {2} min",
-            HostRan.TotalMilliseconds, unpacker.SlowThreshold.TotalMilliseconds, unpacker.Memory.FirstPause.TotalMinutes);
+            "its host code ran {0} ms of its {1} s share; remembered, it would not be opened again for {2} min",
+            HostRan.TotalMilliseconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
     }
 
     /// <summary>
     /// I-9 across mailboxes: lookups in other mailboxes whose threads stay blocked (fewer than the
-    /// container's bound, so this message is never refused) make the pool's threads busy; an honest
-    /// message in this mailbox whose host code then runs 0.3 s before its budget ends is not
-    /// remembered as slow.
+    /// container's bound, so this message is never refused) hold pool threads; the honest message's
+    /// work item waits for one while the clock moves 19.7 s (forced by a gate on its thread before its
+    /// code runs, so the wait does not depend on how many threads the pool has), then its host code
+    /// runs 0.3 s of its share before the budget ends. It is not remembered.
     /// </summary>
-    [Fact(Skip = "RT1 defect: time queued for a pool thread counts toward the slow threshold")]
-    public async Task A_message_whose_host_code_ran_under_the_slow_threshold_is_not_remembered_while_other_mailboxes_lookups_hold_the_pool()
+    [Fact]
+    public async Task A_message_whose_host_code_ran_less_than_its_share_is_not_remembered_while_other_mailboxes_lookups_hold_the_pool()
     {
-        const int mailboxes = 15; // 15 × 4 = 60 blocked lookups, under C = 64
+        const int mailboxes = 15;
         const int blocked = mailboxes * DeliveredMessageUnpacker.FetchConcurrency;
-        using var floor = new PoolFloor(parked: 0);
-        ThreadPool.GetMinThreads(out var minimum, out _);
-        Math.Max(minimum, ThreadPool.ThreadCount).Should().BeLessThan(blocked - 8, "precondition: more blocked lookups than pool threads");
+        using var floor = new PoolFloor(parked: blocked + 1);
+        using var late = new ManualResetEventSlim(false);
+        using var parked = new SemaphoreSlim(0);
+        Volatile.Write(ref _atNextRestore, () =>
+        {
+            parked.Release();
+            late.Wait(RealTime); // the honest work item waits for its thread (bounded so a red run cannot hang)
+        });
 
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
@@ -96,14 +102,21 @@ public sealed class SlowMemoryRt1BTests
                         .Select(i => new DeliveredInput($"t{m}-{i}", TestJwe.Bytes(TestJwe.Anoncrypt($"t{m}-{i}")))).ToArray(),
                     $"request-t{m}", default))
                 .ToArray());
-            delivery = StartOnOwnThread(() => unpacker.UnpackAllAsync(Bob,
-                new[] { new DeliveredInput("alice-1", TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, "alice-1"))) }, "request-1", default));
-            unpacker.Reserved.Should().BeLessThanOrEqualTo(UnpackReservations.MaxReserved);
+            await calls.WaitForAsync(blocked, RealTime);
+            delivery = StartOnOwnThread(() =>
+            {
+                Marked.Value = "late"; // flows into the honest message's work item only
+                return unpacker.UnpackAllAsync(Bob,
+                    new[] { new DeliveredInput("alice-1", TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, "alice-1"))) }, "request-1", default);
+            });
+            unpacker.Reserved.Should().Be(blocked + 1, "the honest message is never refused");
+            (await parked.WaitAsync(RealTime)).Should().BeTrue("its work item is waiting for its thread");
             time.Advance(Budget - HostRan);
-            entered.Task.IsCompleted.Should().BeFalse("the work item is still queued behind the blocked lookups");
+            entered.Task.IsCompleted.Should().BeFalse("its code has not started");
         }
         finally
         {
+            late.Set();
             gate.Set();
         }
 
@@ -114,9 +127,32 @@ public sealed class SlowMemoryRt1BTests
 
         outcomes.Single().Succeeded.Should().BeFalse("the budget ended while its 2 s lookup was running");
         time.GetElapsedTime(enteredAt).Should().Be(HostRan);
+        Volatile.Read(ref _atNextRestore).Should().BeNull("the gate was used");
         unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
-            "its host code ran {0} ms, under the slow threshold of {1} ms; remembered, it would not be opened again for {2} min",
-            HostRan.TotalMilliseconds, unpacker.SlowThreshold.TotalMilliseconds, unpacker.Memory.FirstPause.TotalMinutes);
+            "its host code ran {0} ms of its {1} s share; remembered, it would not be opened again for {2} min",
+            HostRan.TotalMilliseconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
+    }
+
+    // A gate on the honest message's thread before its code runs: runs when a pool thread switches to
+    // an execution context in which Marked is "late" (its work item, after the task's own
+    // cancellation check and before its delegate runs). The armed action runs once; nothing escapes
+    // (an exception here ends the process).
+    private static readonly AsyncLocal<string?> Marked = new(OnMarkedContextRestored);
+    private static Action? _atNextRestore;
+
+    private static void OnMarkedContextRestored(AsyncLocalValueChangedArgs<string?> args)
+    {
+        if (!args.ThreadContextChanged || args.CurrentValue != "late")
+            return;
+        var action = Interlocked.Exchange(ref _atNextRestore, null);
+        try
+        {
+            action?.Invoke();
+        }
+        catch
+        {
+            // Never thrown into the runtime's context switch.
+        }
     }
 
     /// <summary>

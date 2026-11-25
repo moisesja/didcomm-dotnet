@@ -42,7 +42,7 @@ public sealed class SlowMemoryFetchQa1Tests
         var onlyHeld = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 4);
 
         onlyHeld.IsCompleted.Should().BeTrue("a fetch made only of held-back messages needs no clock");
-        (await onlyHeld).Items.Should().HaveCount(4).And.OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("slow to open when it was delivered before"));
+        (await onlyHeld).Items.Should().HaveCount(4).And.OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("did not open when it was delivered before"));
         exchange.Wire.Sent.Count.Should().Be(sent + 1, "only the delivery-request was sent: no messages-received");
         exchange.Host.Calls.Count.Should().Be(calls);
         exchange.Clock.Scheduled.Should().Be(0);
@@ -102,7 +102,7 @@ public sealed class SlowMemoryFetchQa1Tests
 
         var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 2, recipientDid: FakePickupExchange.L));
 
-        batch.Items[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("slow to open when it was delivered before");
+        batch.Items[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("did not open when it was delivered before");
         batch.Items[1].Unpacked.Should().NotBeNull();
         exchange.Wire.AcknowledgedIds.Should().Equal("honest");
     }
@@ -256,7 +256,7 @@ public sealed class SlowMemoryFetchQa1Tests
 
         fromY.Items.Should().HaveCount(16).And.OnlyContain(i => i.Unpacked != null, "an id is unique only to its mediator");
         fromX.IsCompleted.Should().BeTrue();
-        (await fromX).Items.Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("slow to open"));
+        (await fromX).Items.Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("did not open when it was delivered before"));
         exchange.Deliveries.Select(d => d.Scope.MediatorDid).Distinct().Should().BeEquivalentTo(new[] { x.Did, y.Did });
     }
 
@@ -325,7 +325,7 @@ public sealed class SlowMemoryFetchQa1Tests
 
         (exchange.Clock.TrueNow - start).Should().Be(TimeSpan.Zero, "only the honest message is opened, and it opens at once");
         items.Single(i => i.Id == "honest").Unpacked.Should().NotBeNull();
-        items.Where(i => i.Id != "honest").Should().HaveCount(16).And.OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("slow to open"));
+        items.Where(i => i.Id != "honest").Should().HaveCount(16).And.OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("did not open when it was delivered before"));
         (exchange.Host.Calls.Count - calls).Should().Be(1);
     }
 
@@ -349,7 +349,7 @@ public sealed class SlowMemoryFetchQa1Tests
 
         batch.Items[0].Unpacked.Should().NotBeNull();
         batch.Items[1].Unpacked.Should().NotBeNull();
-        batch.Items[2].Error!.Message.Should().Contain("slow to open", "the exact id is remembered");
+        batch.Items[2].Error!.Message.Should().Contain("did not open when it was delivered before", "the exact id is remembered");
     }
 
     /// <summary>

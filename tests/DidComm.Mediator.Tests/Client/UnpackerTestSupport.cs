@@ -181,15 +181,15 @@ internal sealed class HostCallLog
 }
 
 /// <summary>
-/// Raises the thread pool's floor for a test that parks pool threads (L-065 corollary), and puts it
-/// back when disposed (<see cref="ThreadPoolFloor"/>: not while another test still holds a raise, and
-/// not over a raise something else made meanwhile).
+/// Raises the thread pool's floor for a test that parks pool threads (L-065 corollary), through the
+/// counted <see cref="DidComm.TestSupport.ThreadPoolFloor"/>: put back when the last holder is done,
+/// and never undoing a raise made by another test meanwhile.
 /// </summary>
 internal sealed class PoolFloor : IDisposable
 {
     private readonly IDisposable _raise;
 
-    public PoolFloor(int parked) => _raise = ThreadPoolFloor.Raise(Environment.ProcessorCount + parked + 8);
+    public PoolFloor(int parked) => _raise = DidComm.TestSupport.ThreadPoolFloor.Raise(Environment.ProcessorCount + parked + 8);
 
     public void Dispose() => _raise.Dispose();
 }

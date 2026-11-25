@@ -55,7 +55,7 @@ public sealed class DeliveredUnpackCutIfOthersWaitTests
     }
 
     /// <summary>
-    /// The container's variant: with an extended message among 64 reservations, a take in another
+    /// The container's variant: with an extended message among C reservations, a take in another
     /// mailbox refused for the container cuts the extended message.
     /// </summary>
     [Fact]
@@ -65,13 +65,14 @@ public sealed class DeliveredUnpackCutIfOthersWaitTests
         try
         {
             var first = await StartExtendedAsync(unpacker, time, calls, "x-0", TestJwe.Anoncrypt("x-0"));
-            // Then 63 lookups that ignore their token, in other mailboxes (15 deliveries of four and
-            // one of three): the container is full.
-            var others = Enumerable.Range(0, 16)
+            // Then C - 1 lookups that ignore their token, in other mailboxes (deliveries of four, the
+            // last of three): the container is full.
+            const int mailboxes = UnpackReservations.MaxReserved / DeliveredMessageUnpacker.FetchConcurrency;
+            var others = Enumerable.Range(0, mailboxes)
                 .Select(m => unpacker.UnpackAllAsync(new DeliveryScope(FakePickupExchange.M, $"did:example:tenant-{m}"),
-                    Enumerable.Range(0, m == 15 ? 3 : 4).Select(i => Message(TestJwe.Anoncrypt($"junk-{m}-{i}"), $"junk-{m}-{i}")).ToArray(), "request-t" + m, default))
+                    Enumerable.Range(0, m == mailboxes - 1 ? 3 : 4).Select(i => Message(TestJwe.Anoncrypt($"junk-{m}-{i}"), $"junk-{m}-{i}")).ToArray(), "request-t" + m, default))
                 .ToArray();
-            await calls.WaitForAsync(64, RealTime);
+            await calls.WaitForAsync(UnpackReservations.MaxReserved, RealTime);
             unpacker.Reserved.Should().Be(UnpackReservations.MaxReserved);
             TokenOf(calls, "x-0").IsCancellationRequested.Should().BeFalse("no take was refused yet");
 

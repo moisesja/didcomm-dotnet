@@ -209,14 +209,18 @@ public sealed class SlowMemoryQa1Tests
     // ---- what is remembered (I-9) ----------------------------------------------------------------
 
     /// <summary>
-    /// I-9 at the slow threshold τ (0.6 s): a message whose host call fails exactly τ after it
-    /// started is remembered, one that fails a tick later is too, one that fails a tick sooner is not.
+    /// I-9 as amended (owner decision C): a message whose host call fails on its own is remembered
+    /// whatever the duration: at once, a tick after it started, at the former slow threshold (0.6 s)
+    /// and a tick either side of it, and after 4.9 s.
     /// </summary>
     [Theory]
-    [InlineData(0, true)]
-    [InlineData(1, true)]
-    [InlineData(-1, false)]
-    public async Task A_failure_at_the_slow_threshold_is_remembered_and_one_a_tick_sooner_is_not(int ticks, bool remembered)
+    [InlineData(0L)]
+    [InlineData(1L)]
+    [InlineData(5_999_999L)]
+    [InlineData(6_000_000L)]
+    [InlineData(6_000_001L)]
+    [InlineData(49_000_000L)]
+    public async Task A_failure_is_remembered_whatever_its_duration(long ticks)
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
@@ -226,15 +230,14 @@ public sealed class SlowMemoryQa1Tests
             calls.Enter(TestJwe.LabelOf(packed), ct);
             return fail.Task;
         }, B, time);
-        unpacker.SlowThreshold.Should().Be(TimeSpan.FromSeconds(0.6));
 
         var delivery = unpacker.UnpackAllAsync(Qa1.Bob, new[] { Qa1.Message(Qa1.Anon("q1"), "q1") }, "request", default);
         await calls.WaitForAsync(1, RealTime);
-        time.Advance(unpacker.SlowThreshold + TimeSpan.FromTicks(ticks));
+        time.Advance(TimeSpan.FromTicks(ticks));
         fail.SetException(new CryptoException("JWE could not be decrypted."));
         (await delivery.WaitAsync(RealTime)).Single().Error.Should().BeOfType<CryptoException>();
 
-        unpacker.Memory.HeldBack(Qa1.Bob, new[] { "q1" }).Single().Should().Be(remembered);
+        unpacker.Memory.HeldBack(Qa1.Bob, new[] { "q1" }).Single().Should().BeTrue("it failed {0} ticks after it started", ticks);
     }
 
     /// <summary>
@@ -447,6 +450,6 @@ public sealed class SlowMemoryQa1Tests
     private static async Task ReplayAsync(DeliveredMessageUnpacker unpacker, DeliveryScope scope, IReadOnlyList<string> ids)
     {
         var outcomes = await unpacker.UnpackAllAsync(scope, ids.Select(id => Qa1.Message(Qa1.Anon(id), id)).ToArray(), "replay", default).WaitAsync(RealTime);
-        outcomes.Should().OnlyContain(o => o.Succeeded || (o.Error is TimeoutException && o.Error.Message.Contains("slow to open")));
+        outcomes.Should().OnlyContain(o => o.Succeeded || (o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before")));
     }
 }
