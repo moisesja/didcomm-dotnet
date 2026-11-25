@@ -212,10 +212,11 @@ public sealed class PickupClientLiveAdv5Tests
 
     /// <summary>
     /// ADV5-3 (was a known limit deferred to #111 by owner decision; Low; fixed in #111: progress
-    /// ends the run of failures). Property checked — <see cref="LiveDeliveryStream"/> remarks: "Progress
-    /// ends the run ... a delivery ... that brings at least one message this stream neither holds nor
-    /// has yielded as a failure in the current drain, or an acknowledgement the mediator accepted. So
-    /// failures separated by progress never add up to a give-up, however many there are."
+    /// ends the run of failures). Property checked — <see cref="LiveDeliveryStream"/> remarks, "The
+    /// run of failures": a drain round that brings something new (a message this stream neither
+    /// holds nor remembers for the current drain) lets the give-up alarm go and starts the back-off
+    /// again, and an acknowledgement the mediator accepted lets the give-up alarm go. So failures
+    /// separated by such steps do not add up to a give-up.
     /// <para>
     /// Each cycle turns live mode on, receives one new message, yields it and has it acknowledged,
     /// then its next drain round times out. Checked: twelve such cycles, more than RequestTimeout +
@@ -276,8 +277,8 @@ public sealed class PickupClientLiveAdv5Tests
     /// ADV5-4 (was a known limit deferred to #111 by owner decision; Low; fixed in #111: a drain round
     /// that brings nothing new ends the drain). Property checked — <see cref="LiveDeliveryStream"/>
     /// remarks: "A mediator that does not set delivered messages aside answers every round with the
-    /// head of its queue, so a message there that never opens is yielded once per cycle, at a cost of
-    /// two delivery requests per cycle".
+    /// head of its queue, so a message there that never opens is yielded once per drain", and "when
+    /// no step fails, a drain is one cycle and that costs two delivery requests per cycle".
     /// <para>
     /// Message Pickup 3.0 does not require a mediator to set delivered messages aside: a
     /// spec-conformant mediator answers every <c>delivery-request</c> with the head of the queue until

@@ -64,7 +64,7 @@ public sealed class InconclusiveLateStartRt4Tests(ITestOutputHelper output)
     /// opens six seconds into that fetch: 66 simulated seconds in all, at either limit.
     /// </summary>
     /// <remarks>
-    /// RT4's reproduction, red on 98a32ac at both limits ("Expected reach.Found to be True ...
+    /// RT4's reproduction, red at both limits before the flag was widened ("Expected reach.Found to be True ...
     /// (handed over as: a failed item, tried (TimeoutException); still queued at the mediator:
     /// False), but found False": the item's flag was false, the host discarded it, and it was never
     /// returned opened).

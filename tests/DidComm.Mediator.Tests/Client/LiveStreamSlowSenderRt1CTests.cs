@@ -17,8 +17,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// RT1-C (#111): the live stream at a leasing mediator reaches an honest message queued before it
 /// started, behind messages that fail after a lookup of about 0.6 s (the slow threshold τ before
-/// owner decision C removed it: every failure is now remembered), within the
-/// cycles the plan gives for messages that never open (S7: about 10 cycles for 99 at a 10 s lease).
+/// owner decision C removed it: every failure is now remembered): within twenty minutes of
+/// simulated time at a 10 s lease, and in the first cycle at the mediator's default lease.
 /// Simulated time (<see cref="SimClock"/>, <see cref="StreamDriver"/>); the real unpacker and its
 /// memory run on that clock. Nothing sleeps; real time is only a hang guard.
 /// </summary>

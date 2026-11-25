@@ -28,8 +28,8 @@ public sealed class UnpackReservationsSixteenRt4Tests
     /// bound in one mailbox (<paramref name="oneMailbox"/>), or one sender at its bound in each of
     /// sixteen mailboxes, hold all 256; one fewer leaves sixteen free. With all 256 held, a message
     /// that would open, of another sender in another mailbox, is refused for the container and its
-    /// outcome says not attempted; a seventeenth message of a held sender in its mailbox is refused
-    /// for its sender's bound, also not attempted; no host code runs for either. When the lookups
+    /// outcome is inconclusive; a seventeenth message of a held sender in its mailbox is refused
+    /// for its sender's bound, also inconclusive; no host code runs for either. When the lookups
     /// end, no reservation and no partition is left, and the same message opens.
     /// </summary>
     [Theory]

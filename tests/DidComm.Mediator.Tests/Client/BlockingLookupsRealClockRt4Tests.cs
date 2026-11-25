@@ -37,8 +37,9 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
     /// process): it prints what it measures (prefix <c>RT4 |</c>, and the lines of the run) and
     /// asserts nothing about it. Decided: what it shows is a documented residual. As the
     /// independent review wrote it, it was a check with an expectation, kept below as its record.
-    /// A check, and a reproduction for the rows that failed (on a415f6d: the rows of three and
-    /// more deliveries of sixteen, and of eleven deliveries of four, all opened from one thread).
+    /// A check, and a reproduction for the rows that failed (when the review ran it: the rows of
+    /// three and more deliveries of sixteen, and of eleven deliveries of four, all opened from one
+    /// thread).
     /// Expected, from the unpacker's contract ("the returned task is complete when the last message
     /// has ended or, at the latest, when the budget runs out", "the budget decides the outcome, even
     /// when a resolver blocks its thread"): every delivery's result is set by its budget's end, here
@@ -73,7 +74,7 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
     /// process): it prints what it measures (prefix <c>RT4 |</c>, and the lines of the run) and
     /// asserts nothing about it. Decided: what it shows is a documented residual. As the
     /// independent review wrote it, it was a check with an expectation, kept below as its record.
-    /// A check, and a reproduction for the rows that failed (on a415f6d: three and four
+    /// A check, and a reproduction for the rows that failed (when the review ran it: three and four
     /// deliveries of sixteen), every delivery opened from one thread. Expected: the message that
     /// opens at once, alone in its delivery, is returned opened, or its outcome says it was not
     /// attempted when no host code ran for it. Observed in the failing rows: no host code ran for
@@ -98,11 +99,11 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
     /// independent review wrote it, it was a check with an expectation, kept below as its record.
     /// The same deliveries, opened from pool threads as a fetch that continues on the pool opens
     /// them, with the message that opens at once inside the first delivery, at the position given
-    /// among its sixteen. A measurement, and a reproduction for a row that fails; on a415f6d the row
-    /// of six deliveries failed in two runs of six, and no other row failed. Expected: that message
-    /// is returned opened, or its outcome says it was not attempted when no host code ran for it.
-    /// Observed in the failing runs: no host code ran for it, and its outcome is "ran out while it
-    /// was being opened" with the not-attempted flag false.
+    /// among its sixteen. A measurement, and a reproduction for a row that fails; when the review ran
+    /// it, the row of six deliveries failed in two runs of six, and no other row failed. Expected:
+    /// that message is returned opened, or its outcome says it was not attempted when no host code
+    /// ran for it. Observed in the failing runs: no host code ran for it, and its outcome is "ran
+    /// out while it was being opened" with the not-attempted flag false.
     /// </summary>
     [RealClock111Theory]
     [InlineData(1, 2)]
