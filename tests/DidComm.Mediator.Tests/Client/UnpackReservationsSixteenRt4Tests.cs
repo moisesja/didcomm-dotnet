@@ -68,7 +68,7 @@ public sealed class UnpackReservationsSixteenRt4Tests
                 var delivery = unpacker.UnpackAllAsync(ScopeOf(p), messages, "request-1", default);
                 await calls.WaitForAsync(held + PerSender, RealTime);
                 time.Advance(Budget);
-                (await delivery.WaitAsync(RealTime)).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened") && !o.NotAttempted);
+                (await delivery.WaitAsync(RealTime)).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened") && !o.Inconclusive);
             }
             unpacker.Reserved.Should().Be(UnpackReservations.MaxReserved, "sixteen partitions at the bound of sixteen hold it all");
             unpacker.Reservations.Partitions.Should().Be(MaxReservedOverPerSender);
@@ -78,9 +78,9 @@ public sealed class UnpackReservationsSixteenRt4Tests
             var refusedForItsSender = (await unpacker.UnpackAllAsync(ScopeOf(0), new[] { From(KidOf(0), "target-of-a-held-sender") }, "request-3", default).WaitAsync(RealTime)).Single();
 
             refusedForTheContainer.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted").And.Contain("all mailboxes together");
-            refusedForTheContainer.NotAttempted.Should().BeTrue();
+            refusedForTheContainer.Inconclusive.Should().BeTrue();
             refusedForItsSender.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted").And.Contain("for its sender");
-            refusedForItsSender.NotAttempted.Should().BeTrue();
+            refusedForItsSender.Inconclusive.Should().BeTrue();
             calls.Count.Should().Be(hostCalls, "a refused message's host code does not start");
             unpacker.Memory.Count.Should().Be(UnpackReservations.MaxReserved, "only the messages that had their whole budget are remembered; a refusal writes nothing");
         }

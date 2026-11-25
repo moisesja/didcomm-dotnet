@@ -341,8 +341,8 @@ public sealed class SlowSenderSpacedDeliveriesRt3Tests(ITestOutputHelper output)
     }
 
     // A host's fetch loop, run `runs` times, `between` apart: each run fetches until the mediator
-    // says there is nothing to deliver now. It runs on a pool thread and starts a fetch only once
-    // the host calls of the fetch before have ended (the model of Qa1Loop).
+    // says there is nothing to deliver now. It runs on a pool thread; each fetch starts only once
+    // the host calls of the fetch before have ended (Qa1Exchange.DriveAsync waits for them).
     private Task<LoopRuns> RunLoopsAsync(TimeSpan between, bool newProcessEachRun, int runs, int inFront, int limit)
         => Task.Run(async () =>
         {
@@ -367,7 +367,6 @@ public sealed class SlowSenderSpacedDeliveriesRt3Tests(ITestOutputHelper output)
                 }
                 while (true)
                 {
-                    SpinWait.SpinUntil(() => exchange.Unpacker.Reserved == 0, Qa1Exchange.Guard).Should().BeTrue("every host call of the fetch before ends");
                     var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit)).ConfigureAwait(false);
                     outcomes.AddRange(batch.Items.Where(i => i.Id == "honest").Select(Outcome));
                     if (batch.Items.Any(i => i.Id == "honest" && i.Unpacked is not null))

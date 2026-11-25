@@ -39,16 +39,13 @@ internal sealed record Qa1Reach(
 /// </para>
 /// <para>
 /// <strong>The host's lookups, as modelled.</strong> A lookup that honours its token has ended
-/// before the host's next fetch is answered. A host call keeps its reservation until it ends, and
-/// one whose token was cancelled ends a moment after its delivery's result is set: where its
-/// continuation runs is the scheduler's choice, and under a test's synchronization context it is the
-/// thread pool. So the loop runs, and moves the clock, on a thread-pool thread of its own (no
-/// synchronization context: a cancelled wait then ends its call inside the cancellation), and before
-/// each fetch it waits until no reservation is held: the event "every host call of the fetches
-/// before has ended", not a neighbour of it. Without that wait a fetch can
-/// start while calls of the fetch before still hold reservations; with sixteen opened at once
-/// against a bound of sixteen per partition, messages of the new delivery are then refused for that
-/// bound, and the figures depend on the thread pool. What a delivery does when it does arrive
+/// before the host's next fetch is answered: each fetch is driven through
+/// <see cref="Qa1Exchange.DriveAsync{T}"/>, which waits until no such lookup holds a reservation
+/// (its remarks state the model). The loop runs, and moves the clock, on a thread-pool thread of its
+/// own, so nothing here depends on a test's synchronization context (L-078). Without that wait a
+/// fetch can start while calls of the fetch before still hold reservations; with sixteen opened at
+/// once against a bound of sixteen per partition, messages of the new delivery are then refused for
+/// that bound, and the figures depend on the thread pool. What a delivery does when it does arrive
 /// before such lookups have ended is measured on its own (<see cref="DeliveredUnpackNextDeliveryRt3Tests"/>).
 /// </para>
 /// </remarks>
@@ -63,15 +60,13 @@ internal static class Qa1Loop
     /// <param name="limit">The fetch limit.</param>
     /// <param name="cap">The horizon.</param>
     /// <param name="honest">The id of the message looked for.</param>
-    /// <param name="waitForHostCallsToEnd">False only for a test of the wait itself: the next fetch then starts at once, as in <see cref="SlowSenderFetchQa1Tests.ReachAsync"/>.</param>
-    /// <param name="whileHostCallsEnd">Runs each time the loop sees a reservation still held before a fetch (a test's gate).</param>
-    public static Task<Qa1Reach> RunAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", bool waitForHostCallsToEnd = true, Action? whileHostCallsEnd = null)
+    /// <param name="waitForHostCallsToEnd">False only for a test of the wait itself: each fetch then starts at once.</param>
+    public static Task<Qa1Reach> RunAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", bool waitForHostCallsToEnd = true)
         // On a thread-pool thread, so the clock is moved, and every budget ended, from a thread
-        // without a test's synchronization context (L-078): a host call whose wait is cancelled
-        // there ends inside the cancellation, before the delivery's result is set.
-        => Task.Run(() => LoopAsync(exchange, mediator, limit, cap, honest, waitForHostCallsToEnd, whileHostCallsEnd));
+        // without a test's synchronization context (L-078).
+        => Task.Run(() => LoopAsync(exchange, mediator, limit, cap, honest, waitForHostCallsToEnd));
 
-    private static async Task<Qa1Reach> LoopAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest, bool waitForHostCallsToEnd, Action? whileHostCallsEnd)
+    private static async Task<Qa1Reach> LoopAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest, bool waitForHostCallsToEnd)
     {
         using var floor = new PoolFloor(parked: 2);
         var client = exchange.Client();
@@ -83,29 +78,14 @@ internal static class Qa1Loop
         var budgetFetches = 0;
         var refused = 0;
         var beforeItsTurn = 0;
-        var mostReserved = 0;
         var callsSeen = 0;
         var openings = new Dictionary<string, int>(StringComparer.Ordinal);
         TimeSpan? firstReopening = null;
         var found = false;
         while (exchange.Clock.TrueNow - start < cap)
         {
-            if (waitForHostCallsToEnd)
-            {
-                var ended = SpinWait.SpinUntil(() =>
-                {
-                    var reserved = exchange.Unpacker.Reserved;
-                    if (reserved == 0)
-                        return true;
-                    mostReserved = Math.Max(mostReserved, reserved);
-                    whileHostCallsEnd?.Invoke();
-                    return false;
-                }, Qa1Exchange.Guard);
-                if (!ended)
-                    throw new TimeoutException($"The host calls of the fetches before did not end: {exchange.Unpacker.Reserved} still reserved.");
-            }
             var fetchStart = exchange.Clock.TrueNow;
-            var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit)).ConfigureAwait(false);
+            var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit), unwaited: !waitForHostCallsToEnd).ConfigureAwait(false);
             var took = exchange.Clock.TrueNow - fetchStart;
             batches.Add(batch);
             opening += took;
@@ -139,7 +119,7 @@ internal static class Qa1Loop
         }
         var elapsed = exchange.Clock.TrueNow - start;
         var junk = openings.Where(o => o.Key != honest).Select(o => o.Value).DefaultIfEmpty(0).Max();
-        return new Qa1Reach(found, elapsed, opening, waiting, leaseWaits, budgetFetches, batches.Count, callsSeen, junk, firstReopening, refused, beforeItsTurn, mostReserved, batches);
+        return new Qa1Reach(found, elapsed, opening, waiting, leaseWaits, budgetFetches, batches.Count, callsSeen, junk, firstReopening, refused, beforeItsTurn, exchange.MostReservedBeforeACall, batches);
     }
 
     /// <summary>The measured figures of one run, as the rest of a printed line.</summary>
