@@ -574,6 +574,56 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         NoCycleWhileDraining(exchange);
     }
 
+    /// <summary>
+    /// The harness's model of the host's lookups, forced (why rows of the test above failed in some
+    /// full runs): one that honours its token has ended before the next delivery is opened. The ten
+    /// host calls of the first round see their token cancelled when the budget ends and then stay
+    /// held at a gate, each still holding its reservation, until the harness has been seen keeping
+    /// the second round from being opened for them. So the second round (six that never open and
+    /// the honest message) is opened with no reservation held: nothing is refused, and the honest
+    /// message is yielded at 40 s. With a harness that opens the second round at once, it starts
+    /// with ten of the anonymous partition's sixteen reservations held, its seventh message is
+    /// refused for that bound, and the harness, which expects every message to reach host code,
+    /// waits out its guard.
+    /// </summary>
+    [Fact]
+    public async Task A_delivery_is_opened_only_once_the_host_calls_of_the_delivery_before_have_ended()
+    {
+        var exchange = new SimExchange(o => o.LivePollInterval = TimeSpan.FromSeconds(1));
+        var mediator = new LeasingMediator(exchange, TimeSpan.FromSeconds(60));
+        for (var i = 0; i < 16; i++)
+            mediator.Enqueue($"s{i}", $"stall:s{i}");
+        mediator.Enqueue("h", "ok:h");
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        exchange.EndGate = gate.Task;
+        // Opened only once the harness has been seen waiting with reservations still held (and, as
+        // a hang guard only, after the timeout).
+        var opener = Task.Run(() =>
+        {
+            SpinWait.SpinUntil(() => exchange.SawReservationsHeld, TimeSpan.FromSeconds(30));
+            gate.TrySetResult();
+        });
+        await using var driver = new StreamDriver(exchange);
+        try
+        {
+            await driver.RunAsync(() => driver.Items.Any(i => i.Item.Id == "h"), TimeSpan.FromHours(1));
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+        await opener.WaitAsync(TimeSpan.FromSeconds(40));
+
+        var honest = driver.Items.Where(i => i.Item.Id == "h").ToArray();
+        output.WriteLine($"ends held: most reserved before a batch {exchange.MostReservedBeforeABatch}; the honest message: {(honest.Length == 0 ? "not yielded" : honest[0].Item.Error is null ? $"opened at {honest[0].At.TotalSeconds} s" : honest[0].Item.Error!.Message)}; {exchange.HostCalls} host calls; ended with {driver.EndedWith?.GetType().Name ?? "nothing"}: {Trace(exchange)}");
+        exchange.MostReservedBeforeABatch.Should().Be(10, "the ten host calls of the first round still held their reservations when the second round arrived");
+        driver.EndedWith.Should().BeNull();
+        honest.Should().ContainSingle().Which.Item.Error.Should().BeNull("the second round was opened with no reservation held");
+        honest[0].At.Should().Be(TimeSpan.FromSeconds(40), "two rounds, one budget each");
+        driver.Items.Should().NotContain(i => i.Item.Error != null && i.Item.Error.Message.Contains("unpack capacity exhausted"));
+        exchange.HostCalls.Should().Be(17);
+    }
+
     // ---- I-16, I-20: the wake and the alarms -----------------------------------------------------
 
     /// <summary>

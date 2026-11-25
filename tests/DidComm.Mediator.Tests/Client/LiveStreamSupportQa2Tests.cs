@@ -178,7 +178,9 @@ internal sealed class SimClock : TimeProvider
 /// answers, live mailboxes) with its own clock (<see cref="SimClock"/>) and its own real
 /// <see cref="DeliveredMessageUnpacker"/> on that clock, slow memory included. Each batch is opened
 /// in simulated time: once every message the workers hold is waiting on the clock, the clock moves
-/// to its next timer (the budget, an alarm), until the batch ends.
+/// to its next timer (the budget, an alarm), until the batch ends. A batch is opened only once every
+/// host call of the batches before has ended and given its reservation back: the host's lookups, as
+/// modelled here, honour their token and have ended before the next delivery is opened.
 /// </summary>
 /// <remarks>
 /// Payload texts: <c>ok:{id}</c> opens, <c>bad:{text}</c> fails at once, <c>stall:{text}</c> waits on
@@ -193,6 +195,7 @@ internal sealed class SimExchange : IMediatorExchange
     private readonly List<string> _opened = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, CancellationToken> _stalls = new();
     private int _hostCalls;
+    private int _mostReserved;
     private long _stallIds;
     private volatile bool _disposed;
 
@@ -217,6 +220,19 @@ internal sealed class SimExchange : IMediatorExchange
 
     /// <summary>Runs when a batch is settled on the clock, before the clock moves; true when it acted instead (the clock then does not move).</summary>
     public Func<bool>? OnSettled { get; set; }
+
+    /// <summary>
+    /// When set, a stalled host call whose token was cancelled ends only once this has completed: a
+    /// lookup that honours its token and takes a moment more to end. Until then it holds its
+    /// reservation.
+    /// </summary>
+    public Task? EndGate { get; set; }
+
+    /// <summary>The most reservations seen still held, by host calls of the batch before, while a batch was kept from being opened.</summary>
+    public int MostReservedBeforeABatch => Volatile.Read(ref _mostReserved);
+
+    /// <summary>Whether a batch was kept from being opened while a host call of the batch before still held its reservation.</summary>
+    public bool SawReservationsHeld => Volatile.Read(ref _mostReserved) > 0;
 
     /// <summary>How many host unpack calls were made.</summary>
     public int HostCalls => Volatile.Read(ref _hostCalls);
@@ -288,7 +304,13 @@ internal sealed class SimExchange : IMediatorExchange
         BeforeBatch?.Invoke();
         lock (_gate)
             _loads.Add((requestId, messages.Select(m => m.Id ?? "").ToArray(), Clock.Now));
-        if (!SpinWait.SpinUntil(() => Waiting == 0, RealTime))
+        // The model's lookups: one that honours its token has ended before the next delivery is
+        // opened. A host call keeps its reservation until it ends, which is a moment after its
+        // token is cancelled and its delivery's result is set; "its token is cancelled" is a
+        // neighbour of that event, not the event. A batch opened while calls of the batch before
+        // still held reservations could have messages refused for their partition's bound (ten
+        // still ending and ten new against the anonymous partition's sixteen).
+        if (!SpinWait.SpinUntil(HostCallsEnded, RealTime))
             throw new TimeoutException("the previous batch's host calls did not end");
         var n = Unpacker.Memory.HeldBack(scope, messages.Select(m => m.Id).ToArray()).Count(held => !held);
         var entered = HostCalls;
@@ -322,6 +344,17 @@ internal sealed class SimExchange : IMediatorExchange
     // just ended stops counting at once, before its outcome has been recorded.
     private int Waiting => _stalls.Values.Count(token => !token.IsCancellationRequested);
 
+    // Every host call of the batches before has ended and given its reservation back.
+    private bool HostCallsEnded()
+    {
+        var reserved = Unpacker.Reserved;
+        if (reserved == 0)
+            return true;
+        if (reserved > Volatile.Read(ref _mostReserved))
+            Volatile.Write(ref _mostReserved, reserved);
+        return false;
+    }
+
     // Every message the workers took has entered its host call, every worker that can take one holds
     // one, and every call whose outcome is not recorded yet waits on the clock — at least one does:
     // a batch whose every message has its outcome completes without the clock.
@@ -346,6 +379,11 @@ internal sealed class SimExchange : IMediatorExchange
             try
             {
                 await Task.Delay(Timeout.InfiniteTimeSpan, ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (EndGate is not null)
+            {
+                await EndGate.ConfigureAwait(false);
+                throw;
             }
             finally
             {
