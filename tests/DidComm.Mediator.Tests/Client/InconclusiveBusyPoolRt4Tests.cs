@@ -22,28 +22,39 @@ public sealed class BusyPoolRt4Collection
 /// thread-pool work item; here every pool thread is parked and more parked work is queued in front
 /// of it than the pool has threads, so the call's code does not start while the test holds the
 /// pool. The budget is ended on the manual clock, from a thread of the test's own. What is checked:
-/// the delivery's result, its reservations, and what <see cref="PickupItem.NotAttempted"/> says of
-/// a message for which no host code ran. Real time is only a hang guard.
+/// the delivery's result, its reservations, and what <see cref="PickupItem.Inconclusive"/> says of
+/// a message for which no host code ran: it is inconclusive, out of time "before its turn came",
+/// and not remembered (the coordinator's call: the flag follows the memory). Real time is only a
+/// hang guard.
 /// </summary>
 [Collection(BusyPoolRt4Collection.Name)]
-public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
+public sealed class InconclusiveBusyPoolRt4Tests(ITestOutputHelper output)
 {
     private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency; // sixteen
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan Lease = new MessagePickupOptions().LeaseTimeout; // 60 s
 
     /// <summary>
-    /// Held: with no pool thread free, a delivery of sixteen messages still hands its task back to
-    /// its caller, the budget's end (on the manual clock, moved from the test's own thread) sets the
-    /// result with every message out of time, no host code has run by then or runs afterwards,
-    /// nothing is remembered, and every reservation is back once the pool is free again.
+    /// With no pool thread free, a delivery of sixteen messages still hands its task back to its
+    /// caller, the budget's end (on the manual clock, moved from the test's own thread) sets the
+    /// result with every message out of time before its turn and inconclusive, no host code has run
+    /// by then or runs afterwards, nothing is remembered, and every reservation is back once the
+    /// pool is free again. The clock's readings count from zero, so that the start reading of a
+    /// call that never ran (never taken, so zero) is not below the budget's start: such a call is
+    /// not struck because its code did not start, not because of its reading.
     /// </summary>
+    /// <remarks>
+    /// In fix round 3 these items read "while it was being opened" and were not inconclusive: a
+    /// message counted as tried once its host call was created. Since the coordinator's call that
+    /// the flag follows the memory, a call whose code had not started when the budget ended is out
+    /// of time before its turn, and inconclusive.
+    /// </remarks>
     [Fact]
     public void With_no_pool_thread_free_a_delivery_of_sixteen_ends_at_its_budget_runs_no_host_code_and_its_reservations_come_back_once_the_pool_is_free()
     {
         OnAThreadOfItsOwn(() =>
         {
-            var time = new DidComm.Mediator.Tests.Pipeline.ManualTimeProvider();
+            var time = new CountingTimeProvider(new DidComm.Mediator.Tests.Pipeline.ManualTimeProvider(), readingsFromZero: true);
             var calls = new HostCallLog();
             var unpacker = new DeliveredMessageUnpacker((packed, ct) =>
             {
@@ -58,7 +69,7 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
             {
                 delivery = unpacker.UnpackAllAsync(Qa1.Bob, messages, "request-1", default);
                 reservedWhileOpen = unpacker.Reserved;
-                time.Advance(Qa1.Budget);
+                time.Inner.Advance(Qa1.Budget);
                 delivery.Wait(RealTime).Should().BeTrue("the budget's end sets the result, whatever the pool does");
                 hostCalls = calls.Count;
                 parkedStarted = pool.Started;
@@ -73,22 +84,22 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
             reservedWhileOpen.Should().Be(AtOnce);
             unpacker.Opening.Should().Be(0);
             unpacker.Memory.Count.Should().Be(0, "a message whose code never started is not remembered");
-            delivery.Result.Should().HaveCount(messages.Length).And.OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened") && !o.NotAttempted);
+            delivery.Result.Should().HaveCount(messages.Length).And.OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("before its turn came") && o.Inconclusive, "no host code ran for any of them");
         });
     }
 
     /// <summary>
-    /// Reproduction (fails on a415f6d): sixteen messages of one sender whose host calls got no
-    /// thread before their delivery's budget ended, so that none of that sender's host code runs or
-    /// will run. Expected, from <see cref="PickupItem.NotAttempted"/>'s remarks ("a message refused
-    /// for capacity is tried once the openings that were in its way have ended"): nothing is
-    /// reserved once the delivery has ended, and the sender's next message, in a delivery of its
-    /// own, is not refused for capacity. Observed: the sixteen reservations stay held until the pool
-    /// reaches the cancelled work items, and the next message is refused for its sender's bound
-    /// meanwhile.
+    /// A pin of documented behaviour (the coordinator's call: a residual, described with R-13, no
+    /// change): sixteen messages of one sender whose host calls got no thread before their
+    /// delivery's budget ended, so that none of that sender's host code runs or will run. A call
+    /// that never got a thread keeps its reservation until the pool reaches its cancelled work
+    /// item: the sixteen reservations are still held when the delivery has ended, and the sender's
+    /// next message, in a delivery of its own, is refused for its sender's bound meanwhile, as an
+    /// inconclusive item. Once the pool is free every reservation is back, and the delivery after
+    /// that starts the message (invariant b).
     /// </summary>
-    [Fact(Skip = "RT4: whether reservations are held after a delivery ended for host calls that never got a thread; observed: sixteen stay held until the pool reaches the cancelled work items, and the sender's next message is refused for capacity meanwhile")]
-    public void Once_a_delivery_has_ended_and_none_of_its_host_calls_ever_ran_nothing_is_reserved_and_its_senders_next_message_is_not_refused()
+    [Fact]
+    public void A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after()
     {
         OnAThreadOfItsOwn(() =>
         {
@@ -101,6 +112,7 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
                 return Task.FromResult(UnpackFakes.Opened(TestJwe.LabelOf(packed)));
             }, Qa1.Budget, time);
             var messages = Enumerable.Range(0, UnpackReservations.MaxPerSender).Select(i => Qa1.Message(Qa1.From(kid, $"m-{i}"), $"m-{i}")).ToArray();
+            var nextMessage = Qa1.Message(Qa1.From(kid, "next"), "next");
 
             Task<IReadOnlyList<DeliveredOutcome>> first, second;
             int reservedAfterTheFirst, hostCalls, parkedStarted, parkedQueued;
@@ -111,7 +123,7 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
                 first.Wait(RealTime).Should().BeTrue("the budget's end sets the result");
                 reservedAfterTheFirst = unpacker.Reserved;
                 hostCalls = calls.Count;
-                second = unpacker.UnpackAllAsync(Qa1.Bob, new[] { Qa1.Message(Qa1.From(kid, "next"), "next") }, "request-2", default);
+                second = unpacker.UnpackAllAsync(Qa1.Bob, new[] { nextMessage }, "request-2", default);
                 if (!second.IsCompleted)
                     time.Advance(Qa1.Budget);
                 second.Wait(RealTime).Should().BeTrue();
@@ -120,28 +132,38 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
             }
             SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("every reservation comes back once the pool is free");
             var next = second.Result.Single();
+            var hostCallsBeforeTheThird = calls.Count;
+            var third = unpacker.UnpackAllAsync(Qa1.Bob, new[] { nextMessage }, "request-3", default);
+            third.Wait(RealTime).Should().BeTrue("with the pool free the message opens at once");
 
-            output.WriteLine($"parked work queued in front: {parkedQueued}, of which started: {parkedStarted}; host calls when the first delivery ended: {hostCalls}, in all: {calls.Count}; reserved after the first delivery ended: {reservedAfterTheFirst}; the sender's next message: {next.Error?.Message}; NotAttempted {next.NotAttempted}");
+            output.WriteLine($"parked work queued in front: {parkedQueued}, of which started: {parkedStarted}; host calls when the first delivery ended: {hostCalls}; reserved after the first delivery ended: {reservedAfterTheFirst}; the sender's next message: {next.Error?.Message}; Inconclusive {next.Inconclusive}; host calls before the third delivery: {hostCallsBeforeTheThird}, after: {calls.Count}");
             parkedStarted.Should().BeLessThan(parkedQueued, "parked work was still queued in front of the host calls");
             hostCalls.Should().Be(0, "none of the sender's host code ran");
-            calls.Count.Should().Be(0, "and none runs later");
-            reservedAfterTheFirst.Should().Be(0, "no host call of the delivery is running or will run");
-            (next.Error?.Message ?? string.Empty).Should().NotContain("capacity exhausted", "no opening of its sender is in its way");
+            hostCallsBeforeTheThird.Should().Be(0, "and none ran for the cancelled work items when the pool reached them");
+            first.Result.Should().OnlyContain(o => o.Inconclusive && o.Error is TimeoutException && o.Error.Message.Contains("before its turn came"));
+            reservedAfterTheFirst.Should().Be(UnpackReservations.MaxPerSender, "each call keeps its reservation until the pool reaches its cancelled work item");
+            next.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted", "its sender's bound was still held");
+            next.Inconclusive.Should().BeTrue("a refusal for capacity does not count against the message");
+            unpacker.Memory.Count.Should().Be(0);
+            third.Result.Single().Succeeded.Should().BeTrue("once the reservations are back, the next delivery starts it");
+            calls.Labels.Should().Equal("next");
         });
     }
 
     /// <summary>
-    /// Reproduction (fails on a415f6d): one message that opens at once, alone in its fetch, while no
-    /// pool thread is free until the budget has ended. No host code runs for it. Expected, from
-    /// <see cref="PickupItem.NotAttempted"/>'s summary ("the client did not try to open this message
-    /// in this delivery, and so knows nothing about it"): the item says not attempted, and the host
-    /// that discards a failed item unless that flag is true leaves it queued. Observed: the item is
-    /// a failed item, "ran out while it was being opened", with the flag false; that host discards
-    /// it, and the message is gone from the mediator's queue without any host code having run for
-    /// it.
+    /// One message that opens at once, alone in its fetch, while no pool thread is free until the
+    /// budget has ended. No host code runs for it. The item is inconclusive and reads "before its
+    /// turn came", nothing is remembered, and the host that discards a failed item unless it is
+    /// inconclusive leaves it queued; the first fetch after its lease, with the pool free, returns
+    /// it opened.
     /// </summary>
-    [Fact(Skip = "RT4: whether an item for which no host code ran says not attempted, and whether a host that discards only what was tried keeps it; observed: the flag is false and that host discards it")]
-    public void A_message_for_which_no_host_code_ran_before_the_budget_ended_is_handed_over_as_not_attempted_and_a_host_that_discards_only_what_was_tried_keeps_it()
+    /// <remarks>
+    /// RT4's reproduction, red on 98a32ac ("Expected item.NotAttempted to be True ... but found
+    /// False": the item read "while it was being opened", the flag was false, and that host
+    /// discarded a message no host code had run for).
+    /// </remarks>
+    [Fact]
+    public void A_message_for_which_no_host_code_ran_before_the_budget_ended_is_inconclusive_and_a_host_that_discards_a_failed_item_unless_it_is_inconclusive_keeps_it_and_receives_it()
     {
         OnAThreadOfItsOwn(() =>
         {
@@ -163,17 +185,27 @@ public sealed class NotAttemptedBusyPoolRt4Tests(ITestOutputHelper output)
             }
             fetch.Wait(RealTime).Should().BeTrue("the fetch returns once the pool is free again");
             var item = fetch.Result.Items.Should().ContainSingle().Which;
-            var discarded = Qa1.ToDiscard(fetch.Result.Items, Qa1Discard.WhatWasTried);
+            var discarded = Qa1.ToDiscard(fetch.Result.Items, Qa1Discard.UnlessInconclusive);
             if (discarded.Length > 0)
                 client.AckAsync(FakePickupExchange.M, FakePickupExchange.L, discarded).Wait(RealTime).Should().BeTrue();
 
-            output.WriteLine($"parked work queued in front: {parkedQueued}, of which started: {parkedStarted}; host calls when the budget ended: {hostCallsAtTheEnd}, in all: {exchange.Host.Calls.Count}; the item: {item.Error?.GetType().Name} \"{(item.Error?.Message.Contains("while it was being opened") == true ? "while it was being opened" : item.Error?.Message.Contains("before its turn came") == true ? "before its turn came" : "other")}\", NotAttempted {item.NotAttempted}; discarded by the host: {discarded.Length}; still queued at the mediator: {mediator.Holds("honest")}; remembered: {exchange.Unpacker.Memory.Count}");
+            output.WriteLine($"parked work queued in front: {parkedQueued}, of which started: {parkedStarted}; host calls when the budget ended: {hostCallsAtTheEnd}, in all: {exchange.Host.Calls.Count}; the item: {item.Error?.GetType().Name} \"{(item.Error?.Message.Contains("while it was being opened") == true ? "while it was being opened" : item.Error?.Message.Contains("before its turn came") == true ? "before its turn came" : "other")}\", Inconclusive {item.Inconclusive}; discarded by the host: {discarded.Length}; still queued at the mediator: {mediator.Holds("honest")}; remembered: {exchange.Unpacker.Memory.Count}");
             parkedStarted.Should().BeLessThan(parkedQueued, "parked work was still queued in front of the host call");
             hostCallsAtTheEnd.Should().Be(0, "no host code ran for it before the budget ended");
             exchange.Host.Calls.Count.Should().Be(0, "and none after: a call whose token is cancelled before it got a thread never runs");
             item.Unpacked.Should().BeNull();
-            item.NotAttempted.Should().BeTrue("no host code ran for it: the client knows nothing about it");
-            mediator.Holds("honest").Should().BeTrue("a host that discards only what was tried leaves it queued");
+            item.Inconclusive.Should().BeTrue("no host code ran for it: this delivery did not count against it");
+            item.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("before its turn came");
+            exchange.Unpacker.Memory.Count.Should().Be(0, "nothing was struck");
+            mediator.Holds("honest").Should().BeTrue("a host that discards a failed item unless it is inconclusive leaves it queued");
+
+            // With the pool free again: the first fetch after the lease starts it, and it opens.
+            Qa1.LookupsEnded(exchange.Unpacker);
+            exchange.Clock.Inner.Advance(mediator.NextLeaseEnd()!.Value - exchange.Clock.TrueNow);
+            var again = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 10);
+            again.Wait(RealTime).Should().BeTrue();
+            again.Result.Items.Should().ContainSingle().Which.Unpacked.Should().NotBeNull("left queued, it is started at the next delivery");
+            exchange.Host.Calls.Labels.Should().Equal("honest");
         });
     }
 

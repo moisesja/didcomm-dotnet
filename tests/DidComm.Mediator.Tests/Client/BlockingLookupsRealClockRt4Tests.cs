@@ -83,7 +83,7 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
     {
         var run = Run(deliveries, perDelivery, lookupsIgnoreTheirToken, OpenedFrom.OneThread);
 
-        (run.SingleOpened || run.SingleNotAttempted == true).Should().BeTrue("a message that opens at once is opened, or is handed over as not attempted when no host code ran for it (host calls for it: {0}; its outcome: {1}; not attempted: {2})", run.SingleHostCalls, run.SingleKind, run.SingleNotAttempted);
+        (run.SingleOpened || run.SingleInconclusive == true).Should().BeTrue("a message that opens at once is opened, or is handed over as not attempted when no host code ran for it (host calls for it: {0}; its outcome: {1}; not attempted: {2})", run.SingleHostCalls, run.SingleKind, run.SingleInconclusive);
     }
 
     /// <summary>
@@ -108,7 +108,7 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
     {
         var run = Run(deliveries, perDelivery: 16, lookupsIgnoreTheirToken: false, OpenedFrom.PoolThreads, singleAt: position);
 
-        (run.SingleOpened || run.SingleNotAttempted == true).Should().BeTrue("a message that opens at once is opened, or is handed over as not attempted when no host code ran for it (host calls for it: {0}; its outcome: {1}; not attempted: {2})", run.SingleHostCalls, run.SingleKind, run.SingleNotAttempted);
+        (run.SingleOpened || run.SingleInconclusive == true).Should().BeTrue("a message that opens at once is opened, or is handed over as not attempted when no host code ran for it (host calls for it: {0}; its outcome: {1}; not attempted: {2})", run.SingleHostCalls, run.SingleKind, run.SingleInconclusive);
     }
 
     /// <summary>Which thread opens each delivery, and so creates its budget's timer.</summary>
@@ -126,7 +126,7 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
 
     // Took: from each delivery's own start to its result. LatestStartIntoItsDelivery: the latest a
     // host call's code started, counted from its own delivery's start.
-    private sealed record Measured(TimeSpan[] Took, TimeSpan LatestStartIntoItsDelivery, bool SingleOpened, bool? SingleNotAttempted, int SingleHostCalls, string SingleKind);
+    private sealed record Measured(TimeSpan[] Took, TimeSpan LatestStartIntoItsDelivery, bool SingleOpened, bool? SingleInconclusive, int SingleHostCalls, string SingleKind);
 
     private Measured Run(int deliveries, int perDelivery, bool lookupsIgnoreTheirToken, OpenedFrom openedFrom, int singleAt = -1)
     {
@@ -254,23 +254,23 @@ public sealed class BlockingLookupsRealClockRt4Tests(ITestOutputHelper output)
         var took = Enumerable.Range(0, all).Select(d => (setAt[d] ?? TimeSpan.MaxValue) - openedAt[d]).ToArray();
         var junk = deliveries * perDelivery - (singleAt < 0 ? 0 : 1);
         var kind = single is null ? "no result" : single.Succeeded ? "opened" : single.Error!.Message.Contains("while it was being opened") ? "failed: ran out while it was being opened" : single.Error.Message.Contains("before its turn came") ? "failed: before its turn came" : single.Error.Message.Contains("capacity exhausted") ? "failed: capacity exhausted" : "failed: " + single.Error.GetType().Name;
-        var notAttempted = single is null ? null : NotAttemptedOf(single);
+        var inconclusive = single is null ? null : InconclusiveOf(single);
         output.WriteLine($"{deliveries} deliveries of {perDelivery} blocking lookups (ignoring their token: {lookupsIgnoreTheirToken}; deliveries opened from: {openedFrom}) and one message that opens at once ({(singleAt < 0 ? "in a delivery of its own" : "in the first delivery, at position " + (singleAt + 1))}); opened at once per delivery: {DeliveredMessageUnpacker.FetchConcurrency}; processors {Environment.ProcessorCount}, pool floor {floor}, pool threads at start {threadsAtStart}, at the end {ThreadPool.ThreadCount}");
         output.WriteLine($"deliveries opened at: {string.Join(", ", openedAt.Select(t => t.TotalSeconds.ToString("F2")))} s; every time below is counted from the start of the delivery it belongs to");
         output.WriteLine($"blocking lookups whose code started: {starts.Length} of {junk}; within the start allowance of {allowance.TotalSeconds} s: {starts.Count(t => t <= allowance)}; later: {starts.Count(t => t > allowance)}; after the budget's {Budget.TotalSeconds} s: {starts.Count(t => t > Budget)}; never: {junk - starts.Length}; last start at {(starts.Length > 0 ? starts[^1].TotalSeconds.ToString("F2") : "-")} s");
         output.WriteLine($"remembered at the end: {remembered}");
-        output.WriteLine($"the single message: host calls {singleStarts.Count}{(singleStarts.Count > 0 ? $" (code started at {(singleStarts.Min() - openedAt[singleIn]).TotalSeconds:F2} s)" : string.Empty)}; its outcome: {kind}; not attempted: {(notAttempted is { } flag ? flag.ToString() : "no such flag")}; its delivery's result set at {took[singleIn].TotalSeconds:F2} s");
+        output.WriteLine($"the single message: host calls {singleStarts.Count}{(singleStarts.Count > 0 ? $" (code started at {(singleStarts.Min() - openedAt[singleIn]).TotalSeconds:F2} s)" : string.Empty)}; its outcome: {kind}; not attempted: {(inconclusive is { } flag ? flag.ToString() : "no such flag")}; its delivery's result set at {took[singleIn].TotalSeconds:F2} s");
         output.WriteLine($"results of the deliveries of blocking lookups set at: {string.Join(", ", took.Take(deliveries).Select(t => t == TimeSpan.MaxValue ? "never" : t.TotalSeconds.ToString("F2")))} s (budget {Budget.TotalSeconds} s)");
         output.WriteLine($"reserved when the single message's delivery ended: {reservedWhenSingleEnded}; reservations all back at: {(reservedBackAt is { } back ? back.TotalSeconds.ToString("F2") + " s" : "not within the horizon")}; reserved when the test ended: {reservedAtTheEnd}");
 
         setAt.Should().OnlyContain(t => t != null, "every delivery's result is set within the horizon");
         single.Should().NotBeNull();
-        return new Measured(took, starts.Length > 0 ? starts[^1] : TimeSpan.Zero, single!.Succeeded, notAttempted, singleStarts.Count, kind);
+        return new Measured(took, starts.Length > 0 ? starts[^1] : TimeSpan.Zero, single!.Succeeded, inconclusive, singleStarts.Count, kind);
     }
 
     private static DeliveredInput Message(string kid, string label) => new(label, TestJwe.Bytes(TestJwe.Authcrypt(kid, label)));
 
     // Read by name, so the same measurement runs against a tree whose outcomes have no such flag.
-    private static bool? NotAttemptedOf(DeliveredOutcome outcome)
-        => typeof(DeliveredOutcome).GetProperty("NotAttempted", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)?.GetValue(outcome) as bool?;
+    private static bool? InconclusiveOf(DeliveredOutcome outcome)
+        => typeof(DeliveredOutcome).GetProperty("Inconclusive", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public)?.GetValue(outcome) as bool?;
 }

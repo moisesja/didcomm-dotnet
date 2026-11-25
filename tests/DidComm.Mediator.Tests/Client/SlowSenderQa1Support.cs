@@ -591,11 +591,12 @@ public enum Qa1Discard
 
     /// <summary>
     /// The careful host: it discards a failed item (<see cref="PickupClient.AckAsync"/>) unless
-    /// <see cref="PickupItem.NotAttempted"/> says the client did not try to open it.
+    /// <see cref="PickupItem.Inconclusive"/> says the client has not counted this delivery against
+    /// its message.
     /// </summary>
-    WhatWasTried,
+    UnlessInconclusive,
 
-    /// <summary>A host that does not read <see cref="PickupItem.NotAttempted"/>: it discards every failed item.</summary>
+    /// <summary>A host that does not read <see cref="PickupItem.Inconclusive"/>: it discards every failed item.</summary>
     EveryFailure,
 }
 
@@ -607,7 +608,7 @@ internal static class Qa1
         => discard switch
         {
             Qa1Discard.EveryFailure => items.Where(i => i.Error is not null).Select(i => i.Id).ToArray(),
-            Qa1Discard.WhatWasTried => items.Where(i => i.Error is not null && !i.NotAttempted).Select(i => i.Id).ToArray(),
+            Qa1Discard.UnlessInconclusive => items.Where(i => i.Error is not null && !i.Inconclusive).Select(i => i.Id).ToArray(),
             _ => Array.Empty<string>(),
         };
 
