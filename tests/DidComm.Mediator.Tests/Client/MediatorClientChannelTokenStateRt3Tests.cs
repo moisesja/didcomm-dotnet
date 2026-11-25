@@ -131,27 +131,46 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     // ---- a call whose token is combined from two caller tokens -----------------------------------------
 
     /// <summary>
-    /// The call's token is cancelled by either of two caller tokens (the combination a compiler
-    /// makes for an enumeration given two tokens, which a live stream hands to its requests). The
-    /// host code watches one of the two and reports its cancellation as a failure of its own from
-    /// its callback there. The call ends cancelled, as when the host code watches the call's token
-    /// itself.
+    /// A documented residual, pinned. The call's token is cancelled by either of two caller tokens
+    /// (the combination a compiler makes for an enumeration given two tokens, which a live stream
+    /// hands to its requests). The host code watches one of the two, not the token it was handed,
+    /// and reports its cancellation as a failure of its own from its callback there. The call ends
+    /// with what the host code reported, not as a cancellation.
     /// </summary>
     /// <remarks>
-    /// Observed on the head of fix round 2: the call ends with what the host code reported.
+    /// Why it is so: the channel judges what its host code throws by the tokens it can read, which
+    /// are the one it was given, its own deadline's and its own disposal. It is handed one token and
+    /// cannot read the two behind it. The host code's callback was registered on the first caller
+    /// token after the combination was made, so it runs before the callback that cancels the
+    /// combined token: when the failure is observed, neither the token the channel was given nor the
+    /// one it handed on is cancelled (the test reads both then), nothing says the call is being
+    /// ended, and the failure is the call's own. Host code should watch the token it is handed: the
+    /// next test is the same call with host code that does.
     /// </remarks>
-    [Theory(Skip = "RT3: whether a call whose token is combined from two caller tokens ends cancelled when its host code reports the cancellation of one of them as a failure")]
+    [Theory]
     [InlineData(Step.EndpointLookup)]
     [InlineData(Step.Send)]
     [InlineData(Step.SendAllowingNoAnswer)]
     [InlineData(Step.OneWaySend)]
-    public async Task A_call_whose_token_is_combined_from_two_ends_cancelled_when_its_host_code_reports_the_cancellation_of_one_of_them(Step step)
+    public async Task A_call_whose_token_is_combined_from_two_ends_with_what_its_host_code_reported_when_that_code_watches_one_of_the_two(Step step)
     {
         var time = new ManualTimeProvider();
         using var first = new CancellationTokenSource();
         using var second = new CancellationTokenSource();
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
-        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step), Watches = _ => first.Token };
+        var reported = FailureOf(step);
+        var givenWasCancelled = true;
+        var handedWasCancelled = true;
+        var host = new HeldHostCode
+        {
+            ReportsWhenCancelled = () => reported,
+            Watches = _ => first.Token,
+            BeforeItReports = handed =>
+            {
+                givenWasCancelled = combined.Token.IsCancellationRequested;
+                handedWasCancelled = handed.IsCancellationRequested;
+            },
+        };
         var (channel, _) = ChannelOver(time, logs: null, host);
 
         var (call, _) = Start(channel, step, combined.Token);
@@ -159,9 +178,43 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
         await Task.Run(first.Cancel).WaitAsync(PickupTest.Timeout);
 
         var result = await EndOf(call);
-        host.Reported.Should().Be(1, "the host code reported the caller's cancellation as a failure of its own");
-        result.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled the call (it ended with {0})", result?.GetType().Name ?? "a result");
+        host.Reported.Should().Be(1, "the host code reported the first caller token's cancellation as a failure of its own");
+        givenWasCancelled.Should().BeFalse("the set-up: the token the channel was given was not cancelled yet when the host code reported");
+        handedWasCancelled.Should().BeFalse("the set-up: nor was the token the host code was handed");
+        result.Should().BeSameAs(reported, "nothing the channel can read said the call was being ended, so the failure is the call's own");
+        combined.Token.IsCancellationRequested.Should().BeTrue("the cancellation reached the call's token afterwards");
         channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The same call, with host code that watches the token it was handed and reports its
+    /// cancellation as a failure of its own. The call ends cancelled, with the token it was given.
+    /// </summary>
+    [Theory]
+    [InlineData(Step.EndpointLookup)]
+    [InlineData(Step.Send)]
+    [InlineData(Step.SendAllowingNoAnswer)]
+    [InlineData(Step.OneWaySend)]
+    public async Task A_call_whose_token_is_combined_from_two_ends_cancelled_when_its_host_code_watches_the_token_it_was_handed(Step step)
+    {
+        var time = new ManualTimeProvider();
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
+        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step) };
+        var (channel, _) = ChannelOver(time, logs: null, host);
+
+        var (call, _) = Start(channel, step, combined.Token);
+        await host.ParkAsync();
+        await Task.Run(first.Cancel).WaitAsync(PickupTest.Timeout);
+
+        var result = await EndOf(call);
+        host.Reported.Should().Be(1, "the host code reported the cancellation of the token it was handed as a failure of its own");
+        ShouldHaveEndedAs(result, Ending.CallerCancels, combined.Token);
+        channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
         await channel.DisposeAsync();
     }
 
