@@ -79,6 +79,19 @@ namespace DidComm.Mediator.Client.Internal;
 /// and every write is made before the delivery's result is set.
 /// </para>
 /// <para>
+/// <strong>What an outcome says of that (<see cref="DeliveredOutcome.Inconclusive"/>; the
+/// coordinator's call).</strong> A failed message that this delivery did not count against says so:
+/// its outcome is inconclusive exactly when it is not malformed, was not held back, and no strike
+/// was taken for it. The strike and the flag are one decision, made once per message by whoever
+/// records its outcome: the flag is false only once the strike has been made. So a refusal, a
+/// message that did not start, one whose code had not started when the budget ended, one that
+/// started later than <see cref="StartAllowance"/> and was cut, and one whose strike the host's
+/// clock made fail are all inconclusive; a failure of its own (S1) and a message that had the whole
+/// budget (S2) are not. An outcome is created with its flag and never changed, and the outcomes of
+/// the messages the budget's end records are created after the delivery's lock and before its
+/// result is set.
+/// </para>
+/// <para>
 /// <strong>Host code never runs on the caller's stack (ADV3-4).</strong> Every host unpack call (the
 /// DID and secrets resolvers behind it) runs on a thread-pool work item of its own, never on the
 /// stack of the caller of
@@ -264,30 +277,26 @@ internal sealed class DeliveredMessageUnpacker
         return new Delivery(this, scope, messages, order.ToArray(), outcomes, requestId, ct).Start();
     }
 
-    // S2 (I-9): whether a call still without an outcome at the budget's end had the whole budget.
-    // Its code started (Ran), and started within StartAllowance of the budget's start:
-    // 0 ≤ call.StartedAt − budgetStart ≤ StartAllowance, both readings from the injected clock. A
-    // start reading below the budget's (a clock that stepped back) is not one: nothing is written
-    // (fail open).
-    private bool HadTheWholeBudget(HostCall call, long budgetStart)
-    {
-        if (!call.Ran)
-            return false;
-        var started = call.StartedAt;
-        return started >= budgetStart && Time.GetElapsedTime(budgetStart, started) <= StartAllowance;
-    }
+    // S2 (I-9): whether a call whose code had started, and that has no outcome at the budget's end,
+    // had the whole budget: its code started within StartAllowance of the budget's start,
+    // 0 ≤ startedAt − budgetStart ≤ StartAllowance, both readings from the injected clock. A start
+    // reading below the budget's (a clock that stepped back) is not one: nothing is written (fail
+    // open). The arithmetic asks the host's clock for its frequency, so this is host code: it runs
+    // outside the delivery's lock, and may throw.
+    private bool HadTheWholeBudget(long startedAt, long budgetStart)
+        => startedAt >= budgetStart && Time.GetElapsedTime(budgetStart, startedAt) <= StartAllowance;
 
-    // Which failures say "not attempted" (DeliveredOutcome.NotAttempted, PickupItem.NotAttempted): the
-    // two below that are made before a message's host call exists, and no other. A message that ran
-    // out of time before its turn (started: false: the start rule refused it, no worker took it, or
-    // the delivery ended before its call was created) and one refused for capacity were not tried in
-    // this delivery, and nothing was learned about them. One whose call was created is an attempt,
-    // also when the budget ended before its code started; a held-back message failed when it was
-    // tried before.
-    private DeliveredOutcome OutOfTime(string? requestId, bool started)
+    // The failures this client makes itself, and what each says of the delivery
+    // (DeliveredOutcome.Inconclusive, PickupItem.Inconclusive): inconclusive when this delivery did
+    // not count against the message. A refusal for capacity always is. A held-back message never is:
+    // it was counted when it was tried before. A message out of time says in its text whether any of
+    // its host code had started when the budget ended (started), and in its flag whether a strike
+    // was taken for it: never for one that had not started; for one that had, only when it had the
+    // whole budget and the strike was made (OnBudgetEnded decides both from one reading).
+    private DeliveredOutcome OutOfTime(string? requestId, bool started, bool inconclusive)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
             $"The delivered message{ForRequest(requestId)} was not unpacked: the delivery's budget of {Budget} (MediatorClientOptions.UnpackTimeout) ran out {(started ? "while it was being opened" : "before its turn came")}. It was not acknowledged.")),
-            notAttempted: !started);
+            inconclusive);
 
     private static DeliveredOutcome HeldBackFailure(string? requestId)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
@@ -299,7 +308,7 @@ internal sealed class DeliveredMessageUnpacker
                 $"The delivered message{ForRequest(requestId)} was not unpacked: {UnpackReservations.MaxReserved} unpacks are still running, the bound for all mailboxes together (unpack capacity exhausted). It was not acknowledged.")
             : string.Create(CultureInfo.InvariantCulture,
                 $"The delivered message{ForRequest(requestId)} was not unpacked: the unpacks still running for its sender in this mailbox (or, without a named sender, for every such message in it) are at their bound (unpack capacity exhausted). It was not acknowledged.")),
-            notAttempted: true);
+            inconclusive: true);
 
     private static string ForRequest(string? requestId)
         => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");
@@ -454,7 +463,7 @@ internal sealed class DeliveredMessageUnpacker
                 // The start rule (I-6): too little of the budget left; not started, not remembered.
                 if (Elapsed() > _owner.Budget - _owner.Floor)
                 {
-                    if (!Complete(index, _owner.OutOfTime(_requestId, started: false), MemoryWrite.None))
+                    if (!Complete(index, _owner.OutOfTime(_requestId, started: false, inconclusive: true), MemoryWrite.None))
                         return;
                     continue;
                 }
@@ -524,10 +533,13 @@ internal sealed class DeliveredMessageUnpacker
                 catch (Exception ex)
                 {
                     // Failed while the delivery is not being ended: the message's own failure (S1),
-                    // struck whatever the duration, provided its code ran.
+                    // struck whatever the duration, provided its code ran. One reading decides the
+                    // strike and the flag: a work item that failed before its code started (the
+                    // host's clock threw as it was read) is not struck, and is inconclusive.
                     reservation.Release(); // D-13, as on success
-                    outcome = DeliveredOutcome.Failure(ex);
-                    write = call.Ran ? MemoryWrite.Strike : MemoryWrite.None;
+                    var ran = call.Ran;
+                    outcome = DeliveredOutcome.Failure(ex, inconclusive: !ran);
+                    write = ran ? MemoryWrite.Strike : MemoryWrite.None;
                 }
                 if (!Complete(index, outcome, write))
                     return;
@@ -565,6 +577,15 @@ internal sealed class DeliveredMessageUnpacker
                 else if (write == MemoryWrite.Forget)
                     _owner.Memory.Forget(_scope, _messages[index].Id);
             }
+            catch (Exception) when (write == MemoryWrite.Strike)
+            {
+                // The host's clock threw in the memory before the strike was made: this delivery
+                // did not count against the message, and its outcome says so. The result is not set
+                // before Written() below, so nobody has seen the outcome this one replaces.
+                lock (_gate)
+                    _outcomes[index] = DeliveredOutcome.Failure(outcome.Error!, inconclusive: true);
+                throw;
+            }
             finally
             {
                 Interlocked.Increment(ref _owner._settled);
@@ -574,14 +595,24 @@ internal sealed class DeliveredMessageUnpacker
         }
 
         // The budget ran out, the caller cancelled or the owner shut down (the budget is linked to
-        // both tokens): every message without an outcome is out of time, started or not. Host calls
-        // still running keep their reservations until they end. After a cancellation or the shutdown
-        // nothing is struck and the result is cancelled. When the budget's own timer ended the
-        // delivery, each message whose call was created and that had the whole budget is struck (S2),
-        // after the lock (the memory's lock is a leaf, and the host's clock is read there).
+        // both tokens): every message without an outcome is out of time. Host calls still running
+        // keep their reservations until they end. After a cancellation or the shutdown nothing is
+        // struck and the result is cancelled.
+        //
+        // Under the lock the delivery is closed and the messages without an outcome are listed, each
+        // with its call when that call's code had started; nothing of the host's runs there. Their
+        // outcomes are made after the lock, one decision per message, and before the result is set
+        // (Written): the text says whether its code had started; when the budget's own timer ended
+        // the delivery, a message whose code had started and that had the whole budget is struck
+        // (S2), and its outcome is conclusive only once that strike has been made. Every other one
+        // is inconclusive: this delivery did not count against it. The arithmetic of the start
+        // allowance and the memory's write read the host's clock; if either throws, that message
+        // and every one after it are inconclusive, nothing more is struck, and the result is still
+        // set (I-5).
         private void OnBudgetEnded()
         {
-            List<int>? running = null;
+            List<(int Index, HostCall? Started)> pending;
+            bool byTheBudget;
             lock (_gate)
             {
                 if (_ending != Ending.Open)
@@ -589,28 +620,49 @@ internal sealed class DeliveredMessageUnpacker
                 _ending = _ct.IsCancellationRequested ? Ending.Caller
                     : _owner.Shutdown.IsCancellationRequested ? Ending.Shutdown
                     : Ending.Budget;
+                byTheBudget = _ending == Ending.Budget;
+                pending = new List<(int, HostCall?)>(_order.Length - _done);
                 foreach (var index in _order)
                 {
                     if (_outcomes[index] is not null)
                         continue;
-                    _outcomes[index] = _owner.OutOfTime(_requestId, started: _calls[index] is not null);
-                    if (_ending == Ending.Budget && _calls[index] is not null)
-                        (running ??= new List<int>()).Add(index);
+                    // Whether its code had started is read once, here, as the delivery closes: the
+                    // text, the flag and the strike all follow from this one reading. One window
+                    // remains: a work item that passed its token check just before the budget ended
+                    // and has not yet noted that it ran reads as not started. Its message is then
+                    // out of time before its turn, inconclusive and not struck, although its host
+                    // code is still called, once, with a token that is already cancelled. That errs
+                    // towards not discarding a message.
+                    pending.Add((index, _calls[index] is { Ran: true } call ? call : null));
                 }
                 _writing++;
             }
             try
             {
-                // _calls is written only while the delivery is open, so it is read here as it was
-                // left. A host clock that throws strikes nothing more and never keeps the result
-                // unset (I-5).
-                if (running is not null)
+                // The delivery is closed, so nobody else writes the outcomes of these messages or
+                // their calls, and the result is not set before Written() below: nobody reads them.
+                var strikes = byTheBudget;
+                foreach (var (index, started) in pending)
                 {
-                    foreach (var index in running)
+                    var struck = false;
+                    if (started is not null && strikes)
                     {
-                        if (_owner.HadTheWholeBudget(_calls[index]!, _budgetStart))
-                            _owner.Memory.Strike(_scope, _messages[index].Id);
+                        try
+                        {
+                            if (_owner.HadTheWholeBudget(started.StartedAt, _budgetStart))
+                            {
+                                _owner.Memory.Strike(_scope, _messages[index].Id);
+                                struck = true;
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            // The host's clock threw: no strike was made for this message, and none
+                            // is tried for the ones after it.
+                            strikes = false;
+                        }
                     }
+                    _outcomes[index] = _owner.OutOfTime(_requestId, started: started is not null, inconclusive: !struck);
                 }
             }
             finally

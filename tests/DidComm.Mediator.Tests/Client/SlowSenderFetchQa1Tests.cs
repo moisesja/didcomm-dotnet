@@ -313,7 +313,7 @@ public sealed class SlowSenderFetchQa1Tests
     /// memory keeps (Q = 256), the memory cannot hold them all paused at once, and a fetch loop alone
     /// does not reach the message behind, even well past the bound for Q in front. The careful host,
     /// which discards the failures it is handed (<see cref="PickupClient.AckAsync"/>) except those
-    /// whose <see cref="PickupItem.NotAttempted"/> is true, reaches it.
+    /// whose <see cref="PickupItem.Inconclusive"/> is true, reaches it.
     /// </summary>
     [Theory]
     [InlineData(4, 270, 60)]
@@ -334,9 +334,9 @@ public sealed class SlowSenderFetchQa1Tests
 
         var (discarding, discardingMediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, lease);
         Queue(discardingMediator, junk: n, honestAt: n);
-        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discard: Qa1Discard.WhatWasTried);
+        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discard: Qa1Discard.UnlessInconclusive);
 
-        reach.Found.Should().BeTrue("discarding the failures it is handed that were tried empties the queue in front");
+        reach.Found.Should().BeTrue("discarding the failures it is handed that are not inconclusive empties the queue in front");
         discardingMediator.Holds("honest").Should().BeFalse("the honest message was acknowledged");
     }
 
@@ -623,9 +623,11 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// A fetch loop of the eagerest host: it fetches until drained and, when drained, fetches again
     /// as soon as the mediator's next lease ends; it stops when <paramref name="honest"/> is returned
-    /// opened, or after <paramref name="cap"/> of clock time. With <paramref name="discard"/> the
-    /// host discards failed items after each fetch (<see cref="Qa1.ToDiscard"/>), and its next fetch
-    /// follows once the lookups of the last delivery have ended (<see cref="Qa1.LookupsEnded"/>).
+    /// opened, or after <paramref name="cap"/> of clock time. Each fetch starts once the lookups of
+    /// the fetches before have ended (<see cref="Qa1Exchange.DriveAsync{T}"/> waits for them: the
+    /// model of the host's lookups stated there). With <paramref name="discard"/> the host discards
+    /// failed items after each fetch (<see cref="Qa1.ToDiscard"/>), once those lookups have ended
+    /// (<see cref="Qa1.LookupsEnded"/>).
     /// </summary>
     internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null, Qa1Discard discard = Qa1Discard.Nothing)
     {
