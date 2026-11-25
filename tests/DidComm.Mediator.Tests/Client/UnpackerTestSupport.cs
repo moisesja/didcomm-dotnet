@@ -195,40 +195,64 @@ internal sealed class HostCallLog
 /// </remarks>
 internal sealed class PoolFloor : IDisposable
 {
-    private static readonly object Gate = new();
-    private static int _parkedNow; // by every PoolFloor not yet disposed
+    private static readonly Tally Shared = new();
+    private readonly Tally _tally;
     private readonly int _parked;
     private readonly IDisposable _raise;
     private int _disposed;
 
     public PoolFloor(int parked)
+        : this(parked, Shared)
+    {
+    }
+
+    /// <summary>A holder counted in <paramref name="tally"/> (a test of this class makes a tally of its own, so that no other test's holders are counted with its own).</summary>
+    internal PoolFloor(int parked, Tally tally)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(parked);
+        ArgumentNullException.ThrowIfNull(tally);
         _parked = parked;
-        lock (Gate)
+        _tally = tally;
+        // The tally's lock is held across the raise, so two holders made at the same moment ask in
+        // the order they were counted.
+        lock (tally)
         {
-            _parkedNow += parked;
-            _raise = DidComm.TestSupport.ThreadPoolFloor.Raise(Environment.ProcessorCount + _parkedNow + 8);
+            Asked = Environment.ProcessorCount + tally.Add(parked) + 8;
+            _raise = DidComm.TestSupport.ThreadPoolFloor.Raise(Asked);
         }
     }
 
-    /// <summary>How many pool threads the tests holding a <see cref="PoolFloor"/> park now.</summary>
-    internal static int ParkedNow
-    {
-        get
-        {
-            lock (Gate)
-                return _parkedNow;
-        }
-    }
+    /// <summary>The worker floor this holder asked for: the processors, what every holder of its tally parked when it was made, and eight to spare.</summary>
+    internal int Asked { get; }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
             return;
-        lock (Gate)
-            _parkedNow -= _parked;
+        _tally.Add(-_parked);
         _raise.Dispose();
+    }
+
+    /// <summary>How many pool threads the holders counted together park now. Every test shares one tally.</summary>
+    internal sealed class Tally
+    {
+        private int _parked;
+
+        /// <summary>What the holders park now.</summary>
+        internal int Parked
+        {
+            get
+            {
+                lock (this)
+                    return _parked;
+            }
+        }
+
+        internal int Add(int parked)
+        {
+            lock (this)
+                return _parked += parked;
+        }
     }
 }
 
