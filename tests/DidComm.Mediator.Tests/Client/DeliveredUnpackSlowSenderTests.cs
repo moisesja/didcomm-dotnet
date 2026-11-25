@@ -260,11 +260,11 @@ public sealed class DeliveredUnpackSlowSenderTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var register = new RegistrationGate();
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
         // Each of the four in front ends when the test says so, on the thread that says so.
         var inFront = Enumerable.Range(0, 4).ToDictionary(i => "front-" + i, _ => new TaskCompletionSource<DeliveredUnpack>());
-        var late = NeverOpens.Lookup(whenCancelled, calls, register.Task, never.Task);
+        var late = NeverOpens.Lookup(whenCancelled, calls, register, never.Task);
         var unpacker = new DeliveredMessageUnpacker((packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
@@ -288,7 +288,7 @@ public sealed class DeliveredUnpackSlowSenderTests
                     ends.SetException(new CryptoException("JWE could not be decrypted."));
             }).WaitAsync(RealTime);
             SpinWait.SpinUntil(() => unpacker.Settled == 4, RealTime).Should().BeTrue("the four in front have their outcomes");
-            register.SetResult();
+            await register.OpenAsync(whenCancelled == WhenCancelled.ReportsAFailure ? 1 : 0, RealTime);
             await calls.WaitForAsync(5, RealTime);
             await Task.Run(() => time.Advance(TimeSpan.FromSeconds(6))).WaitAsync(RealTime); // the budget's end
             var outcomes = await first.WaitAsync(RealTime);
@@ -694,6 +694,30 @@ public sealed class DeliveredUnpackSlowSenderTests
         calls.Labels.Skip(11).Should().Equal("sam-2");
         held.RunAll();
         unpacker.Reserved.Should().Be(0);
+    }
+
+    /// <summary>
+    /// D-13 for messages that open: six messages of one sender that open at once, in one delivery,
+    /// with the release continuations held back. Each worker gives the reservation of the call it
+    /// waited for back itself, before its next take, so the fifth and the sixth are not refused for
+    /// the sender's partition of four; the held continuations then change nothing.
+    /// </summary>
+    [Fact]
+    public async Task A_senders_partition_never_refuses_inside_one_delivery_because_of_its_own_opened_calls()
+    {
+        var time = new ManualTimeProvider();
+        var held = new HeldScheduler();
+        var unpacker = new DeliveredMessageUnpacker((packed, _) => Task.FromResult(UnpackFakes.Opened(TestJwe.LabelOf(packed))), Budget, time, reservations: new UnpackReservations(held));
+        var messages = Enumerable.Range(0, 6).Select(i => Message(TestJwe.Authcrypt(SamKid, "sam-" + i), "sam-" + i)).ToArray();
+
+        var outcomes = await unpacker.UnpackAllAsync(Bob, messages, "request-1", default).WaitAsync(RealTime);
+
+        outcomes.Should().OnlyContain(o => o.Succeeded, "no message is refused for its sender's partition because of calls of its own delivery that have ended");
+        unpacker.Reserved.Should().Be(0, "each worker gave its reservation back itself");
+        SpinWait.SpinUntil(() => held.Held == messages.Length, RealTime).Should().BeTrue("every release continuation is still held");
+        held.RunAll();
+        unpacker.Reserved.Should().Be(0, "a reservation is given back once");
+        unpacker.Reservations.Partitions.Should().Be(0);
     }
 
     /// <summary>

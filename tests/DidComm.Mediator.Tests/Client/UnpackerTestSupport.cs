@@ -268,12 +268,66 @@ internal sealed class UnpackClock(ManualTimeProvider inner) : TimeProvider
 }
 
 /// <summary>
-/// Host lookups for the unpacker's tests that end from inside a cancellation callback of their own.
-/// Each registers its callback only once <c>register</c> completes, and records itself in the log
-/// after that: a test completes <c>register</c> once it has seen <c>UnpackAllAsync</c> return (the
-/// workers wait on their calls by then), so the lookup's callback is registered after the worker's
-/// and runs before it.
+/// Awaits a task without capturing a context, always suspending, and runs an action once the
+/// awaiting method's continuation is hooked on the task. A signal given from that action tells a
+/// test that the method is parked there, and that completing the task runs the method's
+/// continuation on the completing thread (a signal given before the <c>await</c> would not).
 /// </summary>
+internal readonly struct ParkedAwaitable<T>(Task<T> task, Action parked)
+{
+    public Awaiter GetAwaiter() => new(task, parked);
+
+    internal readonly struct Awaiter(Task<T> task, Action parked) : System.Runtime.CompilerServices.ICriticalNotifyCompletion
+    {
+        public bool IsCompleted => false;
+
+        public T GetResult() => task.GetAwaiter().GetResult();
+
+        public void OnCompleted(Action continuation) => UnsafeOnCompleted(continuation);
+
+        public void UnsafeOnCompleted(Action continuation)
+        {
+            task.ConfigureAwait(false).GetAwaiter().UnsafeOnCompleted(continuation);
+            parked();
+        }
+    }
+}
+
+/// <summary>
+/// The gate of <see cref="CallbackLookups"/>: a lookup parks on it before it registers its
+/// cancellation callback. A test opens it once it has seen <c>UnpackAllAsync</c> return (every worker
+/// waits on its call by then) and the lookups are parked (each has returned its task to the
+/// unpacker by then), so a lookup's callback is registered after its worker's and runs before it.
+/// </summary>
+internal sealed class RegistrationGate
+{
+    private readonly TaskCompletionSource<bool> _open = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly HostCallLog _parked = new();
+
+    /// <summary>Park here until the gate is open; always suspends.</summary>
+    public ParkedAwaitable<bool> Parked() => new(_open.Task, () => _parked.Enter("parked", default));
+
+    /// <summary>Wait (bounded, in real time) until <paramref name="lookups"/> lookups are parked on the gate, then open it.</summary>
+    public async Task OpenAsync(int lookups, TimeSpan timeout)
+    {
+        await _parked.WaitForAsync(lookups, timeout);
+        _open.TrySetResult(true);
+    }
+}
+
+/// <summary>
+/// Host lookups for the unpacker's tests that end from inside a cancellation callback of their own.
+/// Each parks on the <see cref="RegistrationGate"/> first, registers its callback once the gate is
+/// open, and records itself in the log once it is parked on its own end: completing it from the
+/// callback then runs the lookup's continuation, and the unpacker's worker behind it, on the thread
+/// that cancels.
+/// </summary>
+/// <remarks>
+/// What a test can rely on: the order of the callbacks (the lookup's runs before its worker's and
+/// before the delivery's own), and that the lookup's continuation is hooked when the log shows it.
+/// That the unpacker's own wait on the lookup's task is hooked by then follows from the lookup
+/// having parked on the gate first, a step earlier; it is not observed.
+/// </remarks>
 internal static class CallbackLookups
 {
     /// <summary>
@@ -281,29 +335,35 @@ internal static class CallbackLookups
     /// (a resolver that maps every error, its cancellation included, to "notFound"), from inside the
     /// callback it registered on its token, or on the token <paramref name="on"/> picks instead.
     /// </summary>
-    public static Func<string, CancellationToken, Task<DeliveredUnpack>> ReportsCancellationAsFailure(HostCallLog calls, Task register, Func<CancellationToken, CancellationToken>? on = null)
-        => async (packed, ct) =>
-        {
-            var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
-            await register.ConfigureAwait(false);
-            (on is null ? ct : on(ct)).UnsafeRegister(_ => ends.TrySetException(new DidComm.Exceptions.DidResolutionException("did:example:alice", "notFound")), null);
-            using (calls.Enter(TestJwe.LabelOf(packed), ct))
-                return await ends.Task.ConfigureAwait(false);
-        };
-
-    /// <summary>
-    /// A lookup that never ends on its own and opens its message from inside the callback it
-    /// registered on its token, or on the token <paramref name="on"/> picks instead.
-    /// </summary>
-    public static Func<string, CancellationToken, Task<DeliveredUnpack>> OpensWhenCancelled(HostCallLog calls, Task register, Func<CancellationToken, CancellationToken>? on = null)
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> ReportsCancellationAsFailure(HostCallLog calls, RegistrationGate gate, Func<CancellationToken, CancellationToken>? on = null)
         => async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
             var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
-            await register.ConfigureAwait(false);
-            (on is null ? ct : on(ct)).UnsafeRegister(_ => ends.TrySetResult(UnpackFakes.Opened(label)), null);
-            using (calls.Enter(label, ct))
-                return await ends.Task.ConfigureAwait(false);
+            await gate.Parked();
+            (on is null ? ct : on(ct)).UnsafeRegister(_ => ends.TrySetException(new DidComm.Exceptions.DidResolutionException("did:example:alice", "notFound")), null);
+            return await new ParkedAwaitable<DeliveredUnpack>(ends.Task, () => calls.Enter(label, ct));
+        };
+
+    /// <summary>
+    /// A lookup that never ends on its own and opens its message from inside the callback it
+    /// registered on its token, or on the token <paramref name="on"/> picks instead. The callback
+    /// then stays inside the cancellation until <paramref name="recorded"/> says the unpacker has
+    /// recorded that success (bounded, as a hang guard): the delivery's own callback runs after it,
+    /// so the delivery is still open when the success is recorded, wherever its worker runs.
+    /// </summary>
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> OpensWhenCancelled(HostCallLog calls, RegistrationGate gate, Func<bool> recorded, Func<CancellationToken, CancellationToken>? on = null)
+        => async (packed, ct) =>
+        {
+            var label = TestJwe.LabelOf(packed);
+            var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
+            await gate.Parked();
+            (on is null ? ct : on(ct)).UnsafeRegister(_ =>
+            {
+                ends.TrySetResult(UnpackFakes.Opened(label));
+                SpinWait.SpinUntil(recorded, TimeSpan.FromSeconds(10));
+            }, null);
+            return await new ParkedAwaitable<DeliveredUnpack>(ends.Task, () => calls.Enter(label, ct));
         };
 }
 
@@ -326,9 +386,9 @@ internal static class NeverOpens
     /// <summary>The lookup for <paramref name="whenCancelled"/>; each records itself in <paramref name="calls"/> once it is in place.</summary>
     /// <param name="whenCancelled">What it does when its token is cancelled.</param>
     /// <param name="calls">The log of host calls.</param>
-    /// <param name="register">When a lookup that reports a failure may register its callback.</param>
+    /// <param name="register">The gate a lookup that reports a failure parks on before it registers its callback.</param>
     /// <param name="never">What a lookup that runs on waits for.</param>
-    public static Func<string, CancellationToken, Task<DeliveredUnpack>> Lookup(WhenCancelled whenCancelled, HostCallLog calls, Task register, Task<DeliveredUnpack> never)
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> Lookup(WhenCancelled whenCancelled, HostCallLog calls, RegistrationGate register, Task<DeliveredUnpack> never)
         => whenCancelled switch
         {
             WhenCancelled.Ends => async (packed, ct) =>

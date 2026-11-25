@@ -41,14 +41,14 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
         var time = new ManualTimeProvider();
         var send = new FakeSend();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var register = new RegistrationGate();
         using var caller = new CancellationTokenSource();
-        var channel = Create(_w, send, time: time, unpack: CallbackLookups.ReportsCancellationAsFailure(calls, register.Task, on: _ => caller.Token));
+        var channel = Create(_w, send, time: time, unpack: CallbackLookups.ReportsCancellationAsFailure(calls, register, on: _ => caller.Token));
         AnswerWithOneDelivered(send);
         var pickup = new PickupClient(channel, logger: null);
 
         var fetch = pickup.FetchAsync(_w.Mediator.Did, _w.Local.Did, 10, serviceEndpointOverride: Https, ct: caller.Token).Observed();
-        register.SetResult();
+        await register.OpenAsync(1, PickupTest.Timeout); // the delivery is being opened: its lookup is parked
         await calls.WaitForAsync(1, PickupTest.Timeout);
         await Task.Run(caller.Cancel).WaitAsync(PickupTest.Timeout);
 
@@ -70,15 +70,13 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
         var time = new ManualTimeProvider();
         var send = new FakeSend();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var channel = Create(_w, send, time: time, unpack: CallbackLookups.ReportsCancellationAsFailure(calls, register.Task));
+        var register = new RegistrationGate();
+        var channel = Create(_w, send, time: time, unpack: CallbackLookups.ReportsCancellationAsFailure(calls, register));
         AnswerWithOneDelivered(send);
         var pickup = new PickupClient(channel, logger: null);
 
         var fetch = pickup.FetchAsync(_w.Mediator.Did, _w.Local.Did, 10, serviceEndpointOverride: Https).Observed();
-        // The lookup registers once the delivery is being opened and its worker waits on the call.
-        SpinWait.SpinUntil(() => channel.Unpacker.Reserved == 1, PickupTest.Timeout).Should().BeTrue();
-        register.SetResult();
+        await register.OpenAsync(1, PickupTest.Timeout); // the delivery is being opened: its lookup is parked
         await calls.WaitForAsync(1, PickupTest.Timeout);
         await Task.Run(() => channel.DisposeAsync().AsTask()).WaitAsync(PickupTest.Timeout);
 
@@ -128,8 +126,7 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
             var ends = new TaskCompletionSource<SendResult>(); // its continuations run inline, inside the callback
             await register.Task.ConfigureAwait(false);
             ct.UnsafeRegister(_ => ends.TrySetException(new TransportException("The connection was closed.")), null);
-            registered.TrySetResult();
-            return await ends.Task.ConfigureAwait(false);
+            return await new ParkedAwaitable<SendResult>(ends.Task, () => registered.TrySetResult());
         };
         using var caller = new CancellationTokenSource();
         var channel = Create(_w, send, time: time);

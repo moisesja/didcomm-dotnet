@@ -176,7 +176,9 @@ public sealed class SlowMemoryQa1Tests
         {
             var before = calls.Count;
             var delivery = unpacker.UnpackAllAsync(Qa1.Bob, message, "request", default);
-            if (delivery.IsCompleted)
+            // Held back: decided at once, with no host call. (A message that opens at once can also
+            // be decided by the time the call above returns; its host call was made then.)
+            if (delivery.IsCompleted && calls.Count == before)
                 return false;
             await calls.WaitForAsync(before + 1, RealTime);
             if (!Volatile.Read(ref opens))

@@ -28,22 +28,22 @@ public sealed class SlowMemoryRt2BTests
     /// when the caller cancelled. It is not remembered, and the delivery ends cancelled.
     /// </summary>
     /// <remarks>
-    /// The lookup registers its callback once <c>UnpackAllAsync</c> has returned, so it runs before
-    /// the worker's and the delivery's; the caller cancels from a pool thread, where continuations
-    /// run inline. (As first written, the lookup's continuation hopped threads and the order of two
-    /// registrations decided the outcome.)
+    /// The lookup registers its callback once <c>UnpackAllAsync</c> has returned and the lookup is
+    /// parked, so it runs before the worker's and the delivery's; the caller cancels from a pool
+    /// thread, where continuations run inline. (As first written, the lookup's continuation hopped
+    /// threads and the order of two registrations decided the outcome.)
     /// </remarks>
     [Fact]
     public async Task A_message_running_when_the_caller_cancels_is_not_remembered_when_its_lookup_reports_the_cancellation_as_a_failure()
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
         using var caller = new CancellationTokenSource();
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Alice("alice-1") }, "request-1", caller.Token);
-        register.SetResult();
+        await register.OpenAsync(1, RealTime);
         await calls.WaitForAsync(1, RealTime);
         time.Advance(TimeSpan.FromSeconds(1));
         await Task.Run(caller.Cancel).WaitAsync(RealTime);
@@ -60,7 +60,8 @@ public sealed class SlowMemoryRt2BTests
     /// I-9 (as amended by decision C): nothing is written for a message still running when the
     /// caller cancels, in a delivery of four. Each host lookup ends at once when its token is
     /// cancelled and reports that as a resolution failure, from inside its cancellation callback
-    /// (registered once <c>UnpackAllAsync</c> has returned; the caller cancels from a pool thread).
+    /// (registered once <c>UnpackAllAsync</c> has returned and the lookups are parked; the caller
+    /// cancels from a pool thread).
     /// None of the four is remembered, and the delivery ends cancelled.
     /// </summary>
     [Fact]
@@ -68,13 +69,13 @@ public sealed class SlowMemoryRt2BTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
         using var caller = new CancellationTokenSource();
         var ids = new[] { "alice-1", "alice-2", "alice-3", "alice-4" };
 
         var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Alice).ToArray(), "request-1", caller.Token);
-        register.SetResult();
+        await register.OpenAsync(ids.Length, RealTime);
         await calls.WaitForAsync(ids.Length, RealTime);
         time.Advance(TimeSpan.FromSeconds(1));
         await Task.Run(caller.Cancel).WaitAsync(RealTime);

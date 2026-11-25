@@ -16,10 +16,11 @@ namespace DidComm.Mediator.Tests.Client;
 /// </summary>
 /// <remarks>
 /// The lookups that end inside a callback register it only once the test has seen
-/// <c>UnpackAllAsync</c> return (<see cref="CallbackLookups"/>), so the order of the callbacks is
-/// fixed. Every cancellation and every move of the clock that ends a delivery is made from a
-/// thread-pool thread, where continuations run inline as they do in a host; the test's own thread
-/// has a synchronization context that would queue them. Real time is only a hang guard.
+/// <c>UnpackAllAsync</c> return and the lookups are parked (<see cref="CallbackLookups"/>,
+/// <see cref="RegistrationGate"/>), so the order of the callbacks is fixed. Every cancellation and
+/// every move of the clock that ends a delivery is made from a thread-pool thread, where
+/// continuations run inline as they do in a host; the test's own thread has a synchronization
+/// context that would queue them. Real time is only a hang guard.
 /// </remarks>
 public sealed class DeliveredUnpackTokenStateTests
 {
@@ -39,12 +40,12 @@ public sealed class DeliveredUnpackTokenStateTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
         using var caller = new CancellationTokenSource();
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", caller.Token);
-        register.SetResult(); // the worker waits on its call: the lookup's callback is registered after the worker's
+        await register.OpenAsync(1, RealTime); // the worker waits on its call: the lookup's callback is registered after the worker's
         await calls.WaitForAsync(1, RealTime);
         time.Advance(TimeSpan.FromSeconds(1));
         await Task.Run(caller.Cancel).WaitAsync(RealTime);
@@ -67,11 +68,11 @@ public sealed class DeliveredUnpackTokenStateTests
         var late = TimeSpan.FromSeconds(14);
         var time = UnpackClock.SteppingAfterTheFirstBudget(new ManualTimeProvider(), late);
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", default);
-        register.SetResult();
+        await register.OpenAsync(1, RealTime);
         await calls.WaitForAsync(1, RealTime);
         await Task.Run(() => time.Inner.Advance(Budget - late)).WaitAsync(RealTime);
         var outcomes = await delivery.WaitAsync(RealTime);
@@ -92,11 +93,11 @@ public sealed class DeliveredUnpackTokenStateTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", default);
-        register.SetResult();
+        await register.OpenAsync(1, RealTime);
         await calls.WaitForAsync(1, RealTime);
         await Task.Run(() => time.Advance(Budget)).WaitAsync(RealTime);
         var outcomes = await delivery.WaitAsync(RealTime);
@@ -119,14 +120,14 @@ public sealed class DeliveredUnpackTokenStateTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var register = new RegistrationGate();
         using var caller = new CancellationTokenSource();
         using var shutdown = new CancellationTokenSource();
         var watched = byShutdown ? shutdown : caller;
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task, on: _ => watched.Token), Budget, time, shutdown.Token);
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register, on: _ => watched.Token), Budget, time, shutdown.Token);
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", caller.Token);
-        register.SetResult();
+        await register.OpenAsync(1, RealTime);
         await calls.WaitForAsync(1, RealTime);
         time.Advance(TimeSpan.FromSeconds(1));
         await Task.Run(watched.Cancel).WaitAsync(RealTime);
@@ -156,17 +157,17 @@ public sealed class DeliveredUnpackTokenStateTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var register = new RegistrationGate();
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var caller = new CancellationTokenSource();
         using var shutdown = new CancellationTokenSource();
-        var host = NeverOpens.Lookup(whenCancelled, calls, register.Task, never.Task);
+        var host = NeverOpens.Lookup(whenCancelled, calls, register, never.Task);
         var unpacker = new DeliveredMessageUnpacker(host, Budget, time, shutdown.Token);
         var ids = new[] { "alice-1", "alice-2", "alice-3", "alice-4", "alice-5" };
         try
         {
             var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Message).ToArray(), "request-1", caller.Token);
-            register.SetResult();
+            await register.OpenAsync(whenCancelled == WhenCancelled.ReportsAFailure ? DeliveredMessageUnpacker.FetchConcurrency : 0, RealTime);
             await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
             time.Advance(TimeSpan.FromSeconds(10));
             await Task.Run((byShutdown ? shutdown : caller).Cancel).WaitAsync(RealTime);
@@ -195,7 +196,9 @@ public sealed class DeliveredUnpackTokenStateTests
     /// when the caller cancels (the callback is on the caller's own token, which runs before the
     /// delivery's token is cancelled). The fifth message, not valid UTF-8, was waiting for a worker;
     /// a worker that took it would record it as malformed at once. No worker takes it: one outcome
-    /// was recorded by a worker, and the fifth message is out of time before its turn.
+    /// was recorded by a worker, and the fifth message is out of time before its turn. (The callback
+    /// stays inside the cancellation until that success is recorded, so the delivery is still open
+    /// then, whichever thread the worker runs on.)
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -204,10 +207,11 @@ public sealed class DeliveredUnpackTokenStateTests
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
-        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var register = new RegistrationGate();
         using var caller = new CancellationTokenSource();
-        var opensWhenCancelled = CallbackLookups.OpensWhenCancelled(calls, register.Task, byTheCaller ? _ => caller.Token : null);
-        var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
+        DeliveredMessageUnpacker? opening = null;
+        var opensWhenCancelled = CallbackLookups.OpensWhenCancelled(calls, register, recorded: () => opening!.Settled >= 1, byTheCaller ? _ => caller.Token : null);
+        var unpacker = opening = new DeliveredMessageUnpacker(async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
             if (label == "opens-0")
@@ -220,7 +224,7 @@ public sealed class DeliveredUnpackTokenStateTests
             .ToArray();
 
         var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", caller.Token);
-        register.SetResult();
+        await register.OpenAsync(1, RealTime);
         await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
         await Task.Run(() =>
         {
@@ -231,7 +235,7 @@ public sealed class DeliveredUnpackTokenStateTests
         }).WaitAsync(RealTime);
         await Ended(delivery);
 
-        unpacker.Settled.Should().Be(1, "the first message's success was recorded by its worker, on the thread that ended the delivery, and that worker took nothing more");
+        unpacker.Settled.Should().Be(1, "the first message's success was recorded by its worker while the delivery was being ended, and that worker took nothing more");
         if (byTheCaller)
         {
             delivery.Status.Should().Be(TaskStatus.Canceled);
