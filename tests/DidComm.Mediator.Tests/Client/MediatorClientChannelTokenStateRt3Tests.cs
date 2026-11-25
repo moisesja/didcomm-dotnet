@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using AwesomeAssertions;
 using DidComm.Exceptions;
 using DidComm.Mediator.Client;
@@ -14,12 +13,12 @@ using static DidComm.Mediator.Tests.Client.ClientChannels;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// RT3 (#111, fix round 2): the request path of the real channel (an endpoint lookup, a send, a
-/// send that allows no answer, a one-way send) in the orderings
-/// <see cref="MediatorClientChannelTokenStateTests"/> does not set up: a failure of the host code's
-/// own that races with what ends the call; a call whose token is combined from two caller tokens;
-/// what the log keeps of what the host code reported while its call was being ended; and an answer
-/// that won before the send failed on its own.
+/// The request path of the real channel (an endpoint lookup, a send, a send that allows no answer,
+/// a one-way send) in the orderings <see cref="MediatorClientChannelTokenStateTests"/> does not set
+/// up (#111; first written by the red team of fix round 2, completed in round 3): a failure of the
+/// host code's own that races with what ends the call; a call whose token is combined from two
+/// caller tokens (a documented residual, pinned); what the log keeps of what the host code reported
+/// while its call was being ended; and an answer that won before the send failed on its own.
 /// </summary>
 /// <remarks>
 /// As there: a call is started and returns once it waits on its host code, and only then does the
@@ -132,27 +131,46 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     // ---- a call whose token is combined from two caller tokens -----------------------------------------
 
     /// <summary>
-    /// The call's token is cancelled by either of two caller tokens (the combination a compiler
-    /// makes for an enumeration given two tokens, which a live stream hands to its requests). The
-    /// host code watches one of the two and reports its cancellation as a failure of its own from
-    /// its callback there. The call ends cancelled, as when the host code watches the call's token
-    /// itself.
+    /// A documented residual, pinned. The call's token is cancelled by either of two caller tokens
+    /// (for example the combination a compiler makes for an async enumeration that is given two
+    /// tokens; the live stream's enumeration is declared that way). The host code watches one of the
+    /// two, not the token it was handed, and reports its cancellation as a failure of its own from
+    /// its callback there. The call ends with what the host code reported, not as a cancellation.
     /// </summary>
     /// <remarks>
-    /// Observed on the head of fix round 2: the call ends with what the host code reported.
+    /// Why it is so: the channel judges what its host code throws by the tokens it can read, which
+    /// are the one it was given, its own deadline's and its own disposal. It is handed one token and
+    /// cannot read the two behind it. The host code's callback was registered on the first caller
+    /// token after the combination was made, so it runs before the callback that cancels the
+    /// combined token: when the failure is observed, neither the token the channel was given nor the
+    /// one it handed on is cancelled (the test reads both then), nothing says the call is being
+    /// ended, and the failure is the call's own. Host code should watch the token it is handed: the
+    /// next test is the same call with host code that does.
     /// </remarks>
-    [Theory(Skip = "RT3: whether a call whose token is combined from two caller tokens ends cancelled when its host code reports the cancellation of one of them as a failure")]
+    [Theory]
     [InlineData(Step.EndpointLookup)]
     [InlineData(Step.Send)]
     [InlineData(Step.SendAllowingNoAnswer)]
     [InlineData(Step.OneWaySend)]
-    public async Task A_call_whose_token_is_combined_from_two_ends_cancelled_when_its_host_code_reports_the_cancellation_of_one_of_them(Step step)
+    public async Task A_call_whose_token_is_combined_from_two_ends_with_what_its_host_code_reported_when_that_code_watches_one_of_the_two(Step step)
     {
         var time = new ManualTimeProvider();
         using var first = new CancellationTokenSource();
         using var second = new CancellationTokenSource();
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
-        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step), Watches = _ => first.Token };
+        var reported = FailureOf(step);
+        var givenWasCancelled = true;
+        var handedWasCancelled = true;
+        var host = new HeldHostCode
+        {
+            ReportsWhenCancelled = () => reported,
+            Watches = _ => first.Token,
+            BeforeItReports = handed =>
+            {
+                givenWasCancelled = combined.Token.IsCancellationRequested;
+                handedWasCancelled = handed.IsCancellationRequested;
+            },
+        };
         var (channel, _) = ChannelOver(time, logs: null, host);
 
         var (call, _) = Start(channel, step, combined.Token);
@@ -160,46 +178,161 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
         await Task.Run(first.Cancel).WaitAsync(PickupTest.Timeout);
 
         var result = await EndOf(call);
-        host.Reported.Should().Be(1, "the host code reported the caller's cancellation as a failure of its own");
-        result.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled the call (it ended with {0})", result?.GetType().Name ?? "a result");
+        host.Reported.Should().Be(1, "the host code reported the first caller token's cancellation as a failure of its own");
+        givenWasCancelled.Should().BeFalse("the set-up: the token the channel was given was not cancelled yet when the host code reported");
+        handedWasCancelled.Should().BeFalse("the set-up: nor was the token the host code was handed");
+        result.Should().BeSameAs(reported, "nothing the channel can read said the call was being ended, so the failure is the call's own");
+        combined.Token.IsCancellationRequested.Should().BeTrue("the cancellation reached the call's token afterwards");
         channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The same call, with host code that watches the token it was handed and reports its
+    /// cancellation as a failure of its own. The call ends cancelled, with the token it was given.
+    /// </summary>
+    [Theory]
+    [InlineData(Step.EndpointLookup)]
+    [InlineData(Step.Send)]
+    [InlineData(Step.SendAllowingNoAnswer)]
+    [InlineData(Step.OneWaySend)]
+    public async Task A_call_whose_token_is_combined_from_two_ends_cancelled_when_its_host_code_watches_the_token_it_was_handed(Step step)
+    {
+        var time = new ManualTimeProvider();
+        using var first = new CancellationTokenSource();
+        using var second = new CancellationTokenSource();
+        using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
+        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step) };
+        var (channel, _) = ChannelOver(time, logs: null, host);
+
+        var (call, _) = Start(channel, step, combined.Token);
+        await host.ParkAsync();
+        await Task.Run(first.Cancel).WaitAsync(PickupTest.Timeout);
+
+        var result = await EndOf(call);
+        host.Reported.Should().Be(1, "the host code reported the cancellation of the token it was handed as a failure of its own");
+        ShouldHaveEndedAs(result, Ending.CallerCancels, combined.Token);
+        channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
         await channel.DisposeAsync();
     }
 
     // ---- what the log keeps -----------------------------------------------------------------------------
 
     /// <summary>
-    /// The call's deadline passes and its host code reports the cancellation of its token as a
-    /// failure of its own; the call ends as the timeout. Some log line, at any level, names the
-    /// type of what the host code reported.
+    /// The call is ended (the caller cancels, its deadline passes or the container is disposed) and
+    /// its host code reports the cancellation of its token as a failure of its own; the call ends
+    /// as what ended it. One Debug line of the channel names the type of what the host code
+    /// reported, the step and, for a send, the request's id.
     /// </summary>
-    /// <remarks>
-    /// Observed on the head of fix round 2: no log line names it; the lines written name the
-    /// timeout only (an endpoint lookup writes none).
-    /// </remarks>
-    [Theory(Skip = "RT3: whether the log keeps the type of what a send or an endpoint lookup reported while its call was being ended")]
+    [Theory]
+    [MemberData(nameof(EachStepEndedEachWay))]
+    public async Task What_the_host_code_reported_while_its_call_was_being_ended_is_named_in_the_log(Step step, Ending ending)
+    {
+        var (logs, request, reported) = await EndWhileTheHostCodeReportsAsync(step, ending);
+
+        var named = reported.GetType().Name;
+        var line = logs.Of<MediatorClientChannel>()
+            .Should().ContainSingle(l => Equals(l.State.GetValueOrDefault("ExceptionType"), named),
+                "one line names what the host code reported ({0}); the lines written: {1}", named, string.Join(" | ", logs.Entries.Select(e => e.Formatted)))
+            .Subject;
+        line.Level.Should().Be(LogLevel.Debug);
+        line.Formatted.Should().Contain(named).And.Contain("while the call was being ended");
+        if (step == Step.EndpointLookup)
+        {
+            line.Formatted.Should().Contain("the lookup step");
+            line.State.Should().NotContainKey("RequestId", "an endpoint lookup has no request");
+        }
+        else
+        {
+            line.Formatted.Should().Contain("the send step").And.Contain(request!.Id);
+            line.State.GetValueOrDefault("RequestId").Should().Be(request.Id, "the line names the request");
+        }
+    }
+
+    /// <summary>
+    /// The same calls. No log line, in its text, in any of its values or in an exception handed to
+    /// the logger, carries the text of what the host code reported: only its type is kept.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EachStepEndedEachWay))]
+    public async Task No_log_line_carries_the_text_of_what_the_host_code_reported_while_its_call_was_being_ended(Step step, Ending ending)
+    {
+        var (logs, _, reported) = await EndWhileTheHostCodeReportsAsync(step, ending);
+
+        logs.Entries.Should().NotBeEmpty("the call wrote its lines");
+        foreach (var entry in logs.Entries)
+        {
+            entry.Exception.Should().BeNull("no exception is handed to the logger");
+            entry.Everything.Should().NotContain(reported.Message, "the text of what the host code reported is not logged");
+            if (reported is DidResolutionException resolution)
+                entry.Everything.Should().NotContain(resolution.Did).And.NotContain(resolution.Reason);
+        }
+    }
+
+    /// <summary>
+    /// The call's deadline passes while its host code runs on and reports nothing. The line is
+    /// written all the same: what the channel observed then is the cancellation of its own wait on
+    /// the host code, and the line names that.
+    /// </summary>
+    [Theory]
     [InlineData(Step.EndpointLookup)]
     [InlineData(Step.Send)]
     [InlineData(Step.SendAllowingNoAnswer)]
     [InlineData(Step.OneWaySend)]
-    public async Task What_the_host_code_reported_while_its_call_was_being_ended_is_named_in_the_log(Step step)
+    public async Task For_host_code_that_reports_nothing_the_line_names_the_cancellation_of_the_channels_own_wait(Step step)
     {
         var time = new ManualTimeProvider();
-        var logs = new CapturedLogs();
-        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step) };
+        var logs = new ClientLogCapture();
+        var host = new HeldHostCode();
         using var caller = new CancellationTokenSource();
         var (channel, _) = ChannelOver(time, logs, host);
-        var reported = FailureOf(step).GetType().Name;
 
         var (call, _) = Start(channel, step, caller.Token);
         await host.ParkAsync();
         await Task.Run(() => End(Ending.RequestTimesOut, caller, time, channel)).WaitAsync(PickupTest.Timeout);
 
         (await EndOf(call)).Should().BeOfType<TimeoutException>("the call's deadline passed");
-        host.Reported.Should().Be(1);
-        logs.Lines.Should().Contain(line => line.Contains(reported, StringComparison.Ordinal),
-            "what the host code reported ({0}) is kept somewhere ({1} lines were written: {2})", reported, logs.Lines.Count, string.Join(" | ", logs.Lines));
+        var line = logs.Of<MediatorClientChannel>()
+            .Should().ContainSingle(l => l.Formatted.Contains("while the call was being ended", StringComparison.Ordinal)).Subject;
+        line.State.GetValueOrDefault("ExceptionType").Should().BeOneOf(
+            new object[] { nameof(OperationCanceledException), nameof(TaskCanceledException) }, "the channel's own wait was cancelled");
         await channel.DisposeAsync();
+    }
+
+    /// <summary>Each step ended each of the three ways.</summary>
+    public static TheoryData<Step, Ending> EachStepEndedEachWay()
+    {
+        var rows = new TheoryData<Step, Ending>();
+        foreach (var step in Enum.GetValues<Step>())
+        {
+            foreach (var ending in Enum.GetValues<Ending>())
+                rows.Add(step, ending);
+        }
+        return rows;
+    }
+
+    // A call of a step, ended while its host code runs; the host code reports the cancellation of
+    // the token it was handed as a failure of its own. Returns once the call has ended as what
+    // ended it: the lines written, the request (none for an endpoint lookup) and what was reported.
+    private async Task<(ClientLogCapture Logs, Message? Request, Exception Reported)> EndWhileTheHostCodeReportsAsync(Step step, Ending ending)
+    {
+        var time = new ManualTimeProvider();
+        var logs = new ClientLogCapture();
+        var reported = FailureOf(step);
+        var host = new HeldHostCode { ReportsWhenCancelled = () => reported };
+        using var caller = new CancellationTokenSource();
+        var (channel, _) = ChannelOver(time, logs, host);
+
+        var (call, request) = Start(channel, step, caller.Token);
+        await host.ParkAsync();
+        await Task.Run(() => End(ending, caller, time, channel)).WaitAsync(PickupTest.Timeout);
+
+        ShouldHaveEndedAs(await EndOf(call), ending, caller.Token);
+        host.Reported.Should().Be(1, "the host code reported the cancellation of its token as a failure of its own");
+        await channel.DisposeAsync();
+        return (logs, request, reported);
     }
 
     // ---- an answer that won, and a send that then fails on its own -----------------------------------
@@ -207,24 +340,23 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     /// <summary>
     /// The answer to a request arrives while its send still runs, and wins; the send then fails on
     /// its own, while nothing has ended the call. The call returns the answer, as it does when the
-    /// transport reports a failure while the call is being ended.
+    /// transport reports a failure while the call is being ended. So it is on either kind of route,
+    /// and for a request the mediator may leave unanswered the result is the answer, never "no
+    /// answer". The request is no longer counted and its deadline is released.
     /// </summary>
-    /// <remarks>
-    /// Observed on the head of fix round 2, and by the code the same before the round (the send's
-    /// failure was passed on then too): the call ends with the send's failure and the answer is not
-    /// returned.
-    /// </remarks>
-    [Theory(Skip = "RT3: whether an answer that won is returned when the send then fails on its own while nothing has ended the call")]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task An_answer_that_won_while_the_send_ran_is_returned_when_the_send_then_fails_on_its_own(bool allowingNoAnswer)
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task An_answer_that_won_while_the_send_ran_is_returned_when_the_send_then_fails_on_its_own(bool allowingNoAnswer, bool overHttp)
     {
         var time = new ManualTimeProvider();
         var host = new HeldHostCode();
         using var caller = new CancellationTokenSource();
         var (channel, _) = ChannelOver(time, logs: null, host);
 
-        var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, caller.Token);
+        var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, caller.Token, overHttp ? HttpRoute : WebSocketRoute);
         var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
         await host.ParkAsync();
         channel.AsCorrelator().OnInbound(answer).Should().BeTrue("a request is registered before it is sent, so its answer can arrive while the send runs");
@@ -233,7 +365,230 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
         var result = await EndOf(call);
         result.Should().BeNull("the answer had won before the send failed (the call ended with {0})", result?.GetType().Name ?? "a result");
         (await (Task<InboundMessageSnapshot?>)call).Should().BeSameAs(answer);
-        channel.PendingCount.Should().Be(0);
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The same call, with the log read. One Debug line names the type of the send's failure, the
+    /// step and the request; no line carries the failure's text; and the request is logged as
+    /// answered.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task The_failure_of_a_send_whose_answer_had_won_is_named_in_the_log_by_its_type_only(bool allowingNoAnswer)
+    {
+        var time = new ManualTimeProvider();
+        var logs = new ClientLogCapture();
+        var host = new HeldHostCode();
+        var failure = FailureOf(Step.Send);
+        var (channel, _) = ChannelOver(time, logs, host);
+
+        var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None);
+        var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
+        await host.ParkAsync();
+        channel.AsCorrelator().OnInbound(answer).Should().BeTrue();
+        await Task.Run(() => host.EndWith(failure)).WaitAsync(PickupTest.Timeout);
+
+        (await EndOf(call)).Should().BeNull("the answer had won before the send failed");
+        var lines = logs.Of<MediatorClientChannel>();
+        var line = lines.Should().ContainSingle(l => Equals(l.State.GetValueOrDefault("ExceptionType"), failure.GetType().Name),
+            "one line names the send's failure; the lines written: {0}", string.Join(" | ", lines.Select(l => l.Formatted))).Subject;
+        line.Level.Should().Be(LogLevel.Debug);
+        line.Formatted.Should().Contain("the send step").And.Contain("after the answer had arrived").And.Contain(request.Id);
+        line.State.GetValueOrDefault("RequestId").Should().Be(request.Id);
+        lines.Should().Contain(l => l.Formatted.Contains("answered after", StringComparison.Ordinal), "the request's outcome is its answer");
+        foreach (var entry in logs.Entries)
+        {
+            entry.Exception.Should().BeNull("no exception is handed to the logger");
+            entry.Everything.Should().NotContain(failure.Message, "the text of the send's failure is not logged");
+        }
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The send fails on its own (a failure of its own kind, or a cancellation of a wait of its own)
+    /// while nothing has ended the call and no answer has arrived, over HTTP, where the answer could
+    /// only have come in the response: the call ends with that very exception, also for a request
+    /// the mediator may leave unanswered (a send that failed is never "no answer").
+    /// <see cref="MediatorClientChannelTokenStateTests"/> has the same on a WebSocket route.
+    /// </summary>
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Over_HTTP_a_send_that_fails_on_its_own_with_no_answer_is_passed_on_as_it_is(bool allowingNoAnswer, bool aCancellationOfItsOwn)
+    {
+        var time = new ManualTimeProvider();
+        var host = new HeldHostCode();
+        var failure = aCancellationOfItsOwn ? new OperationCanceledException("The host code gave up on a wait of its own.") : FailureOf(Step.Send);
+        var (channel, _) = ChannelOver(time, logs: null, host);
+
+        var (call, _) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None, HttpRoute);
+        await host.ParkAsync();
+        await Task.Run(() => host.EndWith(failure)).WaitAsync(PickupTest.Timeout);
+
+        (await EndOf(call)).Should().BeSameAs(failure, "nothing had ended the call and no answer had won: the failure is the call's own");
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The send fails on its own with no answer, and the call ends with that failure; the answer
+    /// arrives afterwards. It is not taken, and the call's outcome stays the failure.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_answer_that_arrives_after_the_send_failed_on_its_own_is_not_taken_and_the_failure_stands(bool allowingNoAnswer)
+    {
+        var time = new ManualTimeProvider();
+        var host = new HeldHostCode();
+        var failure = FailureOf(Step.Send);
+        var (channel, _) = ChannelOver(time, logs: null, host);
+
+        var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None);
+        var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
+        await host.ParkAsync();
+        await Task.Run(() => host.EndWith(failure)).WaitAsync(PickupTest.Timeout);
+
+        (await EndOf(call)).Should().BeSameAs(failure, "no answer had won when the send failed: the failure ends the call, which does not go on waiting");
+        channel.AsCorrelator().OnInbound(answer).Should().BeFalse("the request had ended with its send's failure");
+        (await EndOf(call)).Should().BeSameAs(failure, "the failure stands");
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The send fails on its own with no answer, and the answer arrives while that failure is on its
+    /// way to the caller: after the channel has decided the request, before it has taken the
+    /// request out of its table (the test delivers the answer from inside the logger, as the line
+    /// that reports the request's end is written). The answer is not taken: the request was decided
+    /// when its send failed, and the call ends with the failure.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_answer_that_arrives_while_the_failure_of_the_send_is_on_its_way_to_the_caller_is_not_taken(bool allowingNoAnswer)
+    {
+        var time = new ManualTimeProvider();
+        var host = new HeldHostCode();
+        var failure = FailureOf(Step.Send);
+        MediatorClientChannel channel = null!;
+        InboundMessageSnapshot answer = null!;
+        var countedThen = -1;
+        bool? taken = null;
+        var logs = new CallOnLine("ended without a usable answer", () =>
+        {
+            countedThen = channel.PendingCount;
+            taken = channel.AsCorrelator().OnInbound(answer);
+        });
+        (channel, _) = ChannelOver(time, logs, host);
+
+        var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None);
+        answer = await _w.SnapshotAsync(_w.Status(request!.Id));
+        await host.ParkAsync();
+        await Task.Run(() => host.EndWith(failure)).WaitAsync(PickupTest.Timeout);
+
+        (await EndOf(call)).Should().BeSameAs(failure, "the failure is the call's own");
+        countedThen.Should().Be(1, "the set-up: the request was still registered when the answer arrived");
+        taken.Should().BeFalse("the request was decided when its send failed");
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The answer arrives on one thread while the send fails on its own on another, fifty times per
+    /// kind of request, in whatever order the two land (one of the two threads spins a little
+    /// first, a different one and for a different length each round, so that the order varies; no
+    /// order is required). The request has one outcome: the call returns the answer exactly when
+    /// the channel took it, and ends with the send's failure exactly when it did not. No request is
+    /// left counted, and no deadline is left scheduled.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_answer_that_races_with_a_send_failing_on_its_own_is_returned_exactly_when_it_was_taken(bool allowingNoAnswer)
+    {
+        var returned = 0;
+        var failed = 0;
+        for (var round = 0; round < 50; round++)
+        {
+            var time = new ManualTimeProvider();
+            var host = new HeldHostCode();
+            var failure = FailureOf(Step.Send);
+            var (channel, _) = ChannelOver(time, logs: null, host);
+
+            var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None);
+            var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
+            await host.ParkAsync();
+            using var go = new ManualResetEventSlim();
+            var spins = round / 2 * 200;
+            var answerSpins = round % 2 == 0 ? spins : 0;
+            var failureSpins = round % 2 == 0 ? 0 : spins;
+            var taking = Task.Run(() =>
+            {
+                go.Wait();
+                Thread.SpinWait(answerSpins);
+                return channel.AsCorrelator().OnInbound(answer);
+            });
+            var failing = Task.Run(() =>
+            {
+                go.Wait();
+                Thread.SpinWait(failureSpins);
+                host.EndWith(failure);
+            });
+            go.Set();
+            var taken = await taking.WaitAsync(PickupTest.Timeout);
+            await failing.WaitAsync(PickupTest.Timeout);
+
+            var result = await EndOf(call);
+            if (taken)
+            {
+                returned++;
+                result.Should().BeNull("the channel took the answer, so the call returns it (round {0}; it ended with {1})", round, result?.GetType().Name ?? "a result");
+                (await (Task<InboundMessageSnapshot?>)call).Should().BeSameAs(answer);
+            }
+            else
+            {
+                failed++;
+                result.Should().BeSameAs(failure, "the channel did not take the answer, so the send's failure is the call's own (round {0})", round);
+            }
+            channel.PendingCount.Should().Be(0, "no request is left counted");
+            await channel.DisposeAsync();
+            SpinWait.SpinUntil(() => time.ScheduledTimers == 0, PickupTest.Timeout).Should().BeTrue("the call's deadline was released");
+        }
+        (returned + failed).Should().Be(50);
+    }
+
+    /// <summary>
+    /// A one-way message registers nothing, so nothing can answer it: a message of an answer type
+    /// that names it, arriving while its send runs, is not taken, and when the send then fails on
+    /// its own the call ends with that very exception.
+    /// </summary>
+    [Fact]
+    public async Task A_one_way_send_that_fails_on_its_own_is_passed_on_as_it_is_whatever_arrived_while_it_ran()
+    {
+        var time = new ManualTimeProvider();
+        var host = new HeldHostCode();
+        var failure = FailureOf(Step.OneWaySend);
+        var (channel, _) = ChannelOver(time, logs: null, host);
+
+        var (call, request) = Start(channel, Step.OneWaySend, CancellationToken.None);
+        var naming = await _w.SnapshotAsync(_w.Status(request!.Id));
+        await host.ParkAsync();
+        channel.PendingCount.Should().Be(1, "a one-way send in flight holds a place");
+        channel.AsCorrelator().OnInbound(naming).Should().BeFalse("nothing is registered for a one-way message");
+        await Task.Run(() => host.EndWith(failure)).WaitAsync(PickupTest.Timeout);
+
+        (await EndOf(call)).Should().BeSameAs(failure, "nothing had ended the call: the failure is the call's own");
+        channel.PendingCount.Should().Be(0, "the place was given back, once");
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
         await channel.DisposeAsync();
     }
 
@@ -257,6 +612,9 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
         /// <summary>The token it watches, given the one it was handed; the one it was handed by default.</summary>
         public Func<CancellationToken, CancellationToken> Watches { get; init; } = handed => handed;
 
+        /// <summary>Runs inside its callback, before it reports; it gets the token the host code was handed.</summary>
+        public Action<CancellationToken>? BeforeItReports { get; init; }
+
         /// <summary>How many times its callback reported its failure.</summary>
         public int Reported => Volatile.Read(ref _reported);
 
@@ -267,6 +625,7 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
             {
                 Watches(handed).UnsafeRegister(_ =>
                 {
+                    BeforeItReports?.Invoke(handed);
                     if (_ends.TrySetException(failure()))
                         Interlocked.Increment(ref _reported);
                 }, null);
@@ -285,32 +644,40 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
         public bool EndWith(Exception failure) => _ends.TrySetException(failure);
     }
 
-    /// <summary>Keeps every log line written, at any level, with its level and category.</summary>
-    private sealed class CapturedLogs : ILoggerFactory
+    /// <summary>
+    /// A logger factory that runs <paramref name="then"/> once, inside the logging call, when a line
+    /// containing <paramref name="text"/> is written: a way to act at that very point of the channel.
+    /// </summary>
+    private sealed class CallOnLine(string text, Action then) : ILoggerFactory
     {
-        private readonly ConcurrentQueue<string> _lines = new();
-
-        public IReadOnlyList<string> Lines => _lines.ToArray();
+        private int _called;
 
         public void AddProvider(ILoggerProvider provider)
         {
         }
 
-        public ILogger CreateLogger(string categoryName) => new Capture(this, categoryName);
+        public ILogger CreateLogger(string categoryName) => new Hook(this);
 
         public void Dispose()
         {
         }
 
-        private sealed class Capture(CapturedLogs owner, string category) : ILogger
+        private sealed class Hook(CallOnLine owner) : ILogger
         {
             public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
             public bool IsEnabled(LogLevel logLevel) => true;
 
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-                => owner._lines.Enqueue($"{logLevel} {category}: {formatter(state, exception)}{(exception is null ? string.Empty : " [" + exception.GetType().Name + "]")}");
+            {
+                if (formatter(state, exception).Contains(owner.Text, StringComparison.Ordinal) && Interlocked.Exchange(ref owner._called, 1) == 0)
+                    owner.Then();
+            }
         }
+
+        private string Text { get; } = text;
+
+        private Action Then { get; } = then;
     }
 
     // A channel whose sends and endpoint lookups are the given host code, one per call in the order
@@ -336,8 +703,9 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     }
 
     // Start the call of a step. It returns once it waits on its host code.
-    private (Task Call, Message? Request) Start(MediatorClientChannel channel, Step step, CancellationToken ct)
+    private (Task Call, Message? Request) Start(MediatorClientChannel channel, Step step, CancellationToken ct, MediatorRoute? on = null)
     {
+        var route = on ?? WebSocketRoute;
         Message? request = null;
         Task call;
         switch (step)
@@ -347,15 +715,15 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
                 break;
             case Step.Send:
                 request = _w.Request();
-                call = channel.ExchangeAsync(WebSocketRoute, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, ct);
+                call = channel.ExchangeAsync(route, request, ClientSpecs.StatusRequest, _w.Mediator.Did, _w.Local.Did, ct);
                 break;
             case Step.SendAllowingNoAnswer:
                 request = _w.Request(MessagePickup.MessagesReceivedType);
-                call = channel.ExchangeAllowingNoAnswerAsync(WebSocketRoute, request, DeliveryReader.MessagesReceivedSpec, _w.Mediator.Did, _w.Local.Did, channel.Options.RequestTimeout / 2, ct);
+                call = channel.ExchangeAllowingNoAnswerAsync(route, request, DeliveryReader.MessagesReceivedSpec, _w.Mediator.Did, _w.Local.Did, channel.Options.RequestTimeout / 2, ct);
                 break;
             default:
                 request = _w.Request(MessagePickup.MessagesReceivedType);
-                call = channel.SendOneWayAsync(WebSocketRoute, request, "messages-received", _w.Mediator.Did, _w.Local.Did, ct);
+                call = channel.SendOneWayAsync(route, request, "messages-received", _w.Mediator.Did, _w.Local.Did, ct);
                 break;
         }
         call.IsCompleted.Should().BeFalse("the call waits on its host code");

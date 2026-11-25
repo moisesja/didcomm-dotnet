@@ -78,9 +78,21 @@ namespace DidComm.Mediator.Client.Internal;
 /// disposal, the caller's cancellation or the timeout does, the first of them that is true in that
 /// order, whatever was thrown: host code may report a cancellation as a failure of its own (a
 /// transport that reports a closed connection, a resolver that maps every error to "not found"),
-/// and may do so from a callback that runs before the channel's. An answer that had already won
-/// still holds. What is thrown while the call is not being ended is the call's own failure and is
-/// passed on as it is.
+/// and may do so from a callback that runs before the channel's. What was thrown is then named in
+/// one Debug line, by its type only and never its text. An answer that had already won still holds.
+/// What is thrown while the call is not being ended is the call's own failure and is passed on as
+/// it is, with one exception: when the answer to a request had already won before its send failed,
+/// the answer is returned (and the failure is named in a Debug line, by its type only). The same
+/// terminal compare-and-swap decides between the two, so an answer that arrives after the send
+/// failed is not taken.
+/// </para>
+/// <para>
+/// <strong>The token host code is handed.</strong> The channel reads the token it was given, its own
+/// deadline's and its own disposal, and nothing else. Host code (a transport, a DID resolver) should
+/// watch the token it is handed. Host code that watches another token instead (one of two that a
+/// caller combined into the call's token, for example) and reports that token's cancellation as a
+/// failure of its own may do so before any token the channel can read is cancelled: the call then
+/// ends with that failure, not as a cancellation (a documented residual).
 /// </para>
 /// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
@@ -262,12 +274,15 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 resolving = _resolveEndpoint(mediatorDid, deadline.Token);
                 endpoint = await resolving.WaitAsync(deadline.Token).ConfigureAwait(false);
             }
-            catch (Exception) when (BeingEnded(deadline, ct))
+            catch (Exception ex) when (BeingEnded(deadline, ct))
             {
                 // The call was being ended when this was observed: the disposal, the caller or the
                 // deadline ended the lookup, and that is what the caller sees. That state decides,
                 // not the exception's type: a lookup may report a cancellation as a failure of its
-                // own, from a callback that runs before this method's.
+                // own, from a callback that runs before this method's. What was observed is kept in
+                // the log, by its type only.
+                MediatorLog.Write(Logger, LogLevel.Debug, "Finding the mediator's endpoint: the lookup step ended with {ExceptionType} while the call was being ended.",
+                    ex.GetType().Name);
                 if (resolving is not null)
                     GuardedDeadline.ObserveAbandoned(resolving);
                 if (IsDisposed)
@@ -295,9 +310,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
     /// <remarks>
     /// What the send throws while the call is being ended (the request's deadline's token or the
     /// caller's is cancelled, or the channel is disposed) ends the call as the disposal, the caller's
-    /// cancellation or the timeout does, whatever its type, unless an answer had already won;
-    /// otherwise it is passed on as it is (the class remarks, "What a send or an endpoint lookup
-    /// throws").
+    /// cancellation or the timeout does, whatever its type; otherwise it is passed on as it is. In
+    /// both cases an answer that had already won is returned instead (the class remarks, "What a
+    /// send or an endpoint lookup throws").
     /// </remarks>
     public Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct)
         => ExchangeCheckedAsync(route, request, spec, mediatorDid, localDid, answerOptional: false, answerWait: null, ct)!; // never null without answerOptional
@@ -396,13 +411,16 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             sending = _send(request, options, deadline.Token);
             sent = await sending.WaitAsync(deadline.Token).ConfigureAwait(false);
         }
-        catch (Exception) when (BeingEnded(deadline, ct))
+        catch (Exception ex) when (BeingEnded(deadline, ct))
         {
             // The call was being ended when this was observed: the disposal, the caller or the
             // deadline ended the send, and Unanswered says which. That state decides, not the
             // exception's type: a transport may report a cancellation as a failure of its own, from
-            // a callback that runs before this method's. What a send throws while the call is not
-            // being ended is not caught here: it is the request's own failure.
+            // a callback that runs before this method's. What was observed is kept in the log, by
+            // its type only. What a send throws while the call is not being ended is not caught
+            // here: it is the request's own failure, and the next clause decides it.
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator request {RequestId} ({Request}): the send step ended with {ExceptionType} while the call was being ended.",
+                pending.Id, pending.Spec.Name, ex.GetType().Name);
             if (sending is not null)
                 GuardedDeadline.ObserveAbandoned(sending);
             // An answer that already won (over a WebSocket, before the send returned) holds. So does
@@ -410,6 +428,18 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             // sent, and the window below decides.
             if (!pending.IsCompleted && !(optionalAfterSend && sending is { IsCompletedSuccessfully: true }))
                 throw Unanswered(pending, deadline, ct);
+        }
+        catch (Exception ex)
+        {
+            // Nothing was ending the call when this was observed: the send failed on its own. The
+            // terminal CAS decides between that failure and an answer. The failure is the request's
+            // own and is passed on as it is, and an answer that arrives after it finds the request
+            // decided. An answer that had already won (over a WebSocket, before the send returned)
+            // holds, as it does above: the call goes on to return it.
+            if (pending.TryFail(ex) || !pending.IsCompleted)
+                throw;
+            MediatorLog.Write(Logger, LogLevel.Debug, "Mediator request {RequestId} ({Request}): the send step ended with {ExceptionType} after the answer had arrived; the answer holds.",
+                pending.Id, pending.Spec.Name, ex.GetType().Name);
         }
 
         // The HTTP response's message (§4.2): it was identity-checked by SendAsync and goes through
@@ -435,9 +465,9 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
         // sent (the send completed above, or an answer already won), and never past the request's
         // deadline. No answer by the end of either is an outcome, not a failure: the request was
         // sent. The terminal CAS decides it, so an answer that won the race still holds. A send that
-        // did not complete never gets here: it ended above, with the deadline, as a TimeoutException
-        // (or with its transport failure). The caller's cancellation and the disposal are decided
-        // below, as for any request.
+        // did not complete gets here only when an answer had already won, which is returned below;
+        // otherwise it ended above, with the deadline, as a TimeoutException (or with its transport
+        // failure). The caller's cancellation and the disposal are decided below, as for any request.
         if (optionalAfterSend && !pending.IsWaiting && !pending.IsCompleted
             && deadline.TimedOut && !ct.IsCancellationRequested && !IsDisposed)
         {
@@ -539,12 +569,15 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 sending = _send(request, options, deadline.Token);
                 await sending.WaitAsync(deadline.Token).ConfigureAwait(false);
             }
-            catch (Exception) when (BeingEnded(deadline, ct))
+            catch (Exception ex) when (BeingEnded(deadline, ct))
             {
                 // The call was being ended when this was observed: the disposal, the caller or the
                 // deadline ended the send, and that is what the caller sees. That state decides, not
                 // the exception's type: a transport may report a cancellation as a failure of its
-                // own, from a callback that runs before this method's.
+                // own, from a callback that runs before this method's. What was observed is kept in
+                // the log, by its type only.
+                MediatorLog.Write(Logger, LogLevel.Debug, "Mediator message {RequestId} ({Request}): the send step ended with {ExceptionType} while the call was being ended.",
+                    MediatorLog.LogId(request.Id), name, ex.GetType().Name);
                 if (sending is not null)
                     GuardedDeadline.ObserveAbandoned(sending);
                 if (IsDisposed)
