@@ -22,11 +22,12 @@ namespace DidComm.Mediator.Tests.Client;
 /// delivery's own (its budget), the one the delivery was opened with, and the owner's shutdown. A
 /// token that the one it was given was combined from is not visible to it. Host code that watches
 /// such a token, and reports its cancellation as a failure from a callback there, reports it
-/// before the combination is cancelled: none of the tokens the unpacker reads is cancelled yet, so
-/// the failure is the message's own and the message is remembered. Host code that watches the
-/// token it is handed reports the same failure once the delivery is being ended: the delivery ends
-/// cancelled and nothing is remembered. This is a documented residual, not a defect to fix here:
-/// the client is handed one token, and host code should watch the token it is handed.
+/// before the combination is cancelled (the tests record that): none of the tokens the unpacker
+/// reads is cancelled yet, so the failure is the message's own and the message is remembered.
+/// Host code that watches the token it is handed reports the same failure once the delivery is
+/// being ended: the delivery ends cancelled and nothing is remembered. This is a documented
+/// residual, not a defect to fix here: the client is handed one token, and host code should watch
+/// the token it is handed.
 /// </para>
 /// <para>
 /// As in <see cref="DeliveredUnpackTokenStateTests"/>: a lookup registers its callback only once the
@@ -69,8 +70,21 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         using var first = new CancellationTokenSource();
         using var second = new CancellationTokenSource();
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
-        var unpacker = new DeliveredMessageUnpacker(
-            CallbackLookups.ReportsCancellationAsFailure(calls, register, on: handed => theLookupWatchesTheTokenItWasHanded ? handed : first.Token), Budget, time);
+        bool? theDeliverysTokenWasCancelledWhenTheFailureWasReported = null;
+        // The lookup of CallbackLookups.ReportsCancellationAsFailure, on the token this row watches;
+        // its callback also records whether the token the delivery was opened with was cancelled by then.
+        var unpacker = new DeliveredMessageUnpacker(async (packed, handed) =>
+        {
+            var label = TestJwe.LabelOf(packed);
+            var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
+            await register.Parked();
+            (theLookupWatchesTheTokenItWasHanded ? handed : first.Token).UnsafeRegister(_ =>
+            {
+                theDeliverysTokenWasCancelledWhenTheFailureWasReported = combined.IsCancellationRequested;
+                ends.TrySetException(new DidResolutionException("did:example:alice", "notFound"));
+            }, null);
+            return await new ParkedAwaitable<DeliveredUnpack>(ends.Task, () => calls.Enter(label, handed));
+        }, Budget, time);
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", combined.Token);
         await register.OpenAsync(1, RealTime); // the worker waits on its call: the lookup's callback is registered last
@@ -81,10 +95,12 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
 
         if (theLookupWatchesTheTokenItWasHanded)
         {
+            theDeliverysTokenWasCancelledWhenTheFailureWasReported.Should().BeTrue("the token handed to the lookup is cancelled once the delivery's token is");
             delivery.Status.Should().Be(TaskStatus.Canceled, "the caller cancelled: what the lookup reported then is not the message's own failure ({0})", Describe(delivery, unpacker));
             unpacker.Memory.Count.Should().Be(0, "a message still running when the caller cancelled is not remembered");
             return;
         }
+        theDeliverysTokenWasCancelledWhenTheFailureWasReported.Should().BeFalse("the callback on the caller's token ran before the combination of the two was cancelled");
         delivery.Status.Should().Be(TaskStatus.RanToCompletion, "the failure was reported before any token the unpacker reads was cancelled ({0})", Describe(delivery, unpacker));
         var outcome = (await delivery).Should().ContainSingle().Subject;
         outcome.Error.Should().BeOfType<DidResolutionException>("what the lookup reported is the message's outcome");
@@ -120,11 +136,16 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         var register = new RegistrationGate();
         using var first = new CancellationTokenSource();
         using var second = new CancellationTokenSource();
+        bool? theTokenHandedWasCancelledWhenTheFailureWasReported = null;
         exchange.Unpacker = async (text, ct) =>
         {
             var ends = new TaskCompletionSource<DeliveredOutcome>(); // its continuations run inline, inside the callback
             await register.Parked();
-            (theLookupWatchesTheTokenItWasHanded ? ct : first.Token).UnsafeRegister(_ => ends.TrySetException(new DidResolutionException("did:example:alice", "notFound")), null);
+            (theLookupWatchesTheTokenItWasHanded ? ct : first.Token).UnsafeRegister(_ =>
+            {
+                theTokenHandedWasCancelledWhenTheFailureWasReported = ct.IsCancellationRequested;
+                ends.TrySetException(new DidResolutionException("did:example:alice", "notFound"));
+            }, null);
             return await new ParkedAwaitable<DeliveredOutcome>(ends.Task, () => calls.Enter(text, ct));
         };
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Status(r));
@@ -144,6 +165,7 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
             memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeFalse("the next stream or fetch opens it");
             return;
         }
+        theTokenHandedWasCancelledWhenTheFailureWasReported.Should().BeFalse("the callback on the caller's token ran before the token the lookup was handed was cancelled");
         memory.Count.Should().Be(1, "the failure was reported before any token the unpacker reads was cancelled: it is the message's own");
         memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeTrue("and the message is held back when it is delivered again");
     }
