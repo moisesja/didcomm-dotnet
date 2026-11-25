@@ -3238,13 +3238,14 @@ per page in the walker). A call can therefore take longer than `RequestTimeout` 
 
 ### Matching answers (`Offer`)
 
-The correlator calls `Offer(snapshot, boundTo: null)` for every verified inbound the dispatcher
-sees (`IInboundCorrelator.OnInbound`, which returns whether the message was claimed); the HTTP
-exchange calls `Offer(returned, pending)`. The matcher never awaits, never parses a body, completes
+The correlator calls `Offer(snapshot, inHttpResponse: false)` for every verified inbound the
+dispatcher sees (`IInboundCorrelator.OnInbound`, which returns whether the message was claimed); the
+HTTP exchange calls `Offer(returned, inHttpResponse: true)` for the message in the response to its
+request. The matcher never awaits, never parses a body, completes
 at most one request and never removes or cancels one, so a forgery can neither answer nor cancel a
 request.
 
-1. **Idle.** An unbound offer with nothing pending and no live stream open costs one volatile read
+1. **Idle.** An offer from the dispatcher with nothing pending and no live stream open costs one volatile read
    (a host that is also a mediator pays that per inbound).
 2. **Type.** The type is parsed once and matched against the twelve answer types of
    `MediatorAnswerTypes`: Discover Features 2.0 `disclose`; Coordinate Mediation 3.0 `mediate-grant`,
@@ -3278,7 +3279,7 @@ request.
    64 characters is never looked up. The pending map compares it with request ids ignoring case
    (FR-MSG-04, since #141).
 
-| The snapshot (identity passed) | Unbound: through the dispatcher (WebSocket) | Bound: in the HTTP response to request R |
+| The snapshot (identity passed) | Through the dispatcher (WebSocket; `inHttpResponse: false`) | In the HTTP response to request R (`inHttpResponse: true`) |
 | --- | --- | --- |
 | thread = a waiting request P of the same pair; a type P expects, or a problem report | completes P | completes P (P may be another request than R; R then fails as no answer) |
 | thread = a waiting request P of the same pair; a type P does not expect | dropped (Warning); P keeps waiting | dropped (Warning); R fails as no answer |
@@ -3300,14 +3301,14 @@ contains the same value as the `thid` set in the first message of the thread. Me
 share the same `thid` MUST NOT be considered a part of the same thread" (threading.md L17); "Any
 DIDComm message that continues a previously begun application-level protocol MUST use a `thid`
 property that associates it with the prior context" (problems.md L55). So an answer that arrives on
-its own (row "no thread, another answer type", unbound) completes no request and is logged as a
+its own (row "no thread, another answer type", through the dispatcher) completes no request and is logged as a
 Warning that names only the answer type. Until #98 the only waiting request of the pair that
 expected the type took it (the "type + mediator" fallback for peers that omit `thid`). That let a
 late thread-less `status` for a request given up on complete whatever request of the pair was
 waiting next: the next chunk of an `AckAsync`, its `status-request`, or a later call on the same
 channel. A first fix narrowed the window inside one `AckAsync` call (a per-request
 `RequiresThread` flag); the review showed it across calls, and the fallback itself was removed,
-which made the flag dead (removed too). The HTTP-bound path kept its exception until the owner
+which made the flag dead (removed too). The HTTP-response path kept its exception until the owner
 answered "2" (require `thid` there too): the response to our own request used to be its answer with
 or without `thid`; now a thread-less message there completes nothing either, is logged with the same
 Warning (the answer type only), and R fails at once as no answer (`TimeoutException`, the mediator
