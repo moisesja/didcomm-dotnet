@@ -107,6 +107,167 @@ public sealed class ShareCutsRt2ATests
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Reservations.Extended == 0, RealTime).Should().BeTrue();
     }
 
+    /// <summary>
+    /// I-9 with A1: a message whose code started more than the start allowance after its share was
+    /// given, and which is let run past its share because nothing waits, is remembered when the
+    /// budget ends it: measured from its code's start it ran more than its share.
+    /// </summary>
+    [Fact]
+    public async Task A_late_starting_message_let_run_past_its_share_is_remembered_at_the_budgets_end()
+    {
+        var manual = new ManualTimeProvider();
+        var late = TimeSpan.FromSeconds(9); // of its 10 s share, more than the 2.5 s allowance
+        var time = new StepAfterTimer(manual, timerNumber: 2, step: late); // timer 1 is the budget, 2 the first share
+        var (unpacker, calls, never) = Create(time);
+        try
+        {
+            var delivery = unpacker.UnpackAllAsync(Bob, FiveWithFastAfter("stall-0", TestJwe.Anoncrypt("stall-0")), "request-1", default);
+            await calls.WaitForAsync(1, RealTime);
+            SpinWait.SpinUntil(() => unpacker.Settled == 4, RealTime).Should().BeTrue("the four behind it failed at once");
+            late.Should().BeGreaterThan(unpacker.StartAllowance);
+
+            manual.Advance(TimeSpan.FromSeconds(1)); // 10 s: its share ends, nothing waits
+            TokenOf(calls, "stall-0").IsCancellationRequested.Should().BeFalse("nothing waits, so it keeps running");
+            unpacker.Reservations.Extended.Should().Be(1);
+            manual.Advance(Budget);
+            var outcomes = await delivery.WaitAsync(RealTime);
+
+            outcomes[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("ran out while it was being opened");
+            unpacker.Memory.HeldBack(Bob, new[] { "stall-0" }).Single().Should().BeTrue("its code ran 11 s of the budget, more than its 10 s share");
+        }
+        finally
+        {
+            never.TrySetCanceled();
+        }
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Reservations.Extended == 0, RealTime).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A1's contention cut is per partition: a take refused for another sender's partition in the
+    /// same mailbox does not cut a message let run past its share. A later take refused for its own
+    /// partition does, once; the registration ends with it.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_for_another_partition_leaves_an_extended_message_running_and_one_for_its_own_cuts_it()
+    {
+        var (unpacker, calls, never) = Create(new ManualTimeProvider());
+        var time = (ManualTimeProvider)unpacker.Time;
+        try
+        {
+            var first = unpacker.UnpackAllAsync(Bob, FiveWithFastAfter("sam-0", TestJwe.Authcrypt(SamKid, "sam-0")), "request-1", default);
+            await calls.WaitForAsync(1, RealTime);
+            SpinWait.SpinUntil(() => unpacker.Settled == 4, RealTime).Should().BeTrue();
+            time.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5));
+            unpacker.Reservations.Extended.Should().Be(1, "nothing waits for sam-0's worker");
+
+            // Tom's partition is full, and a fifth take for it is refused.
+            var tom = unpacker.UnpackAllAsync(Bob, Enumerable.Range(1, 4).Select(i => Message(TestJwe.Authcrypt(TomKid, "tom-" + i), "tom-" + i)).ToArray(), "request-2", default);
+            await calls.WaitForAsync(5, RealTime);
+            var refusedTom = await unpacker.UnpackAllAsync(Bob, new[] { Message(TestJwe.Authcrypt(TomKid, "tom-5"), "tom-5") }, "request-3", default).WaitAsync(RealTime);
+            refusedTom.Single().Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("for its sender");
+            // A refusal takes the registrations it cuts under the reservations' lock, before it returns.
+            unpacker.Reservations.Extended.Should().Be(1, "the refusal was for another partition, so sam-0 is still let run");
+
+            // Sam's partition: sam-0 and three more are held, and a fifth take is refused.
+            var sam = unpacker.UnpackAllAsync(Bob, Enumerable.Range(1, 4).Select(i => Message(TestJwe.Authcrypt(SamKid, "sam-" + i), "sam-" + i)).ToArray(), "request-4", default);
+            var outcomes = await first.WaitAsync(RealTime);
+            outcomes[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("its share");
+            unpacker.Memory.HeldBack(Bob, new[] { "sam-0" }).Single().Should().BeTrue("it ran past its 10 s share");
+            unpacker.Reservations.Extended.Should().Be(0);
+
+            time.Advance(Budget);
+            await Task.WhenAll(tom, sam).WaitAsync(RealTime);
+        }
+        finally
+        {
+            never.TrySetCanceled();
+        }
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Reservations.Extended == 0 && unpacker.Reservations.Partitions == 0, RealTime).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A message let run past its share that opens on its own before the budget ends is a success,
+    /// is not remembered, and leaves no registration or reservation behind.
+    /// </summary>
+    [Fact]
+    public async Task An_extended_message_that_opens_on_its_own_leaves_nothing_registered()
+    {
+        var (unpacker, calls, never) = Create(new ManualTimeProvider());
+        var time = (ManualTimeProvider)unpacker.Time;
+        var delivery = unpacker.UnpackAllAsync(Bob, FiveWithFastAfter("open12-0", TestJwe.Anoncrypt("open12-0")), "request-1", default);
+        await calls.WaitForAsync(1, RealTime);
+        SpinWait.SpinUntil(() => unpacker.Settled == 4, RealTime).Should().BeTrue();
+
+        time.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5));
+        unpacker.Reservations.Extended.Should().Be(1);
+        time.Advance(TimeSpan.FromSeconds(2));
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes[0].Succeeded.Should().BeTrue("it kept the rest of the budget and opened at 12 s");
+        unpacker.Memory.HeldBack(Bob, new[] { "open12-0" }).Single().Should().BeFalse();
+        unpacker.Reserved.Should().Be(0);
+        unpacker.Reservations.Extended.Should().Be(0);
+        never.TrySetCanceled();
+    }
+
+    // ---- helpers ------------------------------------------------------------------------------
+
+    private const string SamKid = "did:example:sam#key-x25519-1";
+    private const string TomKid = "did:example:tom#key-x25519-1";
+
+    private static DeliveredInput Message(string packed, string id) => new(id, TestJwe.Bytes(packed));
+
+    // One message, then four that fail at once: when its share ends (10 s) nothing else waits.
+    private static DeliveredInput[] FiveWithFastAfter(string id, string packed)
+        => new[] { Message(packed, id) }.Concat(Enumerable.Range(1, 4).Select(i => Message(TestJwe.Anoncrypt($"fast-{id}-{i}"), $"fast-{id}-{i}"))).ToArray();
+
+    // "fast" fails at once; "junk" ignores its token and never ends; "open12" opens after 12 s; the
+    // rest stall until their token is cancelled.
+    private static (DeliveredMessageUnpacker Unpacker, HostCallLog Calls, TaskCompletionSource<DeliveredUnpack> Never) Create(TimeProvider time)
+    {
+        var calls = new HostCallLog();
+        var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
+        {
+            var label = TestJwe.LabelOf(packed);
+            if (label.StartsWith("fast", StringComparison.Ordinal))
+                throw new CryptoException("JWE could not be decrypted.");
+            if (label.StartsWith("open12", StringComparison.Ordinal))
+            {
+                var lookup = Task.Delay(TimeSpan.FromSeconds(12), time, ct);
+                using (calls.Enter(label, ct))
+                    await lookup.ConfigureAwait(false);
+                return UnpackFakes.Opened(label);
+            }
+            using (calls.Enter(label, ct))
+            {
+                if (label.StartsWith("junk", StringComparison.Ordinal))
+                    return await never.Task.ConfigureAwait(false);
+                return await UnpackFakes.StallUntilCancelled(ct).ConfigureAwait(false);
+            }
+        }, Budget, time);
+        return (unpacker, calls, never);
+    }
+
     private static CancellationToken TokenOf(HostCallLog calls, string label)
         => calls.Tokens[calls.Labels.ToList().IndexOf(label)];
+
+    // Moves the clock by `step` right after the `timerNumber`-th timer is created: the work item of
+    // the message whose share that timer is starts that much later.
+    private sealed class StepAfterTimer(ManualTimeProvider inner, int timerNumber, TimeSpan step) : TimeProvider
+    {
+        private int _created;
+
+        public override long TimestampFrequency => inner.TimestampFrequency;
+
+        public override long GetTimestamp() => inner.GetTimestamp();
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = inner.CreateTimer(callback, state, dueTime, period);
+            if (Interlocked.Increment(ref _created) == timerNumber)
+                inner.Advance(step);
+            return timer;
+        }
+    }
 }
