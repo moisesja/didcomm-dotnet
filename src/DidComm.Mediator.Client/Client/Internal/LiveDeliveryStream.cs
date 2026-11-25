@@ -55,25 +55,31 @@ namespace DidComm.Mediator.Client.Internal;
 /// the failure count, which sets the back-off (1 s, doubling to 30 s), and the give-up alarm, armed
 /// at the first failure since it was last let go for <see cref="MediatorClientOptions.RequestTimeout"/>
 /// plus <see cref="GiveUpMargin"/> (60 s by default). A retryable failure after that alarm has fired
-/// ends the stream with its exception; earlier ones back off. A request that succeeds and makes
-/// progress resets both: a drain that ends, a drain round that brings something new (a message this
-/// stream neither holds nor has already handled in the current drain), or an acknowledgement the
-/// mediator accepted (under 4.0: sent). So failures separated by such progress never add up to a
-/// give-up or a long back-off, however many there are. A push that brings something new lets the
-/// give-up alarm go but keeps the back-off (owner decision B1 on #111): it shows the session is
-/// alive, not that requests work. So a stream whose requests all fail never gives up while such
-/// pushes keep coming, and its requests stay at one per back-off, at most one per 30 s once the
-/// back-off has reached it, however often pushes come (R-11).
+/// ends the stream with its exception; earlier ones back off. Two things start the back-off again
+/// (and let the give-up alarm go), and only these two: a drain that ends, and a drain round that
+/// brings something new (a message this stream neither holds nor remembers for the current drain).
+/// Two more let the give-up alarm go and keep the back-off (owner decisions B1 and F on #111): a
+/// push that brings something new, and an acknowledgement the mediator accepted (under 4.0: sent).
+/// They show that the session is alive, or that one request went through, not that a cycle does. So
+/// a stream whose cycle requests all fail sends them one per back-off, at most one per 30 s once the
+/// back-off has reached it, however often pushes come and whatever acknowledgements are accepted,
+/// and it does not give up as long as such a push or acknowledgement comes before each give-up
+/// alarm fires (R-11).
 /// </para>
 /// <para>
 /// <strong>The drain's end (ADV5-4, QA2-3).</strong> A drain ends at a <c>status</c> (under 4.0 an
-/// empty <c>delivery</c>), at a failed step, after <see cref="MaxDrainRounds"/> rounds, or at a round
-/// that brings nothing new: every message in it is one the stream holds, or one it has already
-/// handled in this drain — yielded as a failure, or taken (acknowledged, or recognised as a repeat
-/// and acknowledged). A mediator that does not set delivered messages aside answers every round with
-/// the head of its queue, so a message there that never opens is yielded once per cycle, and one it
-/// keeps after its acknowledgement is opened once per cycle, each at a cost of two delivery requests
-/// per cycle, instead of filling every round of every drain.
+/// empty <c>delivery</c>), after <see cref="MaxDrainRounds"/> rounds that brought something new, or
+/// at a round that brings nothing new: every message in it is one the stream holds, or one that came
+/// in a delivery this drain took (a round's answer, or a push taken in its turn between two rounds)
+/// — yielded as a failure since, taken (acknowledged, or recognised as a repeat and acknowledged),
+/// or still held. A failed step does not end the drain: the stream backs off, and the cycle that
+/// retries goes on with the same drain — what it remembers and its count of rounds are kept until a
+/// drain ends, and are not let go when a cycle starts. So a round that brings back only what was
+/// already reported since the last drain ended is not something new, whichever cycle reported it.
+/// A mediator that does not set delivered messages aside answers every round with the head of its
+/// queue, so a message there that never opens is yielded once per drain, and one it keeps after its
+/// acknowledgement is opened once per drain, instead of filling every round of every drain; when no
+/// step fails, a drain is one cycle and that costs two delivery requests per cycle.
 /// </para>
 /// <para>
 /// <strong>Drain rounds and pushes take turns (ADV3-1).</strong> Once a cycle is draining, its next
@@ -111,9 +117,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// Otherwise a message this stream already holds (opened and not yet yielded, or taken and not yet
 /// acknowledged) is skipped and not opened again; one the duplicate filter remembers is
 /// acknowledged and not yielded; a failure is yielded, never acknowledged, and reported again when
-/// it comes back (in a later drain, or outside one). A drain answered with a delivery in which no
-/// message has a usable id ends the stream (nothing in it could be acknowledged, so the drain would
-/// ask again for ever); such a push is ignored.
+/// it comes back in a delivery that is opened (one that brings back only messages of deliveries the
+/// current drain took brings nothing new and is not: see "The drain's end"). A drain answered with a
+/// delivery in which no message has a usable id ends the stream (nothing in it could be
+/// acknowledged, so the drain would ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter
@@ -130,12 +137,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// <strong>Bounds.</strong> At most 10 opened messages ready (one delivery), the mailbox's 8 pushes,
 /// and at most 100 taken waiting for an acknowledgement (10 unless acknowledgements fail); the set of
-/// held ids is bounded by their sum. The ids handled in the current drain (yielded as failures, or
-/// taken) are remembered as 128-bit keys of their attachment ids (compared exactly): added only
-/// while a drain runs and cleared when the next cycle starts, so at most (50 rounds + 50 pushes) × 10
-/// — each comes from a delivery handled in the drain, or from the one delivery still being yielded
-/// when it started, and a drain has at most 50 rounds and takes a push only between two of them. At most one timer per alarm, three in all,
-/// each disposed when it is replaced or let go, and when the stream ends. Not thread-safe: one
+/// held ids is bounded by their sum. The ids of the deliveries the current drain took are remembered
+/// as 128-bit keys of their attachment ids (compared exactly): added when a delivery is taken while
+/// a drain runs, and let go when a drain ends, so at most <see cref="MaxDoneThisDrain"/>,
+/// (50 rounds + 49 pushes) × 10 = 990 — a drain takes at most 50 rounds that bring something new
+/// before it ends, counted across the cycles of a drain whose steps fail, and takes a push only in
+/// its turn after such a round, the last of which ends the drain. A push taken during a back-off or
+/// between drains adds nothing, nor does a cycle that starts. At most one timer per alarm, three in
+/// all, each disposed when it is replaced or let go, and when the stream ends. Not thread-safe: one
 /// consumer, as <c>IAsyncEnumerator</c> requires.
 /// </para>
 /// </remarks>
@@ -144,7 +153,11 @@ internal sealed class LiveDeliveryStream
     /// <summary>The <c>limit</c> of a drain round.</summary>
     internal const int DrainLimit = 10;
 
-    /// <summary>The most drain rounds of one cycle.</summary>
+    /// <summary>
+    /// The most drain rounds that bring something new before a drain ends. Counted until a drain
+    /// ends, not per cycle: a cycle that fails after such a round leaves the count where it is, and
+    /// the cycle that retries goes on from there.
+    /// </summary>
     internal const int MaxDrainRounds = 50;
 
     /// <summary>The most messages read from one delivery (a push or a drain answer).</summary>
@@ -163,6 +176,15 @@ internal sealed class LiveDeliveryStream
 
     /// <summary>The most taken messages waiting for an acknowledgement.</summary>
     internal const int MaxTaken = 100;
+
+    /// <summary>
+    /// The most ids remembered for the current drain (990): those of the deliveries it took, each at
+    /// most <see cref="MaxPerDelivery"/> ids. A drain takes at most <see cref="MaxDrainRounds"/>
+    /// rounds that bring something new before it ends, and one push after each of them but the last,
+    /// which ends the drain. Nothing else adds: not a push taken outside a drain or during a
+    /// back-off, and not a cycle that starts.
+    /// </summary>
+    internal const int MaxDoneThisDrain = (MaxDrainRounds + MaxDrainRounds - 1) * MaxPerDelivery;
 
     /// <summary>
     /// How much longer than <see cref="MediatorClientOptions.RequestTimeout"/> a run of failures may
@@ -267,7 +289,7 @@ internal sealed class LiveDeliveryStream
     /// <summary>How many ids the stream holds (test seam).</summary>
     internal int HeldCount => _held.Count;
 
-    /// <summary>How many ids the current drain has handled: yielded as failures or taken (test seam).</summary>
+    /// <summary>How many ids are remembered for the current drain: those of the deliveries it took (test seam).</summary>
     internal int DoneThisDrainCount => _doneThisDrain.Count;
 
     /// <summary>
@@ -491,10 +513,10 @@ internal sealed class LiveDeliveryStream
             _warnedNotLive = true;
             _log.LiveNotInEffect(request.Id);
         }
+        // What the drain remembers and how many rounds it has counted are kept: a cycle that starts
+        // after a failed one goes on with the same drain, which ends only in DrainDone.
         _phase = Phase.Draining;
-        _doneThisDrain.Clear();
         _pushTurn = false; // the cycle's first drain round goes before any waiting push
-        _drainRounds = 0;
     }
 
     private async Task DrainRoundAsync(CancellationToken ct)
@@ -538,19 +560,24 @@ internal sealed class LiveDeliveryStream
             DrainDone();
             return;
         }
-        // A request that succeeded and brought something new: the run of failures is over.
+        // A round that brought something new: the give-up alarm is let go and the back-off starts
+        // again. Counted until the drain ends, whatever the cycles in between.
         LetGiveUpGo();
         RestartBackoff();
         if (++_drainRounds >= MaxDrainRounds)
             DrainDone();
     }
 
-    // A cycle ran to its end: the run of failures is over, and the next cycle is due one
-    // LivePollInterval from now — measured from the end of this one, never from its start (R1-1).
-    // With Failed, the only place the cycle alarm is armed (I-17).
+    // A drain ended: the give-up alarm is let go, the back-off starts again, what the drain
+    // remembered and its count of rounds are let go (the only place: neither a cycle that starts nor
+    // a failed step clears them), and the next cycle is due one LivePollInterval from now — measured
+    // from the end of this one, never from its start (R1-1). With Failed, the only place the cycle
+    // alarm is armed (I-17).
     private void DrainDone()
     {
         _phase = Phase.Idle;
+        _doneThisDrain.Clear();
+        _drainRounds = 0;
         LetGiveUpGo();
         RestartBackoff();
         ArmCycle(_exchange.Options.LivePollInterval);
@@ -572,17 +599,18 @@ internal sealed class LiveDeliveryStream
         _log.CycleFailed(requestId, spec.Name, error, _failures, backoff);
     }
 
-    // Progress of any kind (a request that succeeded with progress, or a push with something new):
-    // the give-up alarm is let go, and the next failure arms a new one (I-18, ADV5-3).
+    // A drain that ended, a drain round or a push that brought something new, or an acknowledgement
+    // the mediator accepted: the give-up alarm is let go, and the next failure arms a new one (I-18,
+    // ADV5-3).
     private void LetGiveUpGo()
     {
         _giveUp?.Dispose();
         _giveUp = null;
     }
 
-    // A request that succeeded with progress (a drain that ended, a drain round with something new,
-    // an accepted acknowledgement), never a push (owner decision B1): the failure count starts again,
-    // so the next failure backs off 1 s.
+    // A drain that ended, or a drain round that brought something new, and nothing else (owner
+    // decisions B1 and F on #111): never a push, never an accepted acknowledgement. The failure count
+    // starts again, so the next failure backs off 1 s.
     private void RestartBackoff() => _failures = 0;
 
     /// <summary>1 s, doubling per failure in a row, at most 30 s.</summary>
@@ -663,10 +691,12 @@ internal sealed class LiveDeliveryStream
     }
 
     // Take one delivery. When it brings nothing new — every message in it is held by this stream or
-    // was handled in this drain (yielded as a failure, or taken) — nothing is opened and the answer
-    // is false; the caller decides what that ends. Otherwise skip the ids this stream already holds,
-    // open the rest up front under one budget (the consumer's time with an item never counts against
-    // it), queue the results in delivery order, and answer true (progress, as the caller counts it). Failures are logged once per delivery, with the drain
+    // came in a delivery the current drain took — nothing is opened and the answer is false; the
+    // caller decides what that ends. Otherwise skip the ids this stream already holds, open the rest
+    // up front under one budget (the consumer's time with an item never counts against it), queue the
+    // results in delivery order, and answer true (something new, as the caller counts it). A delivery
+    // taken while a drain runs — a round's answer, or a push in its turn between two rounds — has its
+    // ids remembered until that drain ends. Failures are logged once per delivery, with the drain
     // round's request id; a push's (requestId null) name none, in the log and in their
     // TimeoutException alike.
     private async Task<bool> LoadAsync(DeliveryContents contents, string? requestId, CancellationToken ct)
@@ -677,13 +707,16 @@ internal sealed class LiveDeliveryStream
             _log.UnusableIds(requestId, contents.Unusable);
         if (contents.RepeatedIds > 0)
             _log.RepeatedIds(requestId, contents.RepeatedIds);
+        var keys = new UInt128[contents.Entries.Count];
         var fresh = 0;
         var held = 0;
-        foreach (var entry in contents.Entries)
+        for (var i = 0; i < keys.Length; i++)
         {
             // Every entry is looked at (no early exit); attachment ids compare exactly.
-            var isHeld = _held.Contains(entry.Id);
-            var isDone = _doneThisDrain.Contains(DrainKey(entry.Id));
+            var id = contents.Entries[i].Id;
+            keys[i] = DrainKey(id);
+            var isHeld = _held.Contains(id);
+            var isDone = _doneThisDrain.Contains(keys[i]);
             held += isHeld ? 1 : 0;
             fresh += isHeld | isDone ? 0 : 1;
         }
@@ -691,6 +724,16 @@ internal sealed class LiveDeliveryStream
             _log.HeldSkipped(held);
         if (fresh == 0)
             return false;
+
+        // Remembered when the delivery is taken, not when its messages are yielded, and only while a
+        // drain runs: so what the set holds is counted in deliveries the drain took (MaxDoneThisDrain),
+        // whatever phase the stream is in when it yields them, and a delivery still being yielded
+        // when a cycle starts adds nothing.
+        if (_phase == Phase.Draining)
+        {
+            foreach (var key in keys)
+                _doneThisDrain.Add(key);
+        }
 
         var taken = new List<DeliveryEntry>(contents.Entries.Count);
         foreach (var entry in contents.Entries)
@@ -725,19 +768,17 @@ internal sealed class LiveDeliveryStream
     }
 
     // The next opened message: a failure is yielded and let go (it comes back and is reported
-    // again; while a drain runs, it is remembered for the rest of that drain, so a round that brings
-    // only it again ends the drain); a repeat of a message already returned from this mailbox is
-    // taken (acknowledged) and not yielded (AddTaken remembers it for the drain too). The duplicate filter is asked now, not when the delivery
-    // was opened, so a copy that follows a message taken from the same delivery is recognised.
+    // again; one that came in a delivery the current drain took stays remembered until that drain
+    // ends (LoadAsync), so a round that brings only it again ends the drain); a repeat of a message
+    // already returned from this mailbox is taken (acknowledged) and not yielded. The duplicate
+    // filter is asked now, not when the delivery was opened, so a copy that follows a message taken
+    // from the same delivery is recognised.
     private PickupItem? Yield(Opened opened)
     {
         var entry = opened.Entry;
         if (opened.Outcome is not { } outcome || outcome.Unpacked is not { } unpacked)
         {
             _held.Remove(entry.Id);
-            // Only while a drain runs: what a drain remembers is bounded by its rounds and its pushes.
-            if (_phase == Phase.Draining)
-                _doneThisDrain.Add(DrainKey(entry.Id));
             return new PickupItem(entry.Id, unpacked: null, opened.Outcome?.Error ?? entry.Error);
         }
         if (_exchange.Duplicates.Contains(_localDid, outcome.DedupeKey))
@@ -751,7 +792,7 @@ internal sealed class LiveDeliveryStream
         return item;
     }
 
-    // The key a handled id is remembered by for the rest of a drain: SHA-256 truncated to 128 bits
+    // The key an id is remembered by until its drain ends: SHA-256 truncated to 128 bits
     // over the attachment id's exact UTF-8 bytes. Attachment ids are opaque and compare exactly
     // (Message Pickup 3.0 L170, 4.0 L257): no case folding, which could merge two distinct ids.
     private static UInt128 DrainKey(string attachmentId)
@@ -775,13 +816,12 @@ internal sealed class LiveDeliveryStream
         _yielded = null;
     }
 
-    // Queue a taken id for acknowledgement; the first one taken arms the flush age. While a drain
-    // runs, the id is remembered for the rest of it (QA2-3): a mediator that keeps acknowledged
-    // messages and delivers them again makes a round that brings nothing new, which ends the drain.
+    // Queue a taken id for acknowledgement; the first one taken arms the flush age. An id that came
+    // in a delivery the current drain took stays remembered until that drain ends (LoadAsync, QA2-3):
+    // a mediator that keeps acknowledged messages and delivers them again makes a round that brings
+    // nothing new, which ends the drain.
     private void AddTaken(string id)
     {
-        if (_phase == Phase.Draining)
-            _doneThisDrain.Add(DrainKey(id));
         if (_taken.Count >= MaxTaken)
         {
             // Only while acknowledgements keep failing: the oldest is forgotten unacknowledged; it
@@ -813,9 +853,10 @@ internal sealed class LiveDeliveryStream
             return;
         }
         Acknowledged(ids.Length);
-        // A request that succeeded and made progress: the run of failures is over.
+        // An accepted acknowledgement shows that this request went through, not that a cycle does:
+        // like a push that brings something new, it lets the give-up alarm go and keeps the back-off
+        // (owner decision F on #111).
         LetGiveUpGo();
-        RestartBackoff();
     }
 
     /// <summary>

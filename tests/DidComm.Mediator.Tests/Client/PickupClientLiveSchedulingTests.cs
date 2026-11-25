@@ -336,31 +336,54 @@ public sealed class PickupClientLiveSchedulingTests
     }
 
     /// <summary>
-    /// I-18 (ADV5-3, owner decision B1): each case has one failure, then one kind of progress, then a
-    /// failure. After an acknowledgement the mediator accepted (the failure before it was that
-    /// acknowledgement's first attempt) — a request that succeeded — the next failure backs off one
-    /// second again. After a push that brings a new message during the back-off, the back-off goes on:
-    /// the next failure backs off two seconds, the run's next step.
+    /// I-18 (ADV5-3, owner decisions B1 and F), what starts the back-off again: each case has one
+    /// failure (backed off one second), then one event, then a failure. After a drain that ends, or a
+    /// drain round that brings a new message, the back-off starts again: the second failure backs off
+    /// one second. After an acknowledgement the mediator accepted (the failure before it was that
+    /// acknowledgement's first attempt), or a push that brings a new message during the back-off, the
+    /// back-off goes on: the second failure backs off two seconds, the run's next step.
     /// </summary>
+    /// <remarks>
+    /// Changed in #111 fix round 2 (owner decision F): this was
+    /// <c>After_a_successful_request_the_next_failure_backs_off_one_second_again_and_after_a_push_the_back_off_goes_on</c>,
+    /// and its acknowledgement case expected one second, because an accepted acknowledgement started
+    /// the back-off again. It now expects two. The cases of a drain that ends and of a drain round
+    /// with a new message are new.
+    /// </remarks>
     [Theory]
-    [InlineData("an acknowledgement the mediator accepted")]
-    [InlineData("a push that brings a new message")]
-    public async Task After_a_successful_request_the_next_failure_backs_off_one_second_again_and_after_a_push_the_back_off_goes_on(string progress)
+    [InlineData("a drain that ends", true)]
+    [InlineData("a drain round that brings a new message", true)]
+    [InlineData("an acknowledgement the mediator accepted", false)]
+    [InlineData("a push that brings a new message", false)]
+    public async Task Only_a_drain_that_ends_or_a_drain_round_that_brings_something_new_starts_the_back_off_again(string after, bool startsAgain)
     {
         var (exchange, client) = Live(o => o.LivePollInterval = Interval);
         var liveOns = 0;
-        var byAck = progress == "an acknowledgement the mediator accepted";
-        // By acknowledgement: the first live-on succeeds and its drain brings q1, whose acknowledgement
-        // fails once; every later live-on fails. By push: every live-on fails.
+        var byAck = after == "an acknowledgement the mediator accepted";
+        var byPush = after == "a push that brings a new message";
+        var byRound = after == "a drain round that brings a new message";
+        var byDrainEnd = after == "a drain that ends";
+        // Which live-on requests succeed. By acknowledgement: the first (its drain brings q1, whose
+        // acknowledgement fails once). By push: none. By a drain round or a drain's end: the second.
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
             if (!r.Live)
                 return Task.FromResult(Status(r, live: false));
-            return byAck && Interlocked.Increment(ref liveOns) == 1
+            var n = Interlocked.Increment(ref liveOns);
+            var succeeds = (byAck && n == 1) || ((byRound || byDrainEnd) && n == 2);
+            return succeeds
                 ? Task.FromResult(Status(r, live: true))
                 : Task.FromException<InboundMessageSnapshot>(new TimeoutException("no answer (test)"));
         });
-        exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Status(r));
+        if (byRound)
+        {
+            // A new message that never opens (nothing to acknowledge), then no answer.
+            exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("n1", "bad:n1")), _ => throw new TimeoutException("no answer (test)"));
+        }
+        else
+        {
+            exchange.OnSequence(MessagePickup.DeliveryRequestType, r => byAck ? Delivery(r, ("q1", "ok:m1")) : Status(r), r => Status(r));
+        }
         var acks = 0;
         exchange.On(MessagePickup.MessagesReceivedType, r => Interlocked.Increment(ref acks) == 1
             ? Task.FromException<InboundMessageSnapshot>(new TimeoutException("no answer (test)"))
@@ -368,6 +391,7 @@ public sealed class PickupClientLiveSchedulingTests
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
 
+        // The first failure, backed off one second.
         Task<bool> move;
         var mark = exchange.Clock.Mark();
         if (byAck)
@@ -382,6 +406,10 @@ public sealed class PickupClientLiveSchedulingTests
         {
             move = stream.MoveNextAsync().AsTask(); // live-on fails: the run's first failure
             await exchange.Clock.WaitForTimerAsync(LiveDeliveryStream.FirstBackoff, mark, PickupTest.Timeout);
+            Types(exchange).Should().Equal(LiveOn);
+        }
+        if (byPush)
+        {
             exchange.Registration!.TryPush(Push(("f1", "bad:f1"))).Should().BeTrue(); // new, and it never opens: nothing to acknowledge
             (await PickupTest.Within(move)).Should().BeTrue();
             stream.Current.Id.Should().Be("f1");
@@ -389,16 +417,36 @@ public sealed class PickupClientLiveSchedulingTests
             Types(exchange).Should().Equal(LiveOn);
         }
 
-        // The back-off ends. By acknowledgement: the acknowledgement is accepted, then live-on fails.
-        // By push: live-on fails.
+        // The back-off ends, the event happens, and the second failure follows.
         mark = exchange.Clock.Mark();
         exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff).Should().Be(1);
+        if (byRound)
+        {
+            // Live-on succeeds and the first round brings n1, yielded as a failure; the second round fails.
+            (await PickupTest.Within(move)).Should().BeTrue();
+            stream.Current.Id.Should().Be("n1");
+            move = stream.MoveNextAsync().AsTask();
+        }
+        else if (byDrainEnd)
+        {
+            // Live-on succeeds and the drain ends at a status; one interval later the next live-on fails.
+            await exchange.Clock.WaitForTimerAsync(Interval, mark, PickupTest.Timeout);
+            Types(exchange).Should().Equal(LiveOn, LiveOn, Drain);
+            exchange.Clock.Advance(Interval).Should().Be(1);
+        }
         var next = await Adv5Wait.BackoffAlarmAsync(exchange.Clock, move);
-        Types(exchange).Should().Equal(byAck ? new[] { LiveOn, Drain, Ack, Ack, LiveOn } : new[] { LiveOn, LiveOn });
-        if (byAck)
-            next.Should().Be(LiveDeliveryStream.FirstBackoff, "{0} ended the run, so the failure after it is the first of a new run", progress);
+
+        Types(exchange).Should().Equal(after switch
+        {
+            "an acknowledgement the mediator accepted" => new[] { LiveOn, Drain, Ack, Ack, LiveOn },
+            "a push that brings a new message" => new[] { LiveOn, LiveOn },
+            "a drain round that brings a new message" => new[] { LiveOn, LiveOn, Drain, Drain },
+            _ => new[] { LiveOn, LiveOn, Drain, LiveOn },
+        });
+        if (startsAgain)
+            next.Should().Be(LiveDeliveryStream.FirstBackoff, "{0} starts the back-off again, so the failure after it backs off one second", after);
         else
-            next.Should().Be(LiveDeliveryStream.Backoff(2), "{0} lets the give-up alarm go but keeps the back-off", progress);
+            next.Should().Be(LiveDeliveryStream.Backoff(2), "{0} lets the give-up alarm go but keeps the back-off", after);
         await StopAsync(stream, move, cts);
     }
 
