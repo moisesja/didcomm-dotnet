@@ -646,7 +646,7 @@ public sealed class PickupClientLiveAdv5Tests
         var move = stream.MoveNextAsync().AsTask();
         for (var i = 1; i <= LiveDeliveryStream.MaxDrainRounds; i++)
         {
-            await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // this round's slow message is being opened
+            await exchange.Clock.WaitForTimerAsync(budget, 0, PickupTest.Timeout); // this round's slow message is being opened: its delivery's budget is scheduled
             exchange.Clock.Advance(budget);
             (await PickupTest.Within(move)).Should().BeTrue();
             stream.Current.Id.Should().Be($"s{i}");

@@ -1,0 +1,241 @@
+using AwesomeAssertions;
+using DidComm.Facade;
+using DidComm.Mediator.Client;
+using DidComm.Mediator.Client.Internal;
+using DidComm.Mediator.Tests.Pipeline;
+using Xunit;
+
+namespace DidComm.Mediator.Tests.Client;
+
+/// <summary>
+/// How the unpacker tells a message's own failure from the end of its delivery (#111): by whether
+/// the delivery is being ended when the worker observes the outcome, never by the type of what was
+/// thrown. Host code may report its cancellation as a failure of its own (a resolver that maps every
+/// error, its cancellation included, to "notFound"), and may do so from inside a cancellation
+/// callback, which runs before the delivery's own.
+/// </summary>
+/// <remarks>
+/// The lookups that end inside a callback register it only once the test has seen
+/// <c>UnpackAllAsync</c> return (<see cref="CallbackLookups"/>), so the order of the callbacks is
+/// fixed. Every cancellation and every move of the clock that ends a delivery is made from a
+/// thread-pool thread, where continuations run inline as they do in a host; the test's own thread
+/// has a synchronization context that would queue them. Real time is only a hang guard.
+/// </remarks>
+public sealed class DeliveredUnpackTokenStateTests
+{
+    private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout; // 20 s
+    private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
+    private static readonly DeliveryScope Bob = new(FakePickupExchange.M, FakePickupExchange.L);
+
+    // ---- a failure reported after the delivery's token was cancelled --------------------------------
+
+    /// <summary>
+    /// The caller cancels while a message is being opened, and its lookup reports the cancellation
+    /// as a resolution failure from inside its cancellation callback. The delivery ends cancelled,
+    /// as for any caller's cancellation, and the message is not remembered.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_reported_when_the_caller_cancels_leaves_the_result_cancelled_and_nothing_remembered()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+        using var caller = new CancellationTokenSource();
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", caller.Token);
+        register.SetResult(); // the worker waits on its call: the lookup's callback is registered after the worker's
+        await calls.WaitForAsync(1, RealTime);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Task.Run(caller.Cancel).WaitAsync(RealTime);
+        await Ended(delivery);
+
+        delivery.Status.Should().Be(TaskStatus.Canceled, "the caller cancelled: what its lookup reported then is not the message's own failure ({0})", Describe(delivery, unpacker));
+        unpacker.Memory.Count.Should().Be(0, "a message still running when the caller cancelled is not remembered");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The budget ends for a message whose code started 14 s into it, and its lookup reports the
+    /// cancellation as a resolution failure from inside its cancellation callback. The message's
+    /// outcome is the delivery's timeout, not that failure, and it is not remembered: it started
+    /// later than the start allowance, so it did not have the whole budget.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_reported_when_the_budget_ends_for_a_late_started_message_is_a_timeout_and_is_not_remembered()
+    {
+        var late = TimeSpan.FromSeconds(14);
+        var time = UnpackClock.SteppingAfterTheFirstBudget(new ManualTimeProvider(), late);
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", default);
+        register.SetResult();
+        await calls.WaitForAsync(1, RealTime);
+        await Task.Run(() => time.Inner.Advance(Budget - late)).WaitAsync(RealTime);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        late.Should().BeGreaterThan(unpacker.StartAllowance);
+        outcomes.Single().Error.Should().BeOfType<TimeoutException>("the budget ended: what its lookup reported then is not the message's own failure")
+            .Which.Message.Should().Contain("ran out while it was being opened");
+        unpacker.Memory.Count.Should().Be(0, "its code started {0} into the budget, later than the start allowance of {1}", late, unpacker.StartAllowance);
+    }
+
+    /// <summary>
+    /// The budget ends for a message whose code started with it, and its lookup reports the
+    /// cancellation as a resolution failure from inside its cancellation callback. The message's
+    /// outcome is the delivery's timeout, and it is remembered: it had the whole budget (S2).
+    /// </summary>
+    [Fact]
+    public async Task A_failure_reported_when_the_budget_ends_for_a_message_that_had_the_whole_budget_is_a_timeout_and_is_remembered()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task), Budget, time);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", default);
+        register.SetResult();
+        await calls.WaitForAsync(1, RealTime);
+        await Task.Run(() => time.Advance(Budget)).WaitAsync(RealTime);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes.Single().Error.Should().BeOfType<TimeoutException>("the budget ended: what its lookup reported then is not the message's own failure")
+            .Which.Message.Should().Contain("ran out while it was being opened");
+        unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Single().Should().BeTrue("it started with the budget and had not opened when the budget ended");
+    }
+
+    /// <summary>
+    /// Host code that watches the caller's own token (the one given to <c>UnpackAllAsync</c>), or the
+    /// owner's shutdown token, instead of the token it is handed: its callback there runs before the
+    /// delivery's token is cancelled. What it reports from that callback is not the message's own
+    /// failure either: the delivery ends cancelled and nothing is remembered.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_failure_reported_from_a_callback_on_the_callers_token_or_on_the_shutdown_token_leaves_the_result_cancelled_and_nothing_remembered(bool byShutdown)
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var caller = new CancellationTokenSource();
+        using var shutdown = new CancellationTokenSource();
+        var watched = byShutdown ? shutdown : caller;
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register.Task, on: _ => watched.Token), Budget, time, shutdown.Token);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", caller.Token);
+        register.SetResult();
+        await calls.WaitForAsync(1, RealTime);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Task.Run(watched.Cancel).WaitAsync(RealTime);
+        await Ended(delivery);
+
+        delivery.Status.Should().Be(TaskStatus.Canceled, "the {0}: what the lookup reported from its callback on that token is not the message's own failure ({1})", byShutdown ? "owner shut down" : "caller cancelled", Describe(delivery, unpacker));
+        unpacker.Memory.Count.Should().Be(0);
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+    }
+
+    // ---- the caller's cancellation and the shutdown ---------------------------------------------------
+
+    /// <summary>
+    /// The caller's cancellation and the owner's shutdown, 10 s into a delivery of five whose first
+    /// four messages have been opening since its start: the result is cancelled with that token,
+    /// nothing is remembered, and the fifth message never starts; whatever the lookups do when
+    /// their token is cancelled. A lookup still running keeps its reservation until it ends.
+    /// </summary>
+    [Theory]
+    [InlineData(false, WhenCancelled.Ends)]
+    [InlineData(false, WhenCancelled.RunsOn)]
+    [InlineData(false, WhenCancelled.ReportsAFailure)]
+    [InlineData(true, WhenCancelled.Ends)]
+    [InlineData(true, WhenCancelled.RunsOn)]
+    [InlineData(true, WhenCancelled.ReportsAFailure)]
+    public async Task The_callers_cancellation_and_the_shutdown_cancel_the_result_and_remember_nothing(bool byShutdown, WhenCancelled whenCancelled)
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var caller = new CancellationTokenSource();
+        using var shutdown = new CancellationTokenSource();
+        var host = NeverOpens.Lookup(whenCancelled, calls, register.Task, never.Task);
+        var unpacker = new DeliveredMessageUnpacker(host, Budget, time, shutdown.Token);
+        var ids = new[] { "alice-1", "alice-2", "alice-3", "alice-4", "alice-5" };
+        try
+        {
+            var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Message).ToArray(), "request-1", caller.Token);
+            register.SetResult();
+            await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
+            time.Advance(TimeSpan.FromSeconds(10));
+            await Task.Run((byShutdown ? shutdown : caller).Cancel).WaitAsync(RealTime);
+
+            var cancelled = (await FluentActions.Awaiting(() => delivery.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>()).Which;
+            cancelled.CancellationToken.Should().Be(byShutdown ? shutdown.Token : caller.Token);
+            unpacker.Memory.Count.Should().Be(0, "neither the caller's cancellation nor the shutdown says anything about a message");
+            calls.Count.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "the fifth message never started");
+            calls.Tokens.Should().OnlyContain(t => t.IsCancellationRequested, "the host code opening the delivery is told to stop");
+            if (whenCancelled == WhenCancelled.RunsOn)
+                unpacker.Reserved.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "a lookup still running keeps its reservation");
+        }
+        finally
+        {
+            never.TrySetCanceled();
+        }
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue("every reservation came back and nothing is left behind");
+    }
+
+    // ---- no further message once the delivery is being ended ----------------------------------------
+
+    /// <summary>
+    /// A worker takes no further message once the delivery's token is cancelled. The first message
+    /// opens from inside its cancellation callback when the budget ends, so its worker records the
+    /// success while the delivery is still open; the fifth message, not valid UTF-8, was waiting for
+    /// a worker. It is out of time before its turn: that worker did not take it.
+    /// </summary>
+    [Fact]
+    public async Task A_worker_takes_no_further_message_once_the_deliverys_token_is_cancelled()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var opensWhenCancelled = CallbackLookups.OpensWhenCancelled(calls, register.Task);
+        var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
+        {
+            var label = TestJwe.LabelOf(packed);
+            if (label == "opens-0")
+                return await opensWhenCancelled(packed, ct).ConfigureAwait(false);
+            using (calls.Enter(label, ct))
+                return await UnpackFakes.StallUntilCancelled(ct).ConfigureAwait(false);
+        }, Budget, time);
+        var messages = new[] { "opens-0", "stall-1", "stall-2", "stall-3" }.Select(Message)
+            .Append(new DeliveredInput("not-utf8-4", new byte[] { 0xC3, 0x28, 0xFF }))
+            .ToArray();
+
+        var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
+        register.SetResult();
+        await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
+        await Task.Run(() => time.Advance(Budget)).WaitAsync(RealTime);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes[0].Succeeded.Should().BeTrue("it opened inside the budget's cancellation, before the delivery was closed, on its worker's own thread");
+        outcomes[4].Error.Should().BeOfType<TimeoutException>("the worker that recorded the first message took nothing more: the delivery's token was cancelled")
+            .Which.Message.Should().Contain("before its turn came");
+        outcomes.Skip(1).Take(3).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+    }
+
+    // ---- helpers ----------------------------------------------------------------------------------
+
+    private static DeliveredInput Message(string id) => new(id, TestJwe.Bytes(TestJwe.Anoncrypt(id)));
+
+    // What a delivery that did not end cancelled ended with, for a failing assertion's text.
+    private static string Describe(Task<IReadOnlyList<DeliveredOutcome>> delivery, DeliveredMessageUnpacker unpacker)
+        => delivery.IsCompletedSuccessfully
+            ? $"it ended with {string.Join(", ", delivery.Result.Select(o => o.Succeeded ? "a success" : o.Error!.GetType().Name))}; remembered: {unpacker.Memory.Count}"
+            : $"it ended {delivery.Status}; remembered: {unpacker.Memory.Count}";
+
+    // Wait (bounded) for the delivery to end, however it ends.
+    private static Task Ended(Task delivery) => delivery.ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(RealTime);
+}

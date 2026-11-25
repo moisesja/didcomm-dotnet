@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json.Nodes;
 using DidComm.Facade;
+using DidComm.Mediator.Tests.Pipeline;
 using DidComm.Messages;
 using DidComm.TestSupport;
 
@@ -217,4 +218,126 @@ internal sealed class HeldScheduler : TaskScheduler
     protected override void QueueTask(Task task) => _held.Enqueue(task);
 
     protected override bool TryExecuteTaskInline(Task task, bool taskWasPreviouslyQueued) => false;
+}
+
+/// <summary>
+/// A clock for the unpacker's tests over a <see cref="ManualTimeProvider"/>: it can run a hook right
+/// after one of its timers is created, and its readings can be shifted. A delivery's only timer is
+/// its budget, created after the budget's start was read and before any message is taken, so a hook
+/// on a delivery's timer moves the clock between the budget's start and the start of its first
+/// messages, as when their host calls wait for a thread.
+/// </summary>
+internal sealed class UnpackClock(ManualTimeProvider inner) : TimeProvider
+{
+    private int _created;
+    private long _shift;
+
+    /// <summary>The manual clock behind it: timers fire only when it is advanced.</summary>
+    public ManualTimeProvider Inner => inner;
+
+    /// <summary>Runs right after a timer is created, with its 1-based number, on the creating thread.</summary>
+    public Action<int>? AfterTimerCreated { get; set; }
+
+    /// <summary>Shift every later reading by <paramref name="by"/> (negative: the clock steps back). Timers are not moved.</summary>
+    public void Shift(TimeSpan by) => Interlocked.Add(ref _shift, by.Ticks);
+
+    public override long TimestampFrequency => inner.TimestampFrequency;
+
+    public override long GetTimestamp() => inner.GetTimestamp() + Interlocked.Read(ref _shift);
+
+    public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+
+    public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+    {
+        var timer = inner.CreateTimer(callback, state, dueTime, period);
+        AfterTimerCreated?.Invoke(Interlocked.Increment(ref _created));
+        return timer;
+    }
+
+    /// <summary>A clock that moves on by <paramref name="step"/> right after its first timer (the first delivery's budget) is created.</summary>
+    public static UnpackClock SteppingAfterTheFirstBudget(ManualTimeProvider inner, TimeSpan step)
+    {
+        var clock = new UnpackClock(inner);
+        clock.AfterTimerCreated = n =>
+        {
+            if (n == 1)
+                inner.Advance(step);
+        };
+        return clock;
+    }
+}
+
+/// <summary>
+/// Host lookups for the unpacker's tests that end from inside a cancellation callback of their own.
+/// Each registers its callback only once <c>register</c> completes, and records itself in the log
+/// after that: a test completes <c>register</c> once it has seen <c>UnpackAllAsync</c> return (the
+/// workers wait on their calls by then), so the lookup's callback is registered after the worker's
+/// and runs before it.
+/// </summary>
+internal static class CallbackLookups
+{
+    /// <summary>
+    /// A lookup that never ends on its own and reports its cancellation as a resolution failure
+    /// (a resolver that maps every error, its cancellation included, to "notFound"), from inside the
+    /// callback it registered on its token, or on the token <paramref name="on"/> picks instead.
+    /// </summary>
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> ReportsCancellationAsFailure(HostCallLog calls, Task register, Func<CancellationToken, CancellationToken>? on = null)
+        => async (packed, ct) =>
+        {
+            var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
+            await register.ConfigureAwait(false);
+            (on is null ? ct : on(ct)).UnsafeRegister(_ => ends.TrySetException(new DidComm.Exceptions.DidResolutionException("did:example:alice", "notFound")), null);
+            using (calls.Enter(TestJwe.LabelOf(packed), ct))
+                return await ends.Task.ConfigureAwait(false);
+        };
+
+    /// <summary>A lookup that never ends on its own and opens its message from inside the callback it registered on its token.</summary>
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> OpensWhenCancelled(HostCallLog calls, Task register)
+        => async (packed, ct) =>
+        {
+            var label = TestJwe.LabelOf(packed);
+            var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
+            await register.ConfigureAwait(false);
+            ct.UnsafeRegister(_ => ends.TrySetResult(UnpackFakes.Opened(label)), null);
+            using (calls.Enter(label, ct))
+                return await ends.Task.ConfigureAwait(false);
+        };
+}
+
+/// <summary>What a host lookup that never opens its message does when its token is cancelled.</summary>
+public enum WhenCancelled
+{
+    /// <summary>It ends, cancelled.</summary>
+    Ends,
+
+    /// <summary>It ignores its token and runs on until the test lets it go.</summary>
+    RunsOn,
+
+    /// <summary>It ends as a resolution failure, from inside its cancellation callback (<see cref="CallbackLookups.ReportsCancellationAsFailure"/>).</summary>
+    ReportsAFailure,
+}
+
+/// <summary>Host lookups that never open their message, for each <see cref="WhenCancelled"/>.</summary>
+internal static class NeverOpens
+{
+    /// <summary>The lookup for <paramref name="whenCancelled"/>; each records itself in <paramref name="calls"/> once it is in place.</summary>
+    /// <param name="whenCancelled">What it does when its token is cancelled.</param>
+    /// <param name="calls">The log of host calls.</param>
+    /// <param name="register">When a lookup that reports a failure may register its callback.</param>
+    /// <param name="never">What a lookup that runs on waits for.</param>
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> Lookup(WhenCancelled whenCancelled, HostCallLog calls, Task register, Task<DeliveredUnpack> never)
+        => whenCancelled switch
+        {
+            WhenCancelled.Ends => async (packed, ct) =>
+            {
+                using (calls.Enter(TestJwe.LabelOf(packed), ct))
+                    return await UnpackFakes.StallUntilCancelled(ct).ConfigureAwait(false);
+            },
+            WhenCancelled.RunsOn => (packed, ct) =>
+            {
+                calls.Enter(TestJwe.LabelOf(packed), ct);
+                return never;
+            },
+            _ => CallbackLookups.ReportsCancellationAsFailure(calls, register),
+        };
 }

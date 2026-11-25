@@ -182,7 +182,7 @@ internal sealed class SimClock : TimeProvider
 /// </summary>
 /// <remarks>
 /// Payload texts: <c>ok:{id}</c> opens, <c>bad:{text}</c> fails at once, <c>stall:{text}</c> waits on
-/// its token until its share or the budget ends it (a sender whose DID never resolves).
+/// its token until the budget ends it (a sender whose DID never resolves).
 /// </remarks>
 internal sealed class SimExchange : IMediatorExchange
 {

@@ -4,8 +4,9 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// A <see cref="TimeProvider"/> over a <see cref="ManualTimeProvider"/> that counts the timers not
-/// yet disposed and can run a hook when a timer is created (ADV-4: a deterministic rendezvous inside
-/// the unpacker's worker, which creates a message's share right before it starts the host code).
+/// yet disposed and can run a hook when a timer is created or the clock is read (ADV-4: a
+/// deterministic rendezvous inside the unpacker's worker, which reads the clock for the start rule
+/// right before it reserves and starts the host code).
 /// </summary>
 internal sealed class CountingTimeProvider(ManualTimeProvider inner) : TimeProvider
 {
@@ -17,12 +18,19 @@ internal sealed class CountingTimeProvider(ManualTimeProvider inner) : TimeProvi
     /// <summary>Runs with the 1-based number of the timer about to be created, on the creating thread.</summary>
     public Action<int>? OnCreate { get; set; }
 
+    /// <summary>Runs before each reading of the clock's timestamp, on the reading thread.</summary>
+    public Action? OnRead { get; set; }
+
     /// <summary>How many timers were created and not yet disposed.</summary>
     public int LiveTimers => Volatile.Read(ref _live);
 
     public override long TimestampFrequency => inner.TimestampFrequency;
 
-    public override long GetTimestamp() => inner.GetTimestamp();
+    public override long GetTimestamp()
+    {
+        OnRead?.Invoke();
+        return inner.GetTimestamp();
+    }
 
     public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
 

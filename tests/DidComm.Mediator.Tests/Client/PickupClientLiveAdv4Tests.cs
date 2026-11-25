@@ -57,10 +57,9 @@ public sealed class PickupClientLiveAdv4Tests
             return Delivery(r, ($"d{n}", $"stall:d{n}"));
         });
         // Each stall is signalled, so the test tells a move that needs the clock from one that does
-        // not: once a round's stall has started, its budget and share timers exist and the clock
-        // passes them (the previous round's timers all fired, and fired timers are not counted,
-        // whenever the pool disposes them); a move that yields without a stall (the push) is taken
-        // as it comes.
+        // not: once a round's stall has started, its delivery's budget timer exists and the clock
+        // passes it (the previous round's budget fired, and a fired timer is not scheduled, whenever
+        // the pool disposes it); a move that yields without a stall (the push) is taken as it comes.
         var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
         exchange.Unpacker = (text, ct) =>
         {
@@ -92,7 +91,7 @@ public sealed class PickupClientLiveAdv4Tests
             {
                 if (await Task.WhenAny(move, Volatile.Read(ref stalled[0]).Task).WaitAsync(PickupTest.Timeout) != move)
                 {
-                    await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // the round's budget and share
+                    await exchange.Clock.WaitForTimerAsync(Budget, 0, PickupTest.Timeout); // the round's budget
                     exchange.Clock.Advance(Budget);
                 }
                 (await PickupTest.Within(move)).Should().BeTrue();
@@ -158,7 +157,7 @@ public sealed class PickupClientLiveAdv4Tests
             move = stream.MoveNextAsync().AsTask();
             if (await Task.WhenAny(move, signal.Task).WaitAsync(PickupTest.Timeout) != move)
             {
-                await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout);
+                await exchange.Clock.WaitForTimerAsync(Budget, 0, PickupTest.Timeout); // the round's budget
                 exchange.Clock.Advance(Budget);
             }
             (await PickupTest.Within(move)).Should().BeTrue();

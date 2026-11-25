@@ -402,9 +402,9 @@ public sealed class SlowSenderFetchQa1Tests
 
     /// <summary>
     /// Either side of the floor, the other side: an honest message first in a fetch of 100 whose 99
-    /// others fail at once, its lookup taking 5.1 s. The 99 take no time, so when its share (the
-    /// floor) ends no other message waits: it keeps the rest of the budget (owner decision A1), opens,
-    /// and is not remembered.
+    /// others fail at once, its lookup taking 5.1 s. A message has no time limit of its own (owner
+    /// decision E, which replaced the share of the budget and owner decision A1): it opens, and is
+    /// not remembered. Also with twelve failures behind it instead of 99.
     /// </summary>
     [Theory]
     [InlineData(100)]
@@ -418,7 +418,7 @@ public sealed class SlowSenderFetchQa1Tests
         var batch = await exchange.DriveAsync(() => exchange.Client().FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit));
 
         var elapsed = exchange.Clock.TrueNow - start;
-        batch.Items[0].Error.Should().BeNull("the {0} others failed at once, so {1} of the budget was left when it was cut", limit - 1, B - elapsed);
+        batch.Items[0].Error.Should().BeNull("the {0} others failed at once, and it opened with {1} of the budget left", limit - 1, B - elapsed);
         exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { "honest" }).Single().Should().BeFalse();
         exchange.Unpacker.Memory.Count.Should().Be(limit - 1, "the failures are remembered");
     }

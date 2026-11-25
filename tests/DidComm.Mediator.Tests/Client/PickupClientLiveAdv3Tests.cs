@@ -29,7 +29,7 @@ public sealed class PickupClientLiveAdv3Tests
     /// Attack: the stream's loop serves a buffered push before a drain round
     /// (<c>LiveDeliveryStream.NextAsync</c>: <c>_ready</c>, then <c>Pushes.TryRead</c>, then the drain),
     /// and since fix round 2 it opens each push whole before going on, under the full budget (a live
-    /// push carries one message, so its share is the whole 20 s). A sender whose DID never resolves
+    /// push carries one message, which has the whole 20 s). A sender whose DID never resolves
     /// (or resolves just under the budget) — any outsider who can address the recipient through its
     /// mediator — sends one message every 20 s or faster. Each is pushed live, and while one is being
     /// opened the next is already buffered, so the loop never finds the push buffer empty and never
@@ -48,7 +48,7 @@ public sealed class PickupClientLiveAdv3Tests
         exchange.UseBudget(Budget);
         // Queued before the stream started (or delayed by its sender, or its push dropped): only a drain reaches it.
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("queued-1", "ok:queued-1")), r => Status(r));
-        // Each slow push signals once its opening has started: its budget and its share exist then.
+        // Each slow push signals once its opening has started: its budget exists then.
         // That is the rendezvous, not a count of scheduled timers: the next cycle's alarm and the
         // flush age are scheduled meanwhile (#111).
         var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -177,7 +177,7 @@ public sealed class PickupClientLiveAdv3Tests
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
-        // "slow" signals once its opening has started (its budget and its share exist then); the next
+        // "slow" signals once its opening has started (its budget exists then); the next
         // cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no rendezvous (#111).
         var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.Unpacker = async (text, ct) =>

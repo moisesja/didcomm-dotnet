@@ -78,7 +78,7 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
         loop.Elapsed.Should().BeLessThanOrEqualTo(budget * bound, "each learning fetch takes at most one budget, and the others take none");
         Math.Ceiling(loop.Elapsed / lease).Should().BeLessThanOrEqualTo(Math.Ceiling(budget * bound / lease), "in the mediator's lease periods");
         seam.Calls.Count(sender => sender is null).Should().Be(slow, "each message that never opens is opened once, then held back while its pause lasts");
-        loop.Items.Where(i => i.Error is not null).Should().OnlyContain(i => i.Error is TimeoutException, "a message that never opens fails at its share, or at once while it is held back");
+        loop.Items.Where(i => i.Error is not null).Should().OnlyContain(i => i.Error is TimeoutException, "a message that never opens fails when its delivery's budget ends, or at once while it is held back");
     }
 
     /// <summary>

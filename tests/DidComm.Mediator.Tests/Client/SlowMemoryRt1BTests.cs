@@ -8,10 +8,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// #111 red-team pass 1, RT1-B: what the memory remembers (I-9 as amended, owner decision C: "every
-/// failure, fair to late starts"). A message cut without opening is remembered only when its own
-/// code ran for its share; time its work item spent waiting for a pool thread before any host code
-/// ran is not the message's own.
+/// #111 red-team pass 1, RT1-B: what the memory remembers (I-9, owner decision C: "every failure,
+/// fair to late starts", under owner decision E). A message the budget ends without opening is
+/// remembered only when its own code had the whole budget (S2); time its work item spent waiting
+/// for a pool thread before any host code ran is not the message's own.
 /// Every timing is driven by the injected <see cref="ManualTimeProvider"/>; real time is only a hang
 /// guard. A late start is forced by a one-shot gate on the work item's own thread, never by keeping
 /// the pool busy.
@@ -21,19 +21,19 @@ public sealed class SlowMemoryRt1BTests
     private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout; // 20 s
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Lookup = TimeSpan.FromSeconds(2); // the honest sender's DID resolves in 2 s
-    private static readonly TimeSpan HostRan = TimeSpan.FromMilliseconds(300); // how long its host code ran before the cut
+    private static readonly TimeSpan HostRan = TimeSpan.FromMilliseconds(300); // how long its host code ran before the budget ended
     private static readonly DeliveryScope Bob = new(FakePickupExchange.M, FakePickupExchange.L);
     private const string AliceKid = "did:example:alice#key-x25519-1";
 
     /// <summary>
-    /// I-9: a message whose host code ran for less than its share is not remembered, even when its
-    /// work item waited for a pool thread for most of the budget and the budget then ended it. Its
-    /// work item waits for its thread while the clock moves 19.7 s (forced by a gate on that thread
-    /// before its code runs, so no other test's threads are held); the honest message's host code
-    /// then runs 0.3 s of its 20 s share before the budget ends.
+    /// I-9 (S2): a message whose host code started late is not remembered when the budget ends it:
+    /// its work item waited for a pool thread for most of the budget. It waits for its thread while
+    /// the clock moves 19.7 s (forced by a gate on that thread before its code runs, so no other
+    /// test's threads are held); the honest message's host code then runs for the 0.3 s of the
+    /// budget that are left.
     /// </summary>
     [Fact]
-    public async Task A_message_whose_host_code_ran_less_than_its_share_is_not_remembered_after_waiting_for_a_pool_thread()
+    public async Task A_message_whose_host_code_started_late_is_not_remembered_after_waiting_for_a_pool_thread()
     {
         using var floor = new PoolFloor(parked: 1);
         var time = new ManualTimeProvider();
@@ -71,21 +71,21 @@ public sealed class SlowMemoryRt1BTests
         outcomes.Single().Succeeded.Should().BeFalse("the budget ended while its 2 s lookup was running");
         time.GetElapsedTime(enteredAt).Should().Be(HostRan);
         Volatile.Read(ref _atNextRestore).Should().BeNull("the gate was used");
-        HostRan.Should().BeLessThan(Budget - unpacker.StartAllowance);
+        (Budget - HostRan).Should().BeGreaterThan(unpacker.StartAllowance, "its code started later than the start allowance");
         unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
-            "its host code ran {0} ms of its {1} s share; remembered, it would not be opened again for {2} min",
-            HostRan.TotalMilliseconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
+            "its host code started {0} s into the {1} s budget; remembered, it would not be opened again for {2} min",
+            (Budget - HostRan).TotalSeconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
     }
 
     /// <summary>
-    /// I-9 across mailboxes: lookups in other mailboxes whose threads stay blocked (fewer than the
-    /// container's bound, so this message is never refused) hold pool threads; the honest message's
-    /// work item waits for one while the clock moves 19.7 s (forced by a gate on its thread before its
-    /// code runs, so the wait does not depend on how many threads the pool has), then its host code
-    /// runs 0.3 s of its share before the budget ends. It is not remembered.
+    /// I-9 (S2) across mailboxes: lookups in other mailboxes whose threads stay blocked (fewer than
+    /// the container's bound, so this message is never refused) hold pool threads; the honest
+    /// message's work item waits for one while the clock moves 19.7 s (forced by a gate on its thread
+    /// before its code runs, so the wait does not depend on how many threads the pool has), then its
+    /// host code runs for the 0.3 s of the budget that are left. It is not remembered.
     /// </summary>
     [Fact]
-    public async Task A_message_whose_host_code_ran_less_than_its_share_is_not_remembered_while_other_mailboxes_lookups_hold_the_pool()
+    public async Task A_message_whose_host_code_started_late_is_not_remembered_while_other_mailboxes_lookups_hold_the_pool()
     {
         const int mailboxes = 15;
         const int blocked = mailboxes * DeliveredMessageUnpacker.FetchConcurrency;
@@ -148,8 +148,8 @@ public sealed class SlowMemoryRt1BTests
         time.GetElapsedTime(enteredAt).Should().Be(HostRan);
         Volatile.Read(ref _atNextRestore).Should().BeNull("the gate was used");
         unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
-            "its host code ran {0} ms of its {1} s share; remembered, it would not be opened again for {2} min",
-            HostRan.TotalMilliseconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
+            "its host code started {0} s into the {1} s budget; remembered, it would not be opened again for {2} min",
+            (Budget - HostRan).TotalSeconds, Budget.TotalSeconds, unpacker.Memory.FirstPause.TotalMinutes);
     }
 
     // A gate on the honest message's thread before its code runs: runs when a pool thread switches to

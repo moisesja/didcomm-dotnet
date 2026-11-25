@@ -41,7 +41,7 @@ internal sealed class SlowSenderSeam
     /// <summary>
     /// How many calls wait now with their token not cancelled: for a lookup that takes its time, or
     /// for a message that never opens. A call that is running (not waiting) is not counted, nor is one
-    /// whose share or budget has already ended.
+    /// whose budget has already ended.
     /// </summary>
     public int Live => _waiting.Values.Count(t => !t.IsCancellationRequested);
 

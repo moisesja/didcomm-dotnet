@@ -292,7 +292,7 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     /// I-19 (ADV5-4) with the slow memory, at a mediator that does not set delivered messages aside:
     /// ten messages whose senders' DIDs never resolve, a full round of ten. Each poll sends one live-on
     /// and two delivery requests and yields each message once as a failure. Only the first poll opens
-    /// them (each until its share or the budget); later polls hold them back without opening, at once.
+    /// them (each until the budget ends); later polls hold them back without opening, at once.
     /// Nothing is acknowledged.
     /// </summary>
     [Fact]

@@ -29,8 +29,8 @@ public sealed class DeliveredUnpackAdv4Tests
 
     /// <summary>
     /// ADV4-2 (fixed by #111, I-4). An unpack let go at the budget keeps only its own bounded values:
-    /// its work item holds the unpack step, the packed text and the share's token, and nothing it
-    /// references holds the delivery. While a lookup still blocks its thread after the delivery's
+    /// its work item holds the unpack step, the packed text and the budget's token, and once the
+    /// delivery has ended nothing it references holds the delivery. While a lookup still blocks its thread after the delivery's
     /// result was returned and let go, another message's bytes and a message opened in the same
     /// delivery are unreachable.
     /// </summary>
@@ -123,9 +123,10 @@ public sealed class DeliveredUnpackAdv4Tests
 
     /// <summary>
     /// ADV4-3 (fixed by #111, I-3). A host call is created only under the delivery's lock while the
-    /// delivery is open, with its share's token. The shutdown lands while the fifth message's worker
-    /// creates its share (the timer creation is the rendezvous): the delivery ends cancelled, and the
-    /// fifth message's host code never starts.
+    /// delivery is open, with the budget's token. The shutdown lands while the fifth message's worker
+    /// is starting it, between taking it and creating its host call (the worker's reading of the
+    /// clock for the start rule is the rendezvous): the delivery ends cancelled, and the fifth
+    /// message's host code never starts.
     /// </summary>
     [Fact]
     public async Task ADV4_3_a_message_whose_worker_was_starting_it_when_the_shutdown_came_never_has_its_host_code_started()
@@ -133,7 +134,10 @@ public sealed class DeliveredUnpackAdv4Tests
         var clock = new CountingTimeProvider(new ManualTimeProvider());
         using var shutdown = new CancellationTokenSource();
         var ended = 0;
+        var others = 0;
+        var armed = 0;
         var late = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var othersStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             if (text == "m-4")
@@ -142,16 +146,24 @@ public sealed class DeliveredUnpackAdv4Tests
                 return Opened(text);
             }
             if (text == "m-0")
+            {
+                // Opens once the three others have started (their host calls have read the clock),
+                // so the next reading of the clock is its worker's, taking the fifth message.
+                await othersStarted.Task;
+                Volatile.Write(ref armed, 1);
                 return Opened(text);
+            }
+            if (Interlocked.Increment(ref others) == 3)
+                othersStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a lookup that honours its token
             throw new InvalidOperationException("unreachable");
         }, Budget, clock, shutdown.Token);
-        // Timer 1 is the budget, 2 to 5 the first four shares; timer 6 is the share of the fifth
-        // message (m-4), which a worker takes once m-0 has opened: the container goes away while
-        // that worker creates it.
-        clock.OnCreate = n =>
+        // The first reading of the clock after m-0 opened is made by the worker that takes the fifth
+        // message (m-4), for the start rule, before it reserves and creates the host call: the
+        // container goes away right there.
+        clock.OnRead = () =>
         {
-            if (n != 6)
+            if (Interlocked.CompareExchange(ref armed, 2, 1) != 1)
                 return;
             shutdown.Cancel();
             Volatile.Write(ref ended, 1);
@@ -159,6 +171,7 @@ public sealed class DeliveredUnpackAdv4Tests
 
         var batch = unpacker.UnpackAllAsync(Payloads(5, "m-"), "request-1", default);
         await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>("the shutdown ended the delivery");
+        Volatile.Read(ref armed).Should().Be(2, "the shutdown came while the fifth message's worker was starting it");
 
         bool? startedAfterTheEnd;
         try
