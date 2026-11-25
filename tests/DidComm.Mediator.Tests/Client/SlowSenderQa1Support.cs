@@ -583,9 +583,47 @@ internal sealed class Qa1Exchange : IMediatorExchange
     }
 }
 
+/// <summary>What a stand-in host does with the failed items a fetch or a stream hands it (#111).</summary>
+public enum Qa1Discard
+{
+    /// <summary>It keeps every failed item queued.</summary>
+    Nothing,
+
+    /// <summary>
+    /// The careful host: it discards a failed item (<see cref="PickupClient.AckAsync"/>) unless
+    /// <see cref="PickupItem.NotAttempted"/> says the client did not try to open it.
+    /// </summary>
+    WhatWasTried,
+
+    /// <summary>A host that does not read <see cref="PickupItem.NotAttempted"/>: it discards every failed item.</summary>
+    EveryFailure,
+}
+
 /// <summary>Shorthands of the QA-1 tests.</summary>
 internal static class Qa1
 {
+    /// <summary>The ids of the failed items among <paramref name="items"/> that a host with <paramref name="discard"/> discards, in order.</summary>
+    public static string[] ToDiscard(IEnumerable<PickupItem> items, Qa1Discard discard)
+        => discard switch
+        {
+            Qa1Discard.EveryFailure => items.Where(i => i.Error is not null).Select(i => i.Id).ToArray(),
+            Qa1Discard.WhatWasTried => items.Where(i => i.Error is not null && !i.NotAttempted).Select(i => i.Id).ToArray(),
+            _ => Array.Empty<string>(),
+        };
+
+    /// <summary>
+    /// Wait (bounded, in real time) until every host call of <paramref name="unpacker"/> has ended
+    /// and given its reservation back. A delivery's end cancels the calls still running and does not
+    /// wait for them, so a test whose next delivery follows at once, with no request to a mediator
+    /// in between, waits here first: whether that delivery's first messages are refused for capacity
+    /// would otherwise depend on which continuation ran first (L-065).
+    /// </summary>
+    public static void LookupsEnded(DeliveredMessageUnpacker unpacker)
+    {
+        if (!SpinWait.SpinUntil(() => unpacker.Reserved == 0, Qa1Exchange.Guard))
+            throw new TimeoutException($"The host calls of the last delivery did not end: {unpacker.Reserved} reservations are still held.");
+    }
+
     /// <summary>The default budget (20 s).</summary>
     public static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout;
 
