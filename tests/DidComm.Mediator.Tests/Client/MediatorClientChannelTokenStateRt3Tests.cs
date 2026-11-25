@@ -503,6 +503,63 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     }
 
     /// <summary>
+    /// The answer arrives on one thread while the send fails on its own on another, fifty times per
+    /// kind of request, in whatever order the two land. The request has one outcome: the call
+    /// returns the answer exactly when the channel took it, and ends with the send's failure exactly
+    /// when it did not. No request is left counted, and no deadline is left scheduled.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task An_answer_that_races_with_a_send_failing_on_its_own_is_returned_exactly_when_it_was_taken(bool allowingNoAnswer)
+    {
+        var returned = 0;
+        var failed = 0;
+        for (var round = 0; round < 50; round++)
+        {
+            var time = new ManualTimeProvider();
+            var host = new HeldHostCode();
+            var failure = FailureOf(Step.Send);
+            var (channel, _) = ChannelOver(time, logs: null, host);
+
+            var (call, request) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None);
+            var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
+            await host.ParkAsync();
+            using var go = new ManualResetEventSlim();
+            var taking = Task.Run(() =>
+            {
+                go.Wait();
+                return channel.AsCorrelator().OnInbound(answer);
+            });
+            var failing = Task.Run(() =>
+            {
+                go.Wait();
+                host.EndWith(failure);
+            });
+            go.Set();
+            var taken = await taking.WaitAsync(PickupTest.Timeout);
+            await failing.WaitAsync(PickupTest.Timeout);
+
+            var result = await EndOf(call);
+            if (taken)
+            {
+                returned++;
+                result.Should().BeNull("the channel took the answer, so the call returns it (round {0}; it ended with {1})", round, result?.GetType().Name ?? "a result");
+                (await (Task<InboundMessageSnapshot?>)call).Should().BeSameAs(answer);
+            }
+            else
+            {
+                failed++;
+                result.Should().BeSameAs(failure, "the channel did not take the answer, so the send's failure is the call's own (round {0})", round);
+            }
+            channel.PendingCount.Should().Be(0, "no request is left counted");
+            await channel.DisposeAsync();
+            SpinWait.SpinUntil(() => time.ScheduledTimers == 0, PickupTest.Timeout).Should().BeTrue("the call's deadline was released");
+        }
+        (returned + failed).Should().Be(50);
+    }
+
+    /// <summary>
     /// A one-way message registers nothing, so nothing can answer it: a message of an answer type
     /// that names it, arriving while its send runs, is not taken, and when the send then fails on
     /// its own the call ends with that very exception.
