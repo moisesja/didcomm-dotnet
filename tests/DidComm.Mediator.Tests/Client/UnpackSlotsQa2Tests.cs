@@ -625,13 +625,17 @@ public sealed class UnpackSlotsQa2Tests
     [InlineData(Ending.ShareCut, Window.AfterTheWorkItemStarted)]
     public async Task No_host_code_starts_once_its_delivery_or_its_share_has_ended(Ending ending, Window window)
     {
+        using var floor = new PoolFloor(parked: 1); // the share cut's forced order holds m-0's pool thread in its gate
         var clock = new CountingTimeProvider(new ManualTimeProvider());
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
         var calls = new HostCallLog();
         // For the share cut, m-1..m-3 keep their workers until the cut has happened, so m-4 still
-        // waits for a worker when m-0's share ends and m-0 is cut (A1).
+        // waits for a worker when m-0's share ends and m-0 is cut (A1). Without that hold, when the
+        // pool runs the others before m-0's work item, every message is taken by then, m-0 is
+        // extended to the budget's end (nothing waits), and the delivery never ends at its share.
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var held = 0;
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             using (calls.Enter(text, ct))
@@ -639,7 +643,10 @@ public sealed class UnpackSlotsQa2Tests
                 if (text == "m-0")
                     await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a lookup that honours its token
                 else if (ending == Ending.ShareCut && text is "m-1" or "m-2" or "m-3")
+                {
+                    Interlocked.Increment(ref held);
                     await release.Task;
+                }
             }
             return UnpackFakes.Opened(text);
         }, Budget, clock, shutdown.Token);
@@ -683,7 +690,18 @@ public sealed class UnpackSlotsQa2Tests
                 Marked.Value = "target"; // flows into m-0's work item only
         };
         if (window == Window.AfterTheWorkItemStarted)
-            Volatile.Write(ref _atNextRestore, End);
+        {
+            // For the share cut, the order that matters is forced: m-0's work item ends its share
+            // only once the others have gone as far as they can, as when the pool runs them first:
+            // m-1..m-3 parked on their hold, or (without the hold) m-4 already taken and started.
+            Volatile.Write(ref _atNextRestore, ending == Ending.ShareCut
+                ? () =>
+                {
+                    SpinWait.SpinUntil(() => Volatile.Read(ref held) == 3 || calls.Labels.Contains("m-4"), RealTime);
+                    End();
+                }
+                : End);
+        }
         Task<IReadOnlyList<DeliveredOutcome>> batch;
         try
         {
@@ -697,6 +715,8 @@ public sealed class UnpackSlotsQa2Tests
         }
 
         SpinWait.SpinUntil(() => Volatile.Read(ref ended) == 1, RealTime).Should().BeTrue("the ending ran in its window");
+        if (ending == Ending.ShareCut)
+            Volatile.Read(ref held).Should().Be(3, "the others had started, and were held, before the share was cut");
         release.TrySetResult();
         if (ending == Ending.ShareCut)
         {
