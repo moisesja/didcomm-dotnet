@@ -358,9 +358,13 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
             // Registered before sending: over a WebSocket the answer can arrive before the send returns.
             if (!_pending.TryAdd(request.Id, pending))
                 throw new InvalidOperationException($"Mediator request '{request.Id}' ({spec.Name}) is already waiting; a request id is used once.");
-            // Disposal may have failed the waiting requests just before this one was added.
+            // Disposal may have failed the waiting requests just before this one was added: this one
+            // is given up here, through the same terminal CAS, before the disposal is reported.
             if (IsDisposed)
+            {
+                pending.TryAbandon();
                 throw Disposed();
+            }
 
             var answer = await ExchangeCoreAsync(route, request, pending, mediatorDid, localDid, answerOptional, answerWait, ct).ConfigureAwait(false);
             if (answer is null)

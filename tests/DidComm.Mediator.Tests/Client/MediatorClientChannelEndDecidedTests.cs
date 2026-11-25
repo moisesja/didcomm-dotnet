@@ -20,8 +20,9 @@ namespace DidComm.Mediator.Tests.Client;
 /// request is decided there, through its terminal compare-and-swap, so an answer that had already
 /// won is the call's outcome, and an answer that arrives afterwards is not taken.
 /// <see cref="MediatorClientChannelAnswerAndSendRt4Tests"/> delivers the answer as the call's end
-/// is reported; here it is delivered a step earlier (as the channel begins to end the call), and
-/// for a send that fails on its own as the disposal begins.
+/// is reported; here it is delivered a step earlier (as the channel begins to end the call), for a
+/// request that is refused before it is sent, and for a send that fails on its own as the disposal
+/// begins.
 /// </summary>
 /// <remarks>
 /// The sends never end on their own token (the test ends them). An answer is delivered from inside
@@ -95,6 +96,45 @@ public sealed class MediatorClientChannelEndDecidedTests : IAsyncLifetime
         channel.PendingCount.Should().Be(0, "the request's place was given back, once");
         time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
         await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// The container is disposed as a request is being registered (the test disposes it from the
+    /// clock, when the channel reads the request's start time), so the request is refused before it
+    /// is sent. The answer naming it arrives while that refusal is on its way to the caller (from
+    /// inside the logger, as the request's end is reported). The request was decided when it was
+    /// refused: the answer is not taken, nothing was sent, and the call ends as the disposal does.
+    /// </summary>
+    [Theory]
+    [InlineData(Kind.Request)]
+    [InlineData(Kind.RequestOverHttp)]
+    [InlineData(Kind.RequestAllowingNoAnswer)]
+    public async Task An_answer_naming_a_request_refused_because_the_container_was_disposed_as_it_was_registered_is_not_taken(Kind kind)
+    {
+        var time = new HookedClock(new ManualTimeProvider());
+        var send = new FakeSend();
+        MediatorClientChannel channel = null!;
+        InboundMessageSnapshot answer = null!;
+        var countedThen = -1;
+        bool? taken = null;
+        var logs = new OnLine(line => line.Contains("ended without a usable answer", StringComparison.Ordinal), () =>
+        {
+            countedThen = channel.PendingCount;
+            taken = channel.AsCorrelator().OnInbound(answer);
+        });
+        channel = Create(_w, send, time: time, logs: logs);
+        var request = NewRequest(kind);
+        answer = await _w.SnapshotAsync(_w.Status(request.Id));
+        time.OnNextTimestamp = channel.Dispose;
+
+        var thrown = await Record.ExceptionAsync(() => Call(channel, kind, request, CancellationToken.None).WaitAsync(Guard));
+
+        channel.IsDisposed.Should().BeTrue("the set-up: the container was disposed as the request was registered");
+        thrown.Should().BeOfType<ObjectDisposedException>();
+        send.Count.Should().Be(0, "the request was refused before it was sent");
+        countedThen.Should().Be(1, "the set-up: the request was still registered when the answer arrived");
+        taken.Should().BeFalse("the request was decided when it was refused");
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
     }
 
     /// <summary>
@@ -228,6 +268,31 @@ public sealed class MediatorClientChannelEndDecidedTests : IAsyncLifetime
         private Func<string, bool> Matches { get; } = matches;
 
         private Action Then { get; } = then;
+    }
+
+    /// <summary>The manual clock, with an action the test can have run once, inside the next reading of the timestamp.</summary>
+    private sealed class HookedClock(ManualTimeProvider inner) : TimeProvider
+    {
+        private Action? _onNextTimestamp;
+
+        /// <summary>Runs once, inside the next <see cref="GetTimestamp"/>, before it returns.</summary>
+        public Action? OnNextTimestamp
+        {
+            set => Volatile.Write(ref _onNextTimestamp, value);
+        }
+
+        public override long TimestampFrequency => inner.TimestampFrequency;
+
+        public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
+
+        public override long GetTimestamp()
+        {
+            Interlocked.Exchange(ref _onNextTimestamp, null)?.Invoke();
+            return inner.GetTimestamp();
+        }
+
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+            => inner.CreateTimer(callback, state, dueTime, period);
     }
 
     /// <summary>
