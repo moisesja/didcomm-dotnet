@@ -13,7 +13,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// code ran for its share; time its work item spent waiting for a pool thread before any host code
 /// ran is not the message's own.
 /// Every timing is driven by the injected <see cref="ManualTimeProvider"/>; real time is only a hang
-/// guard. The pool is kept busy only while the manual clock moves, then released.
+/// guard. A late start is forced by a one-shot gate on the work item's own thread, never by keeping
+/// the pool busy.
 /// </summary>
 public sealed class SlowMemoryRt1BTests
 {
@@ -26,24 +27,41 @@ public sealed class SlowMemoryRt1BTests
 
     /// <summary>
     /// I-9: a message whose host code ran for less than its share is not remembered, even when its
-    /// work item waited for a pool thread for most of the budget and the budget then ended it. Here
-    /// every pool thread is busy and work is queued in front while the clock moves 19.7 s; the honest
-    /// message's host code then runs 0.3 s of its 20 s share before the budget ends.
+    /// work item waited for a pool thread for most of the budget and the budget then ended it. Its
+    /// work item waits for its thread while the clock moves 19.7 s (forced by a gate on that thread
+    /// before its code runs, so no other test's threads are held); the honest message's host code
+    /// then runs 0.3 s of its 20 s share before the budget ends.
     /// </summary>
     [Fact]
     public async Task A_message_whose_host_code_ran_less_than_its_share_is_not_remembered_after_waiting_for_a_pool_thread()
     {
+        using var floor = new PoolFloor(parked: 1);
         var time = new ManualTimeProvider();
         var unpacker = new DeliveredMessageUnpacker(Honest(time, out var entered), Budget, time);
         var honest = new[] { new DeliveredInput("alice-1", TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, "alice-1"))) };
+        using var late = new ManualResetEventSlim(false);
+        using var parked = new SemaphoreSlim(0);
+        Volatile.Write(ref _atNextRestore, () =>
+        {
+            parked.Release();
+            late.Wait(RealTime); // the work item waits for its thread (bounded so a red run cannot hang)
+        });
 
         Task<IReadOnlyList<DeliveredOutcome>> delivery;
-        using (var floor = new PoolFloor(parked: 0))
-        using (var busy = new BusyPool(inFront: 2_000))
+        try
         {
-            delivery = StartOnOwnThread(() => unpacker.UnpackAllAsync(Bob, honest, "request-1", default));
+            delivery = StartOnOwnThread(() =>
+            {
+                Marked.Value = "late"; // flows into the honest message's work item only
+                return unpacker.UnpackAllAsync(Bob, honest, "request-1", default);
+            });
+            (await parked.WaitAsync(RealTime)).Should().BeTrue("its work item is waiting for its thread");
             time.Advance(Budget - HostRan);
-            entered.Task.IsCompleted.Should().BeFalse("the work item is still queued behind the pool's work");
+            entered.Task.IsCompleted.Should().BeFalse("its code has not started");
+        }
+        finally
+        {
+            late.Set();
         }
 
         var enteredAt = await entered.Task.WaitAsync(RealTime);
@@ -52,6 +70,7 @@ public sealed class SlowMemoryRt1BTests
 
         outcomes.Single().Succeeded.Should().BeFalse("the budget ended while its 2 s lookup was running");
         time.GetElapsedTime(enteredAt).Should().Be(HostRan);
+        Volatile.Read(ref _atNextRestore).Should().BeNull("the gate was used");
         HostRan.Should().BeLessThan(Budget - unpacker.StartAllowance);
         unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
             "its host code ran {0} ms of its {1} s share; remembered, it would not be opened again for {2} min",
@@ -199,8 +218,8 @@ public sealed class SlowMemoryRt1BTests
         };
     }
 
-    // Runs the start on a thread of its own (not a pool thread), so its work items go to the pool's
-    // global queue, behind what is already queued there.
+    // Runs the start on a thread of its own (not a pool thread), so an execution-context value set
+    // there (Marked) flows into the work items it starts and never into the test's own context.
     private static T StartOnOwnThread<T>(Func<T> start)
     {
         T result = default!;
@@ -221,21 +240,5 @@ public sealed class SlowMemoryRt1BTests
         if (error is not null)
             throw error;
         return result;
-    }
-
-    // Every pool thread busy and work queued in front, until disposed.
-    private sealed class BusyPool : IDisposable
-    {
-        private readonly ManualResetEventSlim _release = new(false);
-
-        internal BusyPool(int inFront)
-        {
-            var items = ThreadPool.ThreadCount + inFront;
-            for (var i = 0; i < items; i++)
-                ThreadPool.UnsafeQueueUserWorkItem(static release => release.Wait(RealTime), _release, preferLocal: false);
-            SpinWait.SpinUntil(() => ThreadPool.PendingWorkItemCount >= inFront / 2, RealTime).Should().BeTrue("the pool is busy");
-        }
-
-        public void Dispose() => _release.Set();
     }
 }
