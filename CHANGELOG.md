@@ -112,7 +112,12 @@ reaching what was queued behind them (#96 documented this and the other limits b
   `SenderPartitionCoreQa2Tests`, `UnpackSlotsQa2Tests`, `ContainerSharingRt1ATests`,
   `SlowMemoryRt1BTests`, `LiveStreamSlowSenderRt1CTests`); and every reproduction #96 skipped naming
   #111 now passes. In all three test projects, a test that raises the thread pool's floor puts it
-  back when it ends, and never under another test that still holds a raise.
+  back when it ends, and never under another test that still holds a raise. Two mediator tests that
+  failed once each under heavy load now wait for what they check. Before each push deadline,
+  `DirectPushAdv110Pass3Tests.ADV_110_3a_2_…` waits until the operations abandoned at the earlier
+  deadlines have settled, and checks that their lookups are still running. The QA store that holds an
+  enqueue behind the slow-sink tests in `MediatorBoundsQaTests` keeps it held until the test releases
+  it or the mediator shuts down; it no longer lets go after 15 seconds.
 
 ### Added — the mediator can push a stored message to the recipient's own endpoint (`MediatorOptions.DirectPush`, FR-PICK-09 step 3, #110; epic #88); the plain receiving endpoints open a message a mediator re-wrapped
 
