@@ -42,7 +42,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// <list type="bullet">
 /// <item><description><em>Opened:</em> its reservation is given back, the success is recorded and the message is forgotten.</description></item>
 /// <item><description><em>Not opened, and the delivery is being ended</em> (its token is cancelled, or the caller's token or the owner's shutdown is): the worker records nothing and takes no further message; the delivery's end records the message. Host code may report its cancellation as a failure of its own (a resolver that maps every error to "not found"), and may do so from a callback that runs before the delivery's; that is not the message's failure.</description></item>
-/// <item><description><em>Failed while the delivery is not being ended:</em> the message's own failure. Its reservation is given back, the failure is recorded, and the message is remembered.</description></item>
+/// <item><description><em>Failed while the delivery is not being ended:</em> the message's own failure. Its reservation is given back, the failure is recorded, and the message is remembered (S1, below).</description></item>
 /// </list>
 /// <para>
 /// A worker takes no further message once the delivery is being ended. The cost of having no limit
@@ -90,10 +90,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>What host code can reach (I-4).</strong> Host code holds the budget's token. While the
-/// delivery is open that token's source references the delivery, through the one registration the
-/// delivery made on it. When the delivery ends, that reference is cleared: host code that still
-/// runs, or still holds a registration of its own on the token, keeps nothing of the delivery
-/// reachable.
+/// delivery is open that token's source references the delivery: the delivery's own registration
+/// on it, and its workers' waits. The workers' waits end with the delivery, and the delivery's
+/// registration holds a link that is cleared when the delivery ends: host code that still runs, or
+/// still holds a registration of its own on the token, then keeps nothing of the delivery reachable.
 /// </para>
 /// </remarks>
 internal sealed class DeliveredMessageUnpacker
@@ -623,9 +623,9 @@ internal sealed class DeliveredMessageUnpacker
             {
                 // The budget goes before the result is set, so whoever sees the result sees no timer
                 // of this delivery left. This thread may be inside the budget's own Cancel() (host
-                // code that completed its call from a callback on the token): .NET tolerates the
-                // disposal there, and the rest of the callbacks still run (pinned by
-                // DeliveredUnpackAdv3Tests).
+                // code that opened the last message from a callback on the token): .NET tolerates
+                // the disposal there, and the rest of the callbacks still run (pinned by
+                // DeliveredUnpackTokenStateTests).
                 _budget.Dispose();
                 _result.TrySetResult(_outcomes);
             }

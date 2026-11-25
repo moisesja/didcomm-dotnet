@@ -250,6 +250,45 @@ public sealed class DeliveredUnpackTokenStateTests
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
+    /// <summary>
+    /// A delivery whose only message opens from inside a cancellation callback: when the budget
+    /// ends (the callback is on the token the lookup was handed), and when the caller cancels (the
+    /// callback is on the caller's own token). Its worker records the success while the delivery is
+    /// still open, which ends the delivery there, inside that cancellation: the result is the
+    /// success, nothing throws out of the cancellation, and no timer, reservation or opening
+    /// delivery is left behind.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_delivery_whose_last_message_opens_inside_the_cancellation_ends_there_with_its_outcome_and_leaves_nothing_behind(bool byTheCaller)
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new RegistrationGate();
+        using var caller = new CancellationTokenSource();
+        DeliveredMessageUnpacker? opening = null;
+        var unpacker = opening = new DeliveredMessageUnpacker(
+            CallbackLookups.OpensWhenCancelled(calls, register, recorded: () => opening!.Settled >= 1, byTheCaller ? _ => caller.Token : null), Budget, time);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", caller.Token);
+        await register.OpenAsync(1, RealTime);
+        await calls.WaitForAsync(1, RealTime);
+        var ending = await Record.ExceptionAsync(() => Task.Run(() =>
+        {
+            if (byTheCaller)
+                caller.Cancel();
+            else
+                time.Advance(Budget);
+        }).WaitAsync(RealTime));
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        ending.Should().BeNull("nothing escapes from the cancellation the delivery ended in");
+        outcomes.Single().Succeeded.Should().BeTrue("the message opened before the delivery was closed");
+        unpacker.Memory.Count.Should().Be(0);
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+    }
+
     // ---- helpers ----------------------------------------------------------------------------------
 
     private static DeliveredInput Message(string id) => new(id, TestJwe.Bytes(TestJwe.Anoncrypt(id)));
