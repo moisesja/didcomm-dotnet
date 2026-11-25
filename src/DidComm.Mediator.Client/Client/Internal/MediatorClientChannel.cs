@@ -87,6 +87,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// failed is not taken.
 /// </para>
 /// <para>
+/// <strong>The token host code is handed.</strong> The channel reads the token it was given, its own
+/// deadline's and its own disposal, and nothing else. Host code (a transport, a DID resolver) should
+/// watch the token it is handed. Host code that watches another token instead (one of two that a
+/// caller combined into the call's token, for example) and reports that token's cancellation as a
+/// failure of its own may do so before any token the channel can read is cancelled: the call then
+/// ends with that failure, not as a cancellation (a documented residual).
+/// </para>
+/// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
 /// every 1000th, Debug otherwise): an answer to a waiting request that does not fit it, an answer
 /// without a thread (anything thread-less in an HTTP response; anything but a live push or a problem

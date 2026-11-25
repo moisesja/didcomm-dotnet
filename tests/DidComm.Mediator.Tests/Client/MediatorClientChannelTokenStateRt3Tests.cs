@@ -132,10 +132,10 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
 
     /// <summary>
     /// A documented residual, pinned. The call's token is cancelled by either of two caller tokens
-    /// (the combination a compiler makes for an enumeration given two tokens, which a live stream
-    /// hands to its requests). The host code watches one of the two, not the token it was handed,
-    /// and reports its cancellation as a failure of its own from its callback there. The call ends
-    /// with what the host code reported, not as a cancellation.
+    /// (for example the combination a compiler makes for an async enumeration that is given two
+    /// tokens; the live stream's enumeration is declared that way). The host code watches one of the
+    /// two, not the token it was handed, and reports its cancellation as a failure of its own from
+    /// its callback there. The call ends with what the host code reported, not as a cancellation.
     /// </summary>
     /// <remarks>
     /// Why it is so: the channel judges what its host code throws by the tokens it can read, which
@@ -409,20 +409,22 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     }
 
     /// <summary>
-    /// The send fails on its own while nothing has ended the call and no answer has arrived, over
-    /// HTTP, where the answer could only have come in the response: the call ends with that very
-    /// exception, also for a request the mediator may leave unanswered (a send that failed is never
-    /// "no answer"). <see cref="MediatorClientChannelTokenStateTests"/> has the same for the other
-    /// routes.
+    /// The send fails on its own (a failure of its own kind, or a cancellation of a wait of its own)
+    /// while nothing has ended the call and no answer has arrived, over HTTP, where the answer could
+    /// only have come in the response: the call ends with that very exception, also for a request
+    /// the mediator may leave unanswered (a send that failed is never "no answer").
+    /// <see cref="MediatorClientChannelTokenStateTests"/> has the same on a WebSocket route.
     /// </summary>
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Over_HTTP_a_send_that_fails_on_its_own_with_no_answer_is_passed_on_as_it_is(bool allowingNoAnswer)
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Over_HTTP_a_send_that_fails_on_its_own_with_no_answer_is_passed_on_as_it_is(bool allowingNoAnswer, bool aCancellationOfItsOwn)
     {
         var time = new ManualTimeProvider();
         var host = new HeldHostCode();
-        var failure = FailureOf(Step.Send);
+        var failure = aCancellationOfItsOwn ? new OperationCanceledException("The host code gave up on a wait of its own.") : FailureOf(Step.Send);
         var (channel, _) = ChannelOver(time, logs: null, host);
 
         var (call, _) = Start(channel, allowingNoAnswer ? Step.SendAllowingNoAnswer : Step.Send, CancellationToken.None, HttpRoute);
