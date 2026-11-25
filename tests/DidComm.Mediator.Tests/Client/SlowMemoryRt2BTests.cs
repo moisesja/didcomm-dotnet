@@ -87,17 +87,19 @@ public sealed class SlowMemoryRt2BTests
     }
 
     /// <summary>
-    /// The XML's promise on clocks (PickupClient.FetchAsync: "A clock that steps back never holds a
-    /// message back longer"): an honest message whose sender's DID host is unreachable from minute
-    /// 0 to minute 11 fails at minute 0 (paused 10 min) and at minute 10 (paused 20 min, so opened
-    /// again at minute 30, when it opens). With the host clock stepping back one minute at minute
-    /// 10.5, it is opened once more, fails, and is paused for the same 20 min again, not for a third
-    /// strike's 40 min (which lasted until minute 50.5): at minute 31 it is not held back. (When
-    /// exactly it is due again, minute 30.5, is measured by
+    /// What a step back of the host clock does to a message that fails again: it is held back for
+    /// the same pause once more, not for the next, doubled pause. An honest message whose sender's
+    /// DID host is unreachable from minute 0 to minute 11 fails at minute 0 (paused 10 min) and at
+    /// minute 10 (paused 20 min, so without a step it is opened again at minute 30, when it opens).
+    /// With the host clock stepping back one minute at minute 10.5, it is opened once more (a
+    /// reading below the strike's counts as due) and fails. Checked here: at minute 30 it is still
+    /// held back, and at minute 31 it is not; a third strike's 40 min would have held it back until
+    /// minute 50.5. (That the pause is counted from the repeat failure, so that the message is due
+    /// at minute 30.5, half a minute later than without the step, is measured to the tick by
     /// <c>SlowMemoryClockStepTests.After_a_step_back_the_message_is_due_one_pause_after_its_repeat_failure</c>.)
     /// </summary>
     [Fact]
-    public void A_clock_that_steps_back_never_holds_a_message_back_longer()
+    public void After_a_clock_step_back_a_message_that_fails_again_is_held_back_for_the_same_pause_again_and_not_for_the_doubled_one()
     {
         var clock = new Qa1Clock();
         var memory = new SlowMemory(clock, TimeSpan.FromTicks(Budget.Ticks * 30), TimeSpan.FromTicks(Budget.Ticks * SlowMemory.EntriesPerPartition), SlowMemory.EntriesPerPartition, SlowMemory.MaxPartitions);
@@ -109,14 +111,16 @@ public sealed class SlowMemoryRt2BTests
         memory.Strike(Bob, "alice-1"); // minute 10: it fails again, paused 20 min (until minute 30)
         clock.Inner.Advance(TimeSpan.FromSeconds(30));
         clock.Step(TimeSpan.FromMinutes(-1)); // minute 10.5: the host clock steps back one minute
-        var openedAgain = !memory.HeldBack(Bob, id)[0]; // a reading below the strike's is due (I-12)
-        if (openedAgain)
-            memory.Strike(Bob, "alice-1"); // opened once more, it fails (its sender's host is unreachable until minute 11)
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false }, "precondition: a reading below the strike's counts as due (I-12), so the message is opened once more");
+        memory.Strike(Bob, "alice-1"); // opened once more, it fails (its sender's host is unreachable until minute 11)
 
-        clock.Inner.Advance(TimeSpan.FromMinutes(20.5)); // minute 31: without the step it was opened at minute 30
+        clock.Inner.Advance(TimeSpan.FromMinutes(19.5)); // minute 30: without the step it is opened again now
+        memory.HeldBack(Bob, id).Should().Equal(new[] { true }, "at minute 30, where its pause ends without the step, it is still held back");
+        clock.Inner.Advance(TimeSpan.FromMinutes(1)); // minute 31
         memory.HeldBack(Bob, id).Should().Equal(new[] { false },
-            "without the step it is opened again at minute 30; with it (opened again at minute 10.5: {0}) it is held back until minute {1}",
-            openedAgain, 10.5 + memory.PauseAfter(3).TotalMinutes);
+            "the repeat failure added no strike: a third strike's pause of {0} min would hold the message back until minute {1}",
+            memory.PauseAfter(3).TotalMinutes, 10.5 + memory.PauseAfter(3).TotalMinutes);
+        memory.PauseAfter(3).Should().Be(2 * memory.PauseAfter(2), "the control: a third strike's pause is the doubled one");
     }
 
     private static DeliveredInput Alice(string id) => new(id, TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, id)));

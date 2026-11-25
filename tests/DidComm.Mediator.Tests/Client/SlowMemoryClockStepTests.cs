@@ -7,9 +7,12 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// <see cref="SlowMemory.Strike"/> when the clock's reading is below the entry's last strike (#111 fix
 /// round 2, RT2B-2): it is the slow episode the entry already counts, not a new one. The entry keeps
-/// its strikes, is stamped with the lower reading, and counts as seen. Also a clock that keeps
-/// stepping back, one whose every reading is lower than the one before, and one that steps forward.
-/// The clock's readings are set by hand; nothing sleeps and no timer is used.
+/// its strikes, is stamped with the lower reading, and counts as seen. So a step back followed by a
+/// repeat failure holds the message back for the same pause again, counted from that failure: it is
+/// due later than without the step (half a minute later in the case measured here), and not for the
+/// next, doubled pause. Also a clock that keeps stepping back, one whose every reading is lower than
+/// the one before, and one that steps forward. The clock's readings are set by hand; nothing sleeps
+/// and no timer is used.
 /// </summary>
 public sealed class SlowMemoryClockStepTests
 {
@@ -167,12 +170,12 @@ public sealed class SlowMemoryClockStepTests
 
     /// <summary>
     /// A clock that steps back five times, one minute each, the message failing after every step:
-    /// each step costs one opening (due once, then held back again at once), the strikes never grow,
-    /// and once the clock runs on the message is held back for the same 20 min from the last, lowest
-    /// reading and not a tick longer.
+    /// each step costs one opening (due once, then held back again at once), no step adds a strike,
+    /// and once the clock runs on the message is held back for the same 20 min, counted from the
+    /// last, lowest reading, and not a tick more.
     /// </summary>
     [Fact]
-    public void A_clock_that_keeps_stepping_back_costs_one_opening_per_step_and_never_a_longer_pause()
+    public void A_clock_that_steps_back_five_times_costs_one_opening_per_step_and_the_pause_keeps_its_length()
     {
         var (clock, memory) = WithTwoStrikes("q1");
 
@@ -192,9 +195,10 @@ public sealed class SlowMemoryClockStepTests
     }
 
     /// <summary>
-    /// A clock whose every reading is one second lower than the one before: the message is never held
-    /// back (I-12: the memory fails open), however often it fails, and no failure adds a strike. Once
-    /// the readings are steady again it is held back for the same 20 min from the lowest reading.
+    /// A clock whose every reading is one second lower than the one before: at each of five
+    /// deliveries the message is not held back (I-12: the memory fails open) and fails, and no failure
+    /// adds a strike. Once the readings are steady again it is held back for the same 20 min from
+    /// the lowest reading.
     /// </summary>
     [Fact]
     public void A_clock_whose_readings_keep_falling_never_holds_back_and_adds_no_strike()
@@ -222,8 +226,8 @@ public sealed class SlowMemoryClockStepTests
     /// <summary>
     /// A clock that steps forward. Inside the pause it changes nothing: the message stays held back,
     /// and a failure reported there adds no strike (RT1B-2). Past the pause's end the message is due
-    /// at once, never held back longer; a failure then is a new episode, with the next pause counted
-    /// from the stepped reading.
+    /// at once; a failure then is a new episode, with the next pause counted from the stepped
+    /// reading.
     /// </summary>
     [Fact]
     public void A_clock_that_steps_forward_ends_the_pause_no_later_and_a_failure_after_it_is_a_new_strike()
@@ -242,7 +246,7 @@ public sealed class SlowMemoryClockStepTests
 
         var stepped = Start + TimeSpan.FromHours(2); // a step forward, past the pause
         clock.Now = stepped;
-        Held(memory, "q1").Should().BeFalse("past its pause: due, never held back longer");
+        Held(memory, "q1").Should().BeFalse("past its pause: due");
         memory.Strike(Bob, "q1"); // it fails again: a new episode
 
         clock.Now = stepped + memory.PauseAfter(2) - Tick;
