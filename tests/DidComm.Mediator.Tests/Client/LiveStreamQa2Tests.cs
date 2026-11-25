@@ -254,6 +254,27 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// The driver's seams once the stream has ended: a failure thrown into the stream from the
+    /// exchange ends the enumeration, and its state machine lets go of the stream object. Reading
+    /// the driver's seams then throws nothing: the stream is reported as ended, with the exception
+    /// it ended with, so a test whose stream ended early shows that and not a null dereference in
+    /// its own print line.
+    /// </summary>
+    [Fact]
+    public async Task Reading_the_drivers_seams_after_the_stream_has_ended_says_so_and_throws_nothing()
+    {
+        var exchange = new SimExchange();
+        exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r => r.Live ? throw new InvalidOperationException("ended by the test") : Status(r, live: false));
+        await using var driver = new StreamDriver(exchange);
+        await driver.RunAsync(() => false, TimeSpan.FromMinutes(1));
+
+        driver.EndedWith.Should().BeOfType<InvalidOperationException>("the failure thrown into the stream ended it");
+        var read = () => driver.Reported;
+        read.Should().NotThrow("the stream has ended, and the driver says so");
+        output.WriteLine($"after the stream ended with {driver.EndedWith?.GetType().Name}: reported {driver.Reported}");
+    }
+
+    /// <summary>
     /// The driver's model, forced (why the row of the test above that ends at 91 s once failed in
     /// fifty runs): in that row the give-up alarm and the back-off alarm are due at the same instant.
     /// Here the stream is made to react to the first of them (it wakes, finds nothing to do and
@@ -401,8 +422,8 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         exchange.Log.Where(r => r.At <= TenMinutes).Select(r => r.At).Should().Equal(expected,
             "one request per back-off, and the back-off grows to 30 s however often pushes come (owner decision B1)");
         sent.Should().Be(24);
-        driver.Stream.TakenCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken);
-        driver.Stream.HeldCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken + LiveRegistration.PushCapacity + LiveDeliveryStream.MaxPerDelivery);
+        driver.Stream!.TakenCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken);
+        driver.Stream!.HeldCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken + LiveRegistration.PushCapacity + LiveDeliveryStream.MaxPerDelivery);
     }
 
     // ---- I-19: the drain's end --------------------------------------------------------------------

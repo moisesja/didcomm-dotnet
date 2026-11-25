@@ -649,19 +649,25 @@ internal sealed class StreamDriver : IAsyncDisposable
         }
     }
 
-    /// <summary>The stream object behind the enumeration (for its test seams).</summary>
-    public LiveDeliveryStream Stream
+    /// <summary>
+    /// The stream object behind the enumeration (for its test seams), or <c>null</c> once the
+    /// enumeration has ended: its state machine then holds the stream no longer.
+    /// </summary>
+    public LiveDeliveryStream? Stream
     {
         get
         {
             var member = _stream.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
                 .Single(f => f.FieldType == typeof(LiveDeliveryStream));
-            return (LiveDeliveryStream)member.GetValue(_stream)!;
+            return (LiveDeliveryStream?)member.GetValue(_stream);
         }
     }
 
-    /// <summary>How many ids the stream remembers for the current drain: yielded as failures, or taken (its test seam).</summary>
-    public int Reported => Stream.DoneThisDrainCount;
+    /// <summary>How many ids the stream remembers for the current drain: yielded as failures, or taken (its test seam); 0 once the stream has ended.</summary>
+    public int Reported => Stream?.DoneThisDrainCount ?? 0;
+
+    /// <summary>How many taken messages wait for an acknowledgement (the stream's test seam), as text for a printed line; "the stream has ended" once it has.</summary>
+    public string TakenText => Stream is { } stream ? stream.TakenCount.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the stream has ended";
 
     /// <summary>Stop the stream: cancel, observe the pending move, dispose (which acknowledges and turns live mode off).</summary>
     public async ValueTask DisposeAsync()
