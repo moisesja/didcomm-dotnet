@@ -40,12 +40,11 @@ internal sealed record Qa1Reach(
 /// <para>
 /// <strong>The host's lookups, as modelled.</strong> A lookup that honours its token has ended
 /// before the host's next fetch is answered. A host call keeps its reservation until it ends, and
-/// one whose token was cancelled ends a moment after its delivery's result is set: where its
-/// continuation runs is the scheduler's choice, and under a test's synchronization context it is the
-/// thread pool. So the loop runs, and moves the clock, on a thread-pool thread of its own (no
-/// synchronization context: a cancelled wait then ends its call inside the cancellation), and before
-/// each fetch it waits until no reservation is held: the event "every host call of the fetches
-/// before has ended", not a neighbour of it. Without that wait a fetch can
+/// one whose token was cancelled can end after its delivery's result is set (nothing makes its
+/// continuation run inside the cancellation). So before each fetch the loop waits until no reservation is held: the event "every host call of
+/// the fetches before has ended", not a neighbour of it. The loop runs, and moves the clock, on a
+/// thread-pool thread of its own, so nothing here depends on a test's synchronization context
+/// (L-078). Without that wait a fetch can
 /// start while calls of the fetch before still hold reservations; with sixteen opened at once
 /// against a bound of sixteen per partition, messages of the new delivery are then refused for that
 /// bound, and the figures depend on the thread pool. What a delivery does when it does arrive
@@ -67,8 +66,7 @@ internal static class Qa1Loop
     /// <param name="whileHostCallsEnd">Runs each time the loop sees a reservation still held before a fetch (a test's gate).</param>
     public static Task<Qa1Reach> RunAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", bool waitForHostCallsToEnd = true, Action? whileHostCallsEnd = null)
         // On a thread-pool thread, so the clock is moved, and every budget ended, from a thread
-        // without a test's synchronization context (L-078): a host call whose wait is cancelled
-        // there ends inside the cancellation, before the delivery's result is set.
+        // without a test's synchronization context (L-078).
         => Task.Run(() => LoopAsync(exchange, mediator, limit, cap, honest, waitForHostCallsToEnd, whileHostCallsEnd));
 
     private static async Task<Qa1Reach> LoopAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest, bool waitForHostCallsToEnd, Action? whileHostCallsEnd)
