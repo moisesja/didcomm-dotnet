@@ -41,10 +41,10 @@ internal sealed record Qa1Reach(
 /// <strong>The host's lookups, as modelled.</strong> A lookup that honours its token has ended
 /// before the host's next fetch is answered. A host call keeps its reservation until it ends, and
 /// one whose token was cancelled can end after its delivery's result is set (nothing makes its
-/// continuation run inside the cancellation). So before each fetch the loop waits until no reservation is held: the event "every host call of
-/// the fetches before has ended", not a neighbour of it. The loop runs, and moves the clock, on a
-/// thread-pool thread of its own, so nothing here depends on a test's synchronization context
-/// (L-078). Without that wait a fetch can
+/// continuation run inside the cancellation). So before each fetch the loop waits until no
+/// reservation is held: the event "every host call of the fetches before has ended", not a
+/// neighbour of it. The loop runs, and moves the clock, on a thread-pool thread of its own, so
+/// nothing here depends on a test's synchronization context (L-078). Without that wait a fetch can
 /// start while calls of the fetch before still hold reservations; with sixteen opened at once
 /// against a bound of sixteen per partition, messages of the new delivery are then refused for that
 /// bound, and the figures depend on the thread pool. What a delivery does when it does arrive
