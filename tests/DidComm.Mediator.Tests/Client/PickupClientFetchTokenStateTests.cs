@@ -104,14 +104,11 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
     /// A fetch whose request is still being sent when the caller cancels, the request's deadline
     /// passes or the container is disposed; the transport reports the cancellation of its token as a
     /// transport failure, from inside its cancellation callback (registered once the fetch waits on
-    /// the send). The fetch ends as the cancellation, the deadline or the disposal does.
+    /// the send). The fetch ends as the cancellation, the deadline or the disposal does: the channel
+    /// decides by whether the request is being ended when it observes the failure, not by the
+    /// exception's type (<c>MediatorClientChannelTokenStateTests</c> has the channel's own calls).
     /// </summary>
-    /// <remarks>
-    /// Skipped: as measured in #111's fix round 2, the fetch ends with the transport's
-    /// <see cref="TransportException"/> in all three cases. The request path of the channel
-    /// (<c>MediatorClientChannel</c>) is shared by every mediator request and was not changed there.
-    /// </remarks>
-    [Theory(Skip = "The channel's request path decides by the exception's type: a failure the transport reports after its token was cancelled is returned as that failure")]
+    [Theory]
     [InlineData(Ending.CallerCancels)]
     [InlineData(Ending.RequestTimesOut)]
     [InlineData(Ending.ContainerDisposed)]
@@ -159,7 +156,8 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
                 ended.Should().BeAssignableTo<OperationCanceledException>("the caller cancelled the fetch");
                 break;
             case Ending.RequestTimesOut:
-                ended.Should().BeOfType<TimeoutException>("the request's deadline passed");
+                ended.Should().BeOfType<TimeoutException>("the request's deadline passed")
+                    .Which.Message.Should().Contain(send.Calls.Single().Message.Id, "it is the request's own timeout, not this test's hang guard");
                 break;
             default:
                 ended.Should().BeOfType<ObjectDisposedException>("the container was disposed");
