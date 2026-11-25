@@ -17,8 +17,9 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>Not every failed item has been tried.</strong> When <see cref="NotAttempted"/> is
 /// <c>true</c>, the client did not try to open the message in this delivery and knows nothing about
-/// it. Do not discard such an item: it is delivered again and tried then. A host that discards every
-/// failed item it is handed also deletes messages that nobody has tried to open.
+/// it. Do not discard such an item: it is delivered again and tried then (<see cref="NotAttempted"/>
+/// says when it can come back not attempted once more). A host that discards every failed item it is
+/// handed also deletes messages that nobody has tried to open.
 /// </para>
 /// <para>
 /// <strong>Who sent it.</strong> The message in <see cref="Unpacked"/> was delivered encrypted, but
@@ -95,7 +96,8 @@ public sealed class PickupItem
     /// <summary>
     /// <c>true</c> when the client did not try to open this message in this delivery, and so knows
     /// nothing about it. Leave such an item queued: do not discard it with
-    /// <see cref="PickupClient.AckAsync"/>. It is delivered again and tried then.
+    /// <see cref="PickupClient.AckAsync"/>. It is delivered again, and tried then unless what kept it
+    /// from being tried is still in its way (see the remarks).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -113,20 +115,22 @@ public sealed class PickupItem
     /// <para>
     /// It is <c>false</c> for every other item: one that opened; one that failed on its own; one
     /// that ran out of time while it was being opened; one that was not opened again because it did
-    /// not open when it was delivered before; and one that is not a message this client opens at all
+    /// not open when it was delivered before; one a <c>recipientDid</c> filter turned away ("for
+    /// another of your DIDs": it opened); and one that is not a message this client opens at all
     /// (malformed, or not a DIDComm message in encrypted form). A message the client started to open
     /// counts as tried from the moment the client handed it to the thread pool, even when the time
     /// ran out before your resolvers were called for it.
     /// </para>
     /// <para>
     /// <strong>What to do with it.</strong> Nothing: the mediator keeps the message and delivers it
-    /// again (after its lease, 60 seconds at this library's mediator), and the client tries it then.
-    /// A message that ran out of time before its turn gets its turn once the messages that were in
-    /// front of it are gone or are no longer opened (the ones that did not open are remembered, or
-    /// you discarded them). A message refused for capacity is tried once the openings that were in
-    /// its way have ended; while they have not (a DID resolver that ignores cancellation can keep
-    /// them running), it comes back not attempted again. Discarding such an item deletes a message
-    /// nobody has tried to open, which may be an honest sender's.
+    /// again (after its lease, 60 seconds at this library's mediator; a mediator that does not set
+    /// delivered messages aside delivers it again at the next fetch). A message that ran out of time
+    /// before its turn is tried once the messages that were in front of it are gone or are no
+    /// longer opened (the ones that did not open are remembered, or you discarded them); until then
+    /// it can come back not attempted again. A message refused for capacity is tried once the
+    /// openings that were in its way have ended; while they have not (a DID resolver that ignores
+    /// cancellation can keep them running), it comes back not attempted again. Discarding such an
+    /// item deletes a message nobody has tried to open, which may be an honest sender's.
     /// </para>
     /// </remarks>
     public bool NotAttempted { get; }

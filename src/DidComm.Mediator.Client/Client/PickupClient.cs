@@ -395,7 +395,9 @@ public sealed class PickupClient
     /// your queue on every fetch: a loop then reaches only what is within <paramref name="limit"/> of
     /// it. Discard what keeps failing with <see cref="AckAsync"/> (not an item whose
     /// <see cref="PickupItem.NotAttempted"/> is <c>true</c>); meanwhile, fetches that meet only
-    /// remembered messages take no time and run none of your code.</description></item>
+    /// remembered messages take no time and run none of your code. An item that was refused for
+    /// capacity comes again with the very next fetch there, and that fetch takes no time either: when
+    /// a fetch brings nothing but such items, wait before you fetch again.</description></item>
     /// <item><description>A message refused under a <paramref name="recipientDid"/> filter ("for
     /// another of your DIDs") is not remembered: it is opened again each time it comes.</description></item>
     /// <item><description>Up to 256 openings per container can be held by host code that never
