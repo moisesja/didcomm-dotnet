@@ -480,6 +480,39 @@ public sealed class DeliveredUnpackInconclusiveTests
         unpacker.Memory.HeldBack(Bob, new[] { "front", Target }).Should().Equal(new[] { true, false }, "the target is not struck, though its start reading is within the start allowance");
     }
 
+    /// <summary>
+    /// What the rule leaves as the memory has it (R-14): a message that never opens and whose host
+    /// call waits for a thread longer than the start allowance in every delivery (the clock moves on
+    /// between each budget's start and the start of its code) is cut at the budget's end every time
+    /// without having had the whole budget. In each of ten deliveries its outcome is inconclusive,
+    /// it is started again, and nothing is remembered.
+    /// </summary>
+    [Fact]
+    public async Task A_message_that_never_opens_and_whose_code_starts_late_in_every_delivery_is_inconclusive_every_time_and_never_remembered()
+    {
+        var inner = new ManualTimeProvider();
+        var clock = new UnpackClock(inner);
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(StallUntilCancelled(calls), Budget, clock);
+        var late = unpacker.StartAllowance + TimeSpan.FromTicks(1);
+        clock.AfterTimerCreated = _ => inner.Advance(late); // each delivery's only timer is its budget
+
+        for (var delivery = 1; delivery <= 10; delivery++)
+        {
+            var opening = unpacker.UnpackAllAsync(Bob, new[] { Anon(Target) }, $"request-{delivery}", default);
+            await calls.WaitForAsync(delivery, RealTime);
+            inner.Advance(Budget - late);
+            var outcome = (await opening.WaitAsync(RealTime)).Single();
+            SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
+
+            outcome.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("while it was being opened");
+            outcome.Inconclusive.Should().BeTrue("delivery {0}: its code started later than the start allowance", delivery);
+            unpacker.Memory.Count.Should().Be(0, "delivery {0}: it did not have the whole budget", delivery);
+        }
+
+        calls.Count.Should().Be(10, "it was started in every delivery");
+    }
+
     // ---- the kinds ------------------------------------------------------------------------------
 
     private static Task<Scenario> BuildAsync(Kind kind)
