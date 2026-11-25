@@ -14,7 +14,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// <summary>
 /// The one correlation channel of a container (design D-2, §3.2, §4.1–4.3): the bounded pending
 /// map, the matcher (identity before lookup, D-7), route resolution, the live-stream registry, the
-/// duplicate filter, the version caches and the unpack limiter. It is the
+/// duplicate filter, the version caches and the unpacker of delivered messages. It is the
 /// <see cref="IInboundCorrelator"/> the dispatcher hands every verified inbound to (DI only), and
 /// the <see cref="IMediatorExchange"/> both facades are built over. Owner: engineer A.
 /// </summary>
@@ -70,7 +70,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>What a send or an endpoint lookup throws.</strong> It is judged by whether the call is
-/// being ended when the channel observes it, never by the exception's type. A call is being ended
+/// being ended when the channel observes it, never by the exception's type (I-22). A call is being ended
 /// when its deadline's token is cancelled (the deadline passed, the caller cancelled or the channel
 /// was disposed), when the caller's token is cancelled, or when the channel is disposed. The last
 /// two are read as well: each cancels the deadline's token through a callback of its own, and a
@@ -84,7 +84,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// it is, with one exception: when the answer to a request had already won before its send failed,
 /// the answer is returned (and the failure is named in a Debug line, by its type only). The same
 /// terminal compare-and-swap decides between the two, so an answer that arrives after the send
-/// failed is not taken.
+/// failed is not taken (I-25).
 /// </para>
 /// <para>
 /// <strong>The token host code is handed.</strong> The channel reads the token it was given, its own
@@ -92,7 +92,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// watch the token it is handed. Host code that watches another token instead (one of two that a
 /// caller combined into the call's token, for example) and reports that token's cancellation as a
 /// failure of its own may do so before any token the channel can read is cancelled: the call then
-/// ends with that failure, not as a cancellation (a documented residual).
+/// ends with that failure, not as a cancellation (a documented residual, R-16).
 /// </para>
 /// <para>
 /// <strong>Log levels.</strong> A drop that points at a mediator problem is a Warning (the first and
@@ -210,10 +210,11 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
 
     /// <summary>
     /// The unpacker behind <see cref="UnpackDeliveredBatchAsync"/>, one per channel (container) and
-    /// linked to this channel's shutdown: one budget per delivery, 4 messages at a time, each a share
-    /// of the time left; host unpack calls reserved before they start (256 per container, 4 per
-    /// sender and 16 for messages without a named sender, per mediator and mailbox); and the memory
-    /// of messages that did not open, held back until their pause ends.
+    /// linked to this channel's shutdown: one budget per delivery, up to sixteen messages at a time,
+    /// each until it opens, fails or the budget ends (I-23); host unpack calls reserved before they
+    /// start (256 per container, and per mediator and mailbox 16 per sender and 16 for messages
+    /// without a named sender); and the memory of messages that did not open, held back until their
+    /// pause ends.
     /// </summary>
     internal DeliveredMessageUnpacker Unpacker { get; }
 

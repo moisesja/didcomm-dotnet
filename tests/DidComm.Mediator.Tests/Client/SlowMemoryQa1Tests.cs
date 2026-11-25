@@ -11,8 +11,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// QA-1 for #111 at the unpacker: the memory at its real bounds (256 entries per mailbox, 256
 /// mailboxes), with what an eviction costs measured as the extra openings at the next delivery; the
 /// pause doubling to its cap and a message forgotten once it opens; which outcomes are remembered
-/// (a failure at the slow threshold and one tick under it, malformed messages, refusals, messages
-/// not started, the caller's cancellation and the shutdown); and an honest sender whose real message
+/// (a failure of its own whatever its duration, malformed messages, refusals, messages not
+/// started, the caller's cancellation and the shutdown); and an honest sender whose real message
 /// follows messages naming its key. Manual clocks only.
 /// </summary>
 public sealed class SlowMemoryQa1Tests

@@ -8,28 +8,37 @@ namespace DidComm.Mediator.Client.Internal;
 
 /// <summary>
 /// The memory of delivered messages that did not open (#111, I-9..I-12, D-2, D-3, D-8): per
-/// (mediator, mailbox), the mediator's attachment ids of messages whose unpack ran and failed, or ran
-/// for its share and was cut (the unpacker decides, I-9), each with a pause that doubles each time it
-/// does so again. While
-/// its pause lasts, a remembered message is not opened again (<see cref="HeldBack"/>), so a delivery
-/// made only of such messages ends at once and a fetch loop reaches what is behind them.
+/// (mediator, mailbox), the mediator's attachment ids of messages whose unpack ran and failed on
+/// its own, or had the whole budget and did not open (the unpacker decides: S1 and S2, I-9), each
+/// with a pause that doubles each time it does so again. While its pause lasts, a remembered message
+/// is not opened again (<see cref="HeldBack"/>), so a delivery made only of such messages ends at
+/// once and a fetch loop reaches what is behind them.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>What an entry counts:</strong> how many times the message was slow (its strikes) and the
-/// clock reading its pause is counted from (<c>struckAt</c>: the last strike's, or a lower one read
-/// at a repeat failure after the clock stepped back). It is written only by the outcome of an unpack
-/// the client timed itself (<see cref="Strike"/>), and removed when the message opens
+/// <strong>What an entry counts:</strong> how many times the message did not open (its strikes) and
+/// the clock reading its pause is counted from (<c>struckAt</c>: the last strike's, or a lower one
+/// read at a repeat failure after the clock stepped back). It is written only by the unpacker, from
+/// an outcome it observed itself (<see cref="Strike"/>), and removed when the message opens
 /// (<see cref="Forget"/>). Nothing a sender writes enters a key or decides a write.
 /// </para>
 /// <para>
 /// <strong>The pause:</strong> a message is held back while
 /// <c>struckAt ≤ now &lt; struckAt + min(cap, t0 · 2^(strikes − 1))</c>. A reading below
-/// <c>struckAt</c> (a clock that stepped back) counts as due: a clock step can cost one more opening,
-/// never lock a message out (I-12). When that opening fails too, it is the same slow episode, not a
-/// new one (<see cref="Strike"/>): the entry keeps its strikes and is stamped with the lower reading,
-/// so the message is held back for the same pause again, counted from there, not for the next,
-/// doubled one.
+/// <c>struckAt</c> (a clock that stepped back) counts as due (I-12), so after a step back the message
+/// is opened once more
+/// (<c>SlowMemoryTests.M2_a_reading_below_the_strikes_is_due_and_a_stepped_back_clock_never_holds_back_past_the_pause</c>).
+/// When that opening fails too, it is the same episode, not a new one (<see cref="Strike"/>): the
+/// entry keeps its strikes and is stamped with the lower reading, so the message is held back for
+/// the same pause again, counted from that failure, not for the next, doubled one
+/// (<c>SlowMemoryClockStepTests.A_repeat_failure_read_below_the_last_strike_keeps_the_strikes</c>,
+/// <c>…A_repeat_failure_read_below_the_last_strike_is_stamped_with_the_lower_reading</c>;
+/// <c>SlowMemoryRt2BTests.After_a_clock_step_back_a_message_that_fails_again_is_held_back_for_the_same_pause_again_and_not_for_the_doubled_one</c>).
+/// So a step back can make a message due later than without it: in the measured case half a minute
+/// later, at minute 30.5 instead of minute 30
+/// (<c>SlowMemoryClockStepTests.After_a_step_back_the_message_is_due_one_pause_after_its_repeat_failure</c>).
+/// Each further step back costs one more opening
+/// (<c>…A_clock_that_steps_back_five_times_costs_one_opening_per_step_and_the_pause_keeps_its_length</c>).
 /// </para>
 /// <para>
 /// <strong>Keys (D-3, D-8):</strong> a partition is SHA-256, truncated to 128 bits, over the mediator's
@@ -43,9 +52,24 @@ namespace DidComm.Mediator.Client.Internal;
 /// partition goes. Both orders come from a sequence counter, never from a clock. What an eviction
 /// costs: one more opening of that message when it is delivered again, as after a restart (the
 /// memory is in-process only). With more than <c>q</c> messages that never open queued in one
-/// mailbox the evictions never stop, so the memory cannot hold them all paused at once and a fetch
-/// loop alone does not reach the message behind them; the host's <c>AckAsync</c> does (R-4). A
-/// partition whose last entry is forgotten is removed.
+/// mailbox, each new entry evicts one, so they are not all held back at once and a fetch loop alone
+/// does not reach the message behind them; a host that discards the failed items it has given up
+/// on with <c>AckAsync</c>, never an inconclusive one, does
+/// (R-4:
+/// <c>SlowSenderFetchQa1Tests.Residual_the_message_behind_more_never_opening_messages_than_the_memory_keeps_is_reached_once_the_host_discards_them</c>).
+/// A partition whose last entry is forgotten is removed.
+/// </para>
+/// <para>
+/// <strong>What the memory does not outlast (R-5):</strong> it lives in the process, and its longest
+/// pause is <c>cap</c> (256 budgets in production, about 85 minutes at the default budget). With
+/// sixteen or more messages that never open in front of another in one delivery, deliveries further
+/// apart than that pause (a loop run every two hours; a lease of two hours) or a new process for
+/// each loop find nothing held back, open the sixteen again, and do not return the message behind
+/// them: not in twelve runs, and not in two simulated days
+/// (<c>SlowSenderSpacedDeliveriesRt3Tests.Residual_with_sixteen_or_more_in_front_in_one_delivery_and_deliveries_further_apart_than_the_longest_pause_or_a_new_process_each_time_the_message_behind_is_not_returned</c>).
+/// Run again five minutes later in the same process, a fetch loop returns it in its second run
+/// (<c>…With_sixteen_or_more_in_front_in_one_delivery_a_fetch_loop_run_every_five_minutes_in_one_process_returns_the_message_behind_them_in_its_second_run</c>).
+/// This library's mediator delivers at most ten per fetch, so it takes another mediator.
 /// </para>
 /// <para>
 /// One leaf lock protects the partitions and the counter: no other lock is taken while it is held,
@@ -124,7 +148,7 @@ internal sealed class SlowMemory
     /// <summary>
     /// The pause after <paramref name="strikes"/> strikes: <c>min(cap, t0 · 2^(strikes − 1))</c>.
     /// </summary>
-    /// <param name="strikes">How many times the message was slow (at least 1).</param>
+    /// <param name="strikes">How many times the message did not open (at least 1).</param>
     internal TimeSpan PauseAfter(int strikes)
     {
         var ticks = _t0.Ticks;
@@ -172,10 +196,10 @@ internal sealed class SlowMemory
     }
 
     /// <summary>
-    /// Remember that the message <paramref name="id"/> was slow: a new entry with one strike, or one
-    /// more strike on the entry it has, stamped with the clock's reading now. Two cases add no strike,
-    /// because they are the slow episode the entry already counts. An entry still inside its pause is
-    /// left as it is: deliveries of the same message that ran at the same time saw one slow episode
+    /// Remember that the message <paramref name="id"/> did not open: a new entry with one strike, or
+    /// one more strike on the entry it has, stamped with the clock's reading now. Two cases add no
+    /// strike, because they are the episode the entry already counts. An entry still inside its pause
+    /// is left as it is: deliveries of the same message that ran at the same time saw one episode
     /// (RT1B-2). An entry whose last strike was stamped with a higher reading than now (a host clock
     /// that stepped back, or two deliveries whose readings reach the memory out of order) keeps its
     /// strikes and is stamped with the reading now, so its pause, of the same length, is counted from

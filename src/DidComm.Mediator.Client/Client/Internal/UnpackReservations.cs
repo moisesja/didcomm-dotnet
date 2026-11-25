@@ -27,6 +27,17 @@ namespace DidComm.Mediator.Client.Internal;
 /// token was cancelled before it ran); or directly when the work item is never created.
 /// </para>
 /// <para>
+/// <strong>What a reservation still held does to the next delivery (R-13):</strong> a call whose
+/// token was cancelled keeps its reservation until it ends, and a call that never got a thread keeps
+/// it until the thread pool reaches its cancelled work item
+/// (<c>InconclusiveBusyPoolRt4Tests.A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after</c>).
+/// A delivery that arrives before that finds the partition's count where the delivery before left
+/// it, and <see cref="TryTake"/> refuses its messages of that partition beyond the reservations
+/// still free (they are inconclusive); other partitions are not affected
+/// (<c>DeliveredUnpackNextDeliveryRt3Tests.While_the_lookups_of_the_delivery_before_are_still_ending_the_next_delivery_starts_what_the_bound_of_sixteen_leaves_free_and_refuses_the_rest</c>,
+/// <c>…While_one_senders_lookups_of_the_delivery_before_are_still_ending_another_senders_message_opens_and_nothing_more_is_remembered</c>).
+/// </para>
+/// <para>
 /// One leaf lock protects the total and the per-partition counts: no other lock is taken while it is
 /// held, and no host code runs under it. A partition's entry is removed when its count reaches zero,
 /// so the table never holds more than <see cref="MaxReserved"/> entries. One instance per unpacker,
@@ -45,7 +56,7 @@ internal sealed class UnpackReservations
 
     /// <summary>
     /// P for a named sender: host unpack calls started and not yet ended per (mediator, mailbox,
-    /// sender DID): 16 (#111, owner decision G). Not below
+    /// sender DID): 16 (#111, owner decision G; I-23). Not below
     /// <see cref="DeliveredMessageUnpacker.FetchConcurrency"/>, how many messages one delivery opens
     /// at once, and the two change together: with a lower bound, messages of one sender are refused
     /// inside one delivery.
