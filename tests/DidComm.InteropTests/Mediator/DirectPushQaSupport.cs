@@ -56,7 +56,15 @@ internal sealed class DirectPushInbox : IAsyncDisposable
             {
                 if (endpoint.Gate is { } gate)
                 {
-                    await Task.WhenAny(gate.Task, Task.Delay(MediatorTestServer.Timeout, context.RequestAborted));
+                    // Held until the gate opens (disposing the inbox opens every gate) or the client
+                    // goes away, never for a length of time.
+                    try
+                    {
+                        await gate.Task.WaitAsync(context.RequestAborted);
+                    }
+                    catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                    {
+                    }
                     // A client that went away (a push abandoned at its deadline) gets no answer at
                     // all, as from a server that never answers: never a status it could read as one.
                     if (context.RequestAborted.IsCancellationRequested)
