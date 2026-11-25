@@ -65,7 +65,7 @@ public sealed class SlowSenderFetchQa1Tests
         first.Items.Single(i => i.Id == "honest").Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("before its turn came");
         exchange.Host.Calls.Labels.Take(16).Should().OnlyContain(l => l.StartsWith("junk-", StringComparison.Ordinal));
         second.Items.Single(i => i.Id == "honest").Unpacked.Should().NotBeNull("the sixteen are held back, so the honest message gets its turn");
-        second.Items.Take(16).Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("slow to open when it was delivered before"));
+        second.Items.Take(16).Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("did not open when it was delivered before"));
         exchange.Wire.AcknowledgedIds.Should().Equal("honest");
     }
 
@@ -117,7 +117,8 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// ADV3-3 through a fetch: an honest message first, whose lookup takes 4.9 s, ahead of 99 that
     /// fail at once; and an honest message last whose lookup takes 15 s, behind 99 that fail at once.
-    /// Both open; nothing is remembered.
+    /// Both open, and the honest message is not remembered; the 99 that failed are (owner decision C:
+    /// every failure, whatever its duration).
     /// </summary>
     [Theory]
     [InlineData(0, 4.9)]
@@ -132,7 +133,8 @@ public sealed class SlowSenderFetchQa1Tests
 
         batch.Items.Single(i => i.Id == "honest").Unpacked.Should().NotBeNull();
         batch.Items.Where(i => i.Id != "honest").Should().OnlyContain(i => i.Error is CryptoException);
-        exchange.Unpacker.Memory.Count.Should().Be(0, "a failure that cost less than the slow threshold is not remembered, and an opened message is forgotten");
+        exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { "honest" }).Single().Should().BeFalse("an opened message is forgotten");
+        exchange.Unpacker.Memory.Count.Should().Be(99, "every failure is remembered, whatever its duration");
     }
 
     /// <summary>
@@ -330,7 +332,8 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// Honest senders whose lookups take 2 s among messages that fail at once, in one fetch of 100:
     /// with 25 honest every one opens; with 50 those that do not open fail only before their turn
-    /// (out of budget), never while being opened. Nothing is remembered either way.
+    /// (out of budget), never while being opened. No honest message is remembered either way; the
+    /// failures are.
     /// </summary>
     [Theory]
     [InlineData(25)]
@@ -353,7 +356,8 @@ public sealed class SlowSenderFetchQa1Tests
         honestItems.Should().OnlyContain(i => i.Unpacked != null || (i.Error is TimeoutException && i.Error.Message.Contains("before its turn came")));
         if (honest == 25)
             honestItems.Should().OnlyContain(i => i.Unpacked != null);
-        exchange.Unpacker.Memory.Count.Should().Be(0);
+        exchange.Unpacker.Memory.HeldBack(Qa1.Bob, honestItems.Select(i => (string?)i.Id).ToArray()).Should().OnlyContain(h => !h, "an honest message that opened is forgotten, and one that did not start is never remembered");
+        exchange.Unpacker.Memory.Count.Should().Be(batch.Items.Count(i => i.Error is CryptoException), "every failure is remembered");
     }
 
     /// <summary>
@@ -392,7 +396,8 @@ public sealed class SlowSenderFetchQa1Tests
         var batch = await exchange.DriveAsync(() => exchange.Client().FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100));
 
         batch.Items[0].Unpacked.Should().NotBeNull();
-        exchange.Unpacker.Memory.Count.Should().Be(0);
+        exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { "honest" }).Single().Should().BeFalse();
+        exchange.Unpacker.Memory.Count.Should().Be(99, "the failures are remembered");
     }
 
     /// <summary>
@@ -414,7 +419,8 @@ public sealed class SlowSenderFetchQa1Tests
 
         var elapsed = exchange.Clock.TrueNow - start;
         batch.Items[0].Error.Should().BeNull("the {0} others failed at once, so {1} of the budget was left when it was cut", limit - 1, B - elapsed);
-        exchange.Unpacker.Memory.Count.Should().Be(0);
+        exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { "honest" }).Single().Should().BeFalse();
+        exchange.Unpacker.Memory.Count.Should().Be(limit - 1, "the failures are remembered");
     }
 
     // ---- an honest slow sender with messages naming its key (D-13) ---------------------------------

@@ -314,7 +314,7 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
             items.Select(i => i.Id).Should().Equal(Enumerable.Range(0, 10).Select(i => $"s{i}"), "each message once per poll");
             items.Should().OnlyContain(i => i.Error is TimeoutException);
             if (p > 0)
-                items.Should().OnlyContain(i => i.Error!.Message.Contains("slow to open"), "remembered from the first poll");
+                items.Should().OnlyContain(i => i.Error!.Message.Contains("did not open when it was delivered before"), "remembered from the first poll");
         }
         exchange.HostCalls.Should().Be(10, "only the first poll opened them");
         (polls[1] - polls[0]).Should().Be(Budget + exchange.Options.LivePollInterval, "the first poll's drain took the budget");
@@ -470,7 +470,7 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         });
 
         driver.Items.Select(i => i.Item.Id).Should().Equal("P1", "p1", "P1");
-        driver.Items[0].Item.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("slow to open");
+        driver.Items[0].Item.Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("did not open when it was delivered before");
         driver.Items[0].At.Should().Be(TimeSpan.Zero, "no time passed");
         driver.Items[1].Item.Error.Should().BeNull("an id in another case is another message");
         driver.Items[2].Item.Error.Should().BeNull("its pause ended");
@@ -499,7 +499,7 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         await driver.RunAsync(() => driver.Items.Count >= 10, TimeSpan.FromMinutes(1));
 
         driver.Items.Select(i => i.Item.Id).Should().Equal("k0", "k1", "k2", "k3", "k4", "h0", "h1", "h2", "h3", "h4");
-        driver.Items.Take(5).Should().OnlyContain(i => i.Item.Error is TimeoutException && i.Item.Error.Message.Contains("slow to open"));
+        driver.Items.Take(5).Should().OnlyContain(i => i.Item.Error is TimeoutException && i.Item.Error.Message.Contains("did not open when it was delivered before"));
         driver.Items.Skip(5).Should().OnlyContain(i => i.Item.Error == null);
         driver.Items.Should().OnlyContain(i => i.At == TimeSpan.Zero, "no time passed");
         exchange.Opened.Should().BeEquivalentTo(Enumerable.Range(0, 5).Select(i => $"ok:h{i}"));

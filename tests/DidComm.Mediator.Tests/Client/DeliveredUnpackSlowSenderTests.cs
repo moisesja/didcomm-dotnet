@@ -109,50 +109,95 @@ public sealed class DeliveredUnpackSlowSenderTests
     // ---- what is remembered (I-9) ------------------------------------------------------------
 
     /// <summary>
-    /// T4 (I-9, D-6): a message whose host call failed after 4.9 s is remembered and held back at its
-    /// next delivery; one that failed after 0.5 s (under the 0.6 s slow threshold) is not, and is
-    /// opened again.
+    /// T4 (I-9 as amended, owner decision C): a message whose host call fails on its own is remembered
+    /// whatever the duration, one failing after 1 tick and one after 4.9 s alike; at its next delivery
+    /// each is held back without being opened.
     /// </summary>
     [Fact]
-    public async Task A_failure_that_cost_the_slow_threshold_is_remembered_and_a_quicker_one_is_not()
+    public async Task A_failure_is_remembered_whatever_its_duration()
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
         var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
-            var delay = Task.Delay(label == "slow" ? TimeSpan.FromSeconds(4.9) : TimeSpan.FromSeconds(0.5), time, ct);
+            var delay = Task.Delay(label == "slow" ? TimeSpan.FromSeconds(4.9) : TimeSpan.FromTicks(1), time, ct);
             using (calls.Enter(label, ct))
                 await delay;
             throw new CryptoException("JWE could not be decrypted.");
         }, Budget, time);
-        unpacker.SlowThreshold.Should().Be(TimeSpan.FromSeconds(0.6));
         var messages = new[] { Message(TestJwe.Authcrypt(AliceKid, "slow"), "slow"), Message(TestJwe.Authcrypt(AliceKid, "quick"), "quick") };
 
         var first = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
         await calls.WaitForAsync(2, RealTime);
-        time.Advance(TimeSpan.FromSeconds(0.5));
-        time.Advance(TimeSpan.FromSeconds(4.4));
+        time.Advance(TimeSpan.FromTicks(1));
+        time.Advance(TimeSpan.FromSeconds(4.9) - TimeSpan.FromTicks(1));
         (await first.WaitAsync(RealTime)).Should().OnlyContain(o => o.Error is CryptoException);
 
-        unpacker.Memory.HeldBack(Bob, new[] { "slow", "quick" }).Should().Equal(true, false);
+        unpacker.Memory.HeldBack(Bob, new[] { "slow", "quick" }).Should().Equal(true, true);
 
-        var second = unpacker.UnpackAllAsync(Bob, messages, "request-2", default);
-        await calls.WaitForAsync(3, RealTime);
-        time.Advance(TimeSpan.FromSeconds(0.5));
-        var again = await second.WaitAsync(RealTime);
-        again[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("slow to open when it was delivered before");
-        again[1].Error.Should().BeOfType<CryptoException>("the quick failure is opened again");
-        calls.Labels.Count(l => l == "slow").Should().Be(1, "the remembered message was not opened again");
-        calls.Labels.Count(l => l == "quick").Should().Be(2);
+        var again = await unpacker.UnpackAllAsync(Bob, messages, "request-2", default).WaitAsync(RealTime);
+        again.Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
+        calls.Count.Should().Be(2, "a remembered message is not opened again");
+    }
+
+    /// <summary>
+    /// I-9: a host call needs a thread before its code runs. A message that never opens, alone in its
+    /// delivery (its share is the whole budget), whose code starts 1 tick after its share was given,
+    /// cannot run all of its share before the budget ends it; it lost far less than the start
+    /// allowance, so it counts as having run its share and is remembered.
+    /// </summary>
+    [Fact]
+    public async Task A_never_opening_message_whose_code_started_a_moment_after_its_share_was_given_is_remembered_at_the_budgets_end()
+    {
+        var manual = new ManualTimeProvider();
+        var time = new StepAfterTimer(manual, timerNumber: 2, step: TimeSpan.FromTicks(1)); // timer 1 is the budget, 2 the share
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(Stall(calls), Budget, time);
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message(TestJwe.Anoncrypt("q1"), "q1") }, "request-1", default);
+        await calls.WaitForAsync(1, RealTime);
+        manual.Advance(Budget - TimeSpan.FromTicks(1));
+        (await delivery.WaitAsync(RealTime)).Single().Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("ran out while it was being opened");
+
+        unpacker.StartAllowance.Should().Be(unpacker.Floor / 2);
+        unpacker.Memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeTrue("its code ran its share less 1 tick, inside the start allowance");
+    }
+
+    /// <summary>
+    /// I-9, fair to late starts: a message whose code starts more than the start allowance after its
+    /// share was given, and is cut at its share while another message waits, is not remembered: it is
+    /// opened again at the next delivery.
+    /// </summary>
+    [Fact]
+    public async Task A_message_whose_code_started_late_and_was_cut_at_its_share_is_not_remembered()
+    {
+        var manual = new ManualTimeProvider();
+        var late = DeliveredMessageUnpacker.ShareOf(Budget, 5) - TimeSpan.FromSeconds(1); // 9 s of its 10 s share lost before its code started
+        var time = new StepAfterTimer(manual, timerNumber: 2, step: late);
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(Stall(calls), Budget, time);
+        var messages = Enumerable.Range(0, 5).Select(i => Message(TestJwe.Anoncrypt("q" + i), "q" + i)).ToArray();
+
+        var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
+        await calls.WaitForAsync(4, RealTime);
+        manual.Advance(TimeSpan.FromSeconds(1)); // q0's share ends; q4 still waits, so q0 is cut
+        await calls.WaitForAsync(5, RealTime);
+        manual.Advance(Budget);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("its share");
+        late.Should().BeGreaterThan(unpacker.StartAllowance);
+        unpacker.Memory.HeldBack(Bob, new[] { "q0" }).Single().Should().BeFalse("its code ran 1 s of its 10 s share");
+        unpacker.Memory.HeldBack(Bob, new[] { "q1", "q2", "q3", "q4" }).Should().OnlyContain(h => h, "the others ran their shares (to the budget's end) and did not open");
     }
 
     /// <summary>
     /// I-9 with I-3: a message whose share ends before its work item runs never has its host code
-    /// run, and is not remembered, although its share ran for more than the slow threshold. The
-    /// clock jumps past the first message's share right after its start is read, so its work item is
-    /// created with a cancelled token. The messages after it run and are remembered when the budget
-    /// ends them.
+    /// run, and is not remembered. The clock moves past the first message's share right after its
+    /// share is created (and another message still waits, so it is cut), so its work item is created
+    /// with a cancelled token. The messages after it run their shares and are remembered when the
+    /// budget ends them.
     /// </summary>
     [Fact]
     public async Task A_message_whose_share_ended_before_its_host_call_ran_is_not_remembered()
@@ -160,13 +205,12 @@ public sealed class DeliveredUnpackSlowSenderTests
         var manual = new ManualTimeProvider();
         var calls = new HostCallLog();
         var first = DeliveredMessageUnpacker.ShareOf(Budget, 5); // the first of five gets half the budget
-        var time = new JumpAfterTimer(manual, timerNumber: 2, jump: first); // timer 1 is the budget, 2 the first share
+        var time = new StepAfterTimer(manual, timerNumber: 2, step: first); // timer 1 is the budget, 2 the first share
         var unpacker = new DeliveredMessageUnpacker(Stall(calls), Budget, time);
         var messages = Enumerable.Range(0, 5).Select(i => Message(TestJwe.Anoncrypt("q" + i), "q" + i)).ToArray();
 
         var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
         await calls.WaitForAsync(4, RealTime);
-        time.Jumped.Should().BeTrue();
         manual.Advance(Budget);
         var outcomes = await delivery.WaitAsync(RealTime);
 
@@ -283,7 +327,7 @@ public sealed class DeliveredUnpackSlowSenderTests
 
         time.Advance(Budget - DeliveredMessageUnpacker.ShareOf(Budget, messages.Length));
         var outcomes = await delivery.WaitAsync(RealTime);
-        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("slow to open when it was delivered before") && o.Error.Message.Contains("'request-1'"));
+        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before") && o.Error.Message.Contains("'request-1'"));
         outcomes.Skip(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("while it was being opened"));
     }
 
@@ -302,7 +346,7 @@ public sealed class DeliveredUnpackSlowSenderTests
         delivery.IsCompleted.Should().BeTrue();
         time.ScheduledTimers.Should().Be(0);
         unpacker.Opening.Should().Be(0);
-        (await delivery).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("slow to open"));
+        (await delivery).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
         calls.Count.Should().Be(0);
     }
 
@@ -352,7 +396,7 @@ public sealed class DeliveredUnpackSlowSenderTests
         time.Advance(Budget);
         var again = await second.WaitAsync(RealTime);
 
-        again.Take(16).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("slow to open"));
+        again.Take(16).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
         again[20].Succeeded.Should().BeTrue("the remembered messages are held back, so the honest one gets its turn");
         calls.Labels.Take(16).Should().OnlyHaveUniqueItems();
         calls.Labels.Count(l => l.StartsWith("stall-", StringComparison.Ordinal) && int.Parse(l.AsSpan(6)) < 16).Should().Be(16, "a held-back message is not opened again");
@@ -536,7 +580,7 @@ public sealed class DeliveredUnpackSlowSenderTests
         time.Advance(lookup);
         var again = await second.WaitAsync(RealTime);
 
-        again.Take(10).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("slow to open"));
+        again.Take(10).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
         again[10].Succeeded.Should().BeTrue();
         calls.Labels.Skip(11).Should().Equal("sam-2");
         held.RunAll();
@@ -589,35 +633,23 @@ public sealed class DeliveredUnpackSlowSenderTests
     // ---- helpers ------------------------------------------------------------------------------
 
     /// <summary>
-    /// A manual clock that, right after its <c>timerNumber</c>-th timer is created, answers the next
-    /// reading and then moves the clock on by <c>jump</c>, firing what came due.
+    /// A manual clock that, right after its <c>timerNumber</c>-th timer is created, moves on by
+    /// <c>step</c> (firing what came due): a host call whose worker created its share then starts its
+    /// code that much later, as when it waits for a pool thread.
     /// </summary>
-    private sealed class JumpAfterTimer(ManualTimeProvider inner, int timerNumber, TimeSpan jump) : TimeProvider
+    private sealed class StepAfterTimer(ManualTimeProvider inner, int timerNumber, TimeSpan step) : TimeProvider
     {
         private int _created;
-        private int _armed;
-        private int _jumped;
-
-        public bool Jumped => Volatile.Read(ref _jumped) != 0;
 
         public override long TimestampFrequency => inner.TimestampFrequency;
 
-        public override long GetTimestamp()
-        {
-            var reading = inner.GetTimestamp();
-            if (Interlocked.Exchange(ref _armed, 0) == 1)
-            {
-                inner.Advance(jump);
-                Volatile.Write(ref _jumped, 1);
-            }
-            return reading;
-        }
+        public override long GetTimestamp() => inner.GetTimestamp();
 
         public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
         {
             var timer = inner.CreateTimer(callback, state, dueTime, period);
             if (Interlocked.Increment(ref _created) == timerNumber)
-                Volatile.Write(ref _armed, 1);
+                inner.Advance(step);
             return timer;
         }
     }

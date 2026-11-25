@@ -13,7 +13,8 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// <summary>
 /// RT1-C (#111): a loop that fetches until drained, against this library's mediator on a TestServer
 /// at a short lease, reaches an honest message queued behind messages that fail after a lookup of
-/// about the slow threshold τ, within the bound the plan gives for messages that never open. The
+/// about 0.6 s (the slow threshold τ before owner decision C removed it: every failure is now
+/// remembered), within the bound the plan gives for messages that never open. The
 /// client's clock is a manual one, moved one timer at a time by <see cref="SlowFetchLoop"/>; the
 /// mediator's clock moves by the client's elapsed time only.
 /// </summary>
@@ -23,17 +24,17 @@ public sealed class PickupClientSlowSenderRt1CTests(ITestOutputHelper output)
 
     /// <summary>
     /// Ninety-nine messages (the mediator's quota, less Alice's) name one sender's key; that sender's
-    /// lookup takes <paramref name="ticksBelow"/> ticks less than τ, then each fails to decrypt.
+    /// lookup takes <paramref name="ticksBelow"/> ticks less than 0.6 s, then each fails to decrypt.
     /// Alice's message follows. A fetch-until-drained loop reaches it within
     /// <c>ceil(99 / min(limit, 16))</c> budgets of the client's time, the bound for the same number
     /// of messages that never open.
     /// </summary>
-    [Theory(Skip = "RT1 defect: a fetch loop at a short lease does not reach a message behind failures that each take just under the slow threshold")]
+    [Theory]
     [InlineData(4, 1)]
     [InlineData(4, 1_000_000)]
     [InlineData(10, 1)]
     [InlineData(10, 1_000_000)]
-    public async Task A_fetch_loop_at_a_short_lease_reaches_the_message_behind_failures_just_under_the_slow_threshold(int limit, int ticksBelow)
+    public async Task A_fetch_loop_at_a_short_lease_reaches_the_message_behind_failures_just_under_six_tenths_of_a_second(int limit, int ticksBelow)
     {
         var result = await RunAsync(limit, lookup: Threshold - TimeSpan.FromTicks(ticksBelow));
 
@@ -41,13 +42,13 @@ public sealed class PickupClientSlowSenderRt1CTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// The same queue with a lookup of exactly τ: each message is remembered after one opening, and
-    /// the loop reaches Alice's message within the bound.
+    /// The same queue with a lookup of exactly 0.6 s: each message is remembered after one opening,
+    /// and the loop reaches Alice's message within the bound.
     /// </summary>
     [Theory]
     [InlineData(4)]
     [InlineData(10)]
-    public async Task A_fetch_loop_at_a_short_lease_reaches_the_message_behind_failures_at_the_slow_threshold(int limit)
+    public async Task A_fetch_loop_at_a_short_lease_reaches_the_message_behind_failures_at_six_tenths_of_a_second(int limit)
     {
         var result = await RunAsync(limit, lookup: Threshold);
 
@@ -58,15 +59,8 @@ public sealed class PickupClientSlowSenderRt1CTests(ITestOutputHelper output)
 
     private const int Junk = 99;
 
-    // τ at the default UnpackTimeout: (B − B/4) / 25.
-    private static TimeSpan Threshold
-    {
-        get
-        {
-            var budget = new MediatorClientOptions().UnpackTimeout;
-            return TimeSpan.FromTicks((budget.Ticks - budget.Ticks / 4) / 25);
-        }
-    }
+    // The former slow threshold at the default UnpackTimeout ((B − B/4) / 25 = 0.6 s).
+    private static readonly TimeSpan Threshold = TimeSpan.FromMilliseconds(600);
 
     private async Task<Result> RunAsync(int limit, TimeSpan lookup)
     {
@@ -83,7 +77,6 @@ public sealed class PickupClientSlowSenderRt1CTests(ITestOutputHelper output)
             await PostJunkNamingAsync(mediator, mallory, mallory, recipient);
         var honest = await PickupE2E.SendAsync(mediator, alice, recipient, "honest");
         (await mediator.StatusAsync(bob)).MessageCount.Should().Be(Junk + 1, "everything fits the mediator's quota (MaxQueueMessages)");
-        harness.Channel.Unpacker.SlowThreshold.Should().Be(Threshold);
         var budget = harness.Channel.Options.UnpackTimeout;
         var perFetch = Math.Min(limit, 16);
         var bound = budget * ((Junk + perFetch - 1) / perFetch);

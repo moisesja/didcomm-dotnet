@@ -11,7 +11,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// never a <c>CancelAfter</c> token handed to host code) for all of a delivery's messages, every
 /// re-wrap layer included; at most <see cref="FetchConcurrency"/> opened at a time; each message a
 /// share of the time left (<see cref="ShareAt"/>), never below the floor <see cref="Floor"/>;
-/// messages remembered as slow to open (<see cref="Memory"/>) held back without being opened; and
+/// messages remembered as not opening (<see cref="Memory"/>) held back without being opened; and
 /// every host unpack call reserved (<see cref="Reservations"/>) before it starts. A bad message is a
 /// failure outcome, never an exception; only the caller's cancellation and the owner's shutdown throw.
 /// One unpacker per channel, so one per container.
@@ -57,13 +57,24 @@ namespace DidComm.Mediator.Client.Internal;
 /// code still running sees its token cancelled. The result's continuations run asynchronously.
 /// </para>
 /// <para>
-/// <strong>What is remembered (I-9).</strong> A message whose host call ran and did not open is
-/// struck when the call started after the budget did and ran for at least <see cref="SlowThreshold"/>
-/// until its outcome was decided: by its own failure, by its cut, or by the budget's end.
-/// A message that opens is forgotten. Nothing is written for a refusal, a message that did not
-/// start, a call whose token was cancelled before its work item ran (it never runs), a malformed
-/// message, or a message still running when the caller cancelled or the shutdown came. Whoever records an outcome makes its write, and every write is made before the delivery's
-/// result is set.
+/// <strong>What is remembered (I-9, as amended by owner decision C: "every failure, fair to late
+/// starts").</strong> A message whose host call ran (its code started: <c>HostCall.Run</c> records the
+/// clock's reading as its first action) and did not open is struck when:
+/// </para>
+/// <list type="bullet">
+/// <item><description>it failed on its own, whatever the duration; or</description></item>
+/// <item><description>it ran for its share, measured from its code's start, and was then cut: at its share, by a refusal while extended (A1), or by the budget's end (an extended message included). A host call needs a thread before its code runs, so a cut call counts as having run its share when its code lost at most <see cref="StartAllowance"/> of the share it was given before it started; the share is the duration given when its worker started it.</description></item>
+/// </list>
+/// <para>
+/// Nothing is written for a message cut before its code ran its share (it is opened again at the
+/// next delivery), a refusal, a held-back message, a message that did not start, a call whose token
+/// was cancelled before its work item ran (it never runs), a malformed message, or a message still
+/// running when the caller cancelled or the shutdown came; and an entry still inside its pause gets
+/// no further strike (RT1B-2). A message that opens is forgotten. Whoever records an outcome makes
+/// its write, and every write is made before the delivery's result is set. A residual: host code
+/// that ties up the thread pool, possible only with a host resolver that blocks its thread, can make
+/// messages start late enough that they are cut before running their share, and so are never
+/// remembered.
 /// </para>
 /// <para>
 /// <strong>Host code never runs on the caller's stack (ADV3-4).</strong> Every host unpack call (the
@@ -80,10 +91,6 @@ internal sealed class DeliveredMessageUnpacker
 {
     /// <summary>How many messages of one delivery are opened at the same time.</summary>
     internal const int FetchConcurrency = 4;
-
-    // τ = (B − F) / SlowDivisor: ceil(100 / 4) rounds of failures that each cost just under τ fit in
-    // B − F, so a delivery of up to 100 fast failures starts every message (I-8).
-    private const int SlowDivisor = 25;
 
     // T0 = 30·B (D-2) and Cap = Q·B (QA1-1): with the longest pause as long as Q budgets, the
     // memory can hold a whole mailbox's Q entries paused at once, even when a fetch of one learns
@@ -115,7 +122,7 @@ internal sealed class DeliveredMessageUnpacker
         Time = time;
         Shutdown = shutdown;
         Floor = TimeSpan.FromTicks(Math.Max(1, budget.Ticks / 4));
-        SlowThreshold = TimeSpan.FromTicks(Math.Max(1, (budget.Ticks - Floor.Ticks) / SlowDivisor));
+        StartAllowance = TimeSpan.FromTicks(Floor.Ticks / 2);
         Memory = new SlowMemory(time, TimeSpan.FromTicks(budget.Ticks * FirstPauseInBudgets), TimeSpan.FromTicks(budget.Ticks * LongestPauseInBudgets), SlowMemory.EntriesPerPartition, SlowMemory.MaxPartitions);
         Reservations = reservations ?? new UnpackReservations();
     }
@@ -139,12 +146,14 @@ internal sealed class DeliveredMessageUnpacker
     internal TimeSpan Floor { get; }
 
     /// <summary>
-    /// τ = (B − F) / 25 (at least 1 tick): a message whose host call ran at least this long and did not
-    /// open is remembered as slow (I-9, D-6).
+    /// F / 2: how much of its share a cut call may lose before its code starts (waiting for a thread)
+    /// and still count as having run its share (I-9). Without it, a call whose share ends with the
+    /// budget could never have run all of it, since its code always starts a moment after its share
+    /// was given; with it, a call that started much later than that is not remembered.
     /// </summary>
-    internal TimeSpan SlowThreshold { get; }
+    internal TimeSpan StartAllowance { get; }
 
-    /// <summary>The messages remembered as slow to open, per (mediator, mailbox); pauses of 30·B doubling up to Q·B = 256·B (D-2, QA1-1).</summary>
+    /// <summary>The messages remembered as not opening, per (mediator, mailbox); pauses of 30·B doubling up to Q·B = 256·B (D-2, QA1-1).</summary>
     internal SlowMemory Memory { get; }
 
     /// <summary>The reservations of host unpack calls: per container, and per (mediator, mailbox, sender).</summary>
@@ -275,10 +284,16 @@ internal sealed class DeliveredMessageUnpacker
         return share < left ? share : left;
     }
 
-    // I-9 (with the call having run): it started after the budget did, and ran for at least τ until
-    // its outcome was decided.
-    private bool WasSlow(long budgetStart, long started, long ended)
-        => budgetStart <= started && started <= ended && Time.GetElapsedTime(started, ended) >= SlowThreshold;
+    // I-9: a call that was cut ran its share when its code ran, from its own start to the cut, for
+    // the share it was given less at most StartAllowance (lost waiting for a thread). A reading below
+    // its start (a clock that stepped back) is not a share run: nothing is written (fail open).
+    private bool RanItsShare(HostCall call, TimeSpan share, long ended)
+    {
+        if (!call.Ran)
+            return false;
+        var started = call.StartedAt;
+        return started <= ended && Time.GetElapsedTime(started, ended) >= share - StartAllowance;
+    }
 
     private DeliveredOutcome OutOfTime(string? requestId, bool started)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
@@ -290,7 +305,7 @@ internal sealed class DeliveredMessageUnpacker
 
     private static DeliveredOutcome HeldBackFailure(string? requestId)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
-            $"The delivered message{ForRequest(requestId)} was not opened: it was slow to open when it was delivered before, and it is not opened again until its pause ends. It was not acknowledged.")));
+            $"The delivered message{ForRequest(requestId)} was not opened: it did not open when it was delivered before, and it is not opened again until its pause ends. It was not acknowledged.")));
 
     private static DeliveredOutcome CapacityExhausted(string? requestId, UnpackReservations.Refusal refusal)
         => DeliveredOutcome.Failure(new TimeoutException(refusal == UnpackReservations.Refusal.Container
@@ -302,19 +317,24 @@ internal sealed class DeliveredMessageUnpacker
     private static string ForRequest(string? requestId)
         => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");
 
-    // The host call's work item (I-4): it references exactly the unpack step, the packed text and
-    // the share's token, so nothing reachable from it references the delivery. It also notes whether
-    // the unpack ran: one whose token was cancelled before the work item ran never runs, and is not
-    // remembered as slow (I-9).
-    private sealed class HostCall(Func<string, CancellationToken, Task<DeliveredUnpack>> unpack, string packed, CancellationToken token)
+    // The host call's work item (I-4): it references exactly the unpack step, the packed text, the
+    // share's token and the unpacker's clock, so nothing reachable from it references the delivery.
+    // As its first action it reads the clock (when its code started) and notes that it ran; one whose
+    // token was cancelled before the work item ran never runs, and is not remembered (I-9).
+    private sealed class HostCall(Func<string, CancellationToken, Task<DeliveredUnpack>> unpack, string packed, CancellationToken token, TimeProvider clock)
     {
         private int _ran;
+        private long _startedAt;
 
         internal bool Ran => Volatile.Read(ref _ran) != 0;
+
+        // The clock's reading when its code started; meaningful once Ran.
+        internal long StartedAt => Volatile.Read(ref _startedAt);
 
         internal Task<DeliveredUnpack> Run()
         {
             token.ThrowIfCancellationRequested();
+            Volatile.Write(ref _startedAt, clock.GetTimestamp());
             Volatile.Write(ref _ran, 1);
             return unpack(packed, token);
         }
@@ -356,7 +376,7 @@ internal sealed class DeliveredMessageUnpacker
         private readonly GuardedDeadline _budget;
         private readonly CancellationToken _budgetToken;
         private readonly DeliveredOutcome[] _outcomes;
-        private readonly long[] _startedAt;
+        private readonly TimeSpan[] _shares;
         private readonly HostCall?[] _calls;
         private readonly TaskCompletionSource<IReadOnlyList<DeliveredOutcome>> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         private readonly object _gate = new();
@@ -377,7 +397,7 @@ internal sealed class DeliveredMessageUnpacker
             _outcomes = outcomes;
             _requestId = requestId;
             _ct = ct;
-            _startedAt = new long[messages.Count];
+            _shares = new TimeSpan[messages.Count];
             _calls = new HostCall?[messages.Count];
             _budgetStart = owner.Time.GetTimestamp();
             // Linked to the caller and to the owner's shutdown, so the container's disposal ends
@@ -458,7 +478,6 @@ internal sealed class DeliveredMessageUnpacker
                 var share = _owner.ShareAt(_order.Length, position, elapsed);
                 ShareDeadline? deadline = null;
                 CancellationToken shareToken;
-                long startedAt;
                 HostCall? call = null;
                 Task<DeliveredUnpack>? work = null;
                 try
@@ -466,7 +485,6 @@ internal sealed class DeliveredMessageUnpacker
                     var taken = reservation;
                     deadline = new ShareDeadline(_owner.Time, share, _budgetToken, due => OnShareDue(due, taken));
                     shareToken = deadline.Token;
-                    startedAt = _owner.Time.GetTimestamp();
 
                     // The host call is created under the lock, only while the delivery is open, with
                     // the share's token (I-3): if the token is cancelled before the work item runs, the
@@ -476,8 +494,8 @@ internal sealed class DeliveredMessageUnpacker
                     {
                         if (_ending == Ending.Open)
                         {
-                            call = new HostCall(_owner.Unpack, packed, shareToken);
-                            _startedAt[index] = startedAt;
+                            call = new HostCall(_owner.Unpack, packed, shareToken, _owner.Time);
+                            _shares[index] = share;
                             _calls[index] = call;
                             work = Task.Factory.StartNew(
                                 static state => ((HostCall)state!).Run(),
@@ -531,7 +549,7 @@ internal sealed class DeliveredMessageUnpacker
                     // reservation until it ends.
                     ReleaseShare(deadline);
                     var cut = _owner.Time.GetTimestamp();
-                    if (!Complete(index, OutOfShare(_requestId, share), call.Ran && _owner.WasSlow(_budgetStart, startedAt, cut) ? MemoryWrite.Strike : MemoryWrite.None))
+                    if (!Complete(index, OutOfShare(_requestId, share), _owner.RanItsShare(call, share, cut) ? MemoryWrite.Strike : MemoryWrite.None))
                         return;
                     // Never take the next message on the share timer's own thread.
                     await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
@@ -540,9 +558,8 @@ internal sealed class DeliveredMessageUnpacker
                 catch (Exception ex)
                 {
                     reservation.Release(); // D-13, as on success
-                    var failed = _owner.Time.GetTimestamp();
                     outcome = DeliveredOutcome.Failure(ex);
-                    write = call.Ran && _owner.WasSlow(_budgetStart, startedAt, failed) ? MemoryWrite.Strike : MemoryWrite.None;
+                    write = call.Ran ? MemoryWrite.Strike : MemoryWrite.None; // failed on its own: whatever the duration
                 }
                 // Disposed here, on whatever thread completed the unpack. When host code completed
                 // it from a callback on the share's own token, that thread is inside the share's
@@ -651,7 +668,7 @@ internal sealed class DeliveredMessageUnpacker
                     if (_outcomes[index] is not null)
                         continue;
                     _outcomes[index] = _owner.OutOfTime(_requestId, started: _calls[index] is not null);
-                    if (_ending == Ending.Budget && _calls[index] is { Ran: true } && _owner.WasSlow(_budgetStart, _startedAt[index], ended))
+                    if (_ending == Ending.Budget && _calls[index] is { } call && _owner.RanItsShare(call, _shares[index], ended))
                         (slow ??= new List<string?>()).Add(_messages[index].Id);
                 }
                 _writing++;

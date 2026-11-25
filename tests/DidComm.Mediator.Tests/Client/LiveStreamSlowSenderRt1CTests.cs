@@ -16,7 +16,8 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// RT1-C (#111): the live stream at a leasing mediator reaches an honest message queued before it
-/// started, behind messages that fail after a lookup of about the slow threshold τ, within the
+/// started, behind messages that fail after a lookup of about 0.6 s (the slow threshold τ before
+/// owner decision C removed it: every failure is now remembered), within the
 /// cycles the plan gives for messages that never open (S7: about 10 cycles for 99 at a 10 s lease).
 /// Simulated time (<see cref="SimClock"/>, <see cref="StreamDriver"/>); the real unpacker and its
 /// memory run on that clock. Nothing sleeps; real time is only a hang guard.
@@ -27,22 +28,22 @@ public sealed class LiveStreamSlowSenderRt1CTests(ITestOutputHelper output)
     private static readonly TimeSpan Horizon = TimeSpan.FromMinutes(20);
 
     /// <summary>
-    /// Ninety-nine messages that each fail <paramref name="ticksBelow"/> ticks before τ, then Alice's:
+    /// Ninety-nine messages that each fail <paramref name="ticksBelow"/> ticks before 0.6 s, then Alice's:
     /// at a 10 s lease the stream yields Alice's message within twenty minutes of simulated time.
     /// </summary>
-    [Theory(Skip = "RT1 defect: the live stream at a short lease does not reach a queued message behind failures that each take just under the slow threshold")]
+    [Theory]
     [InlineData(1)]
     [InlineData(1_000_000)]
-    public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_just_under_the_slow_threshold(int ticksBelow)
+    public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_just_under_six_tenths_of_a_second(int ticksBelow)
     {
         var result = await RunAsync(TimeSpan.FromSeconds(10), late: Rt1CExchange.Threshold - TimeSpan.FromTicks(ticksBelow));
 
         result.Reached.Should().BeTrue("the queued message is reached within {0}", Horizon);
     }
 
-    /// <summary>The same queue, each failing at exactly τ: every one is remembered, and the honest message is reached.</summary>
+    /// <summary>The same queue, each failing at exactly 0.6 s: every one is remembered, and the honest message is reached.</summary>
     [Fact]
-    public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_at_the_slow_threshold()
+    public async Task The_stream_at_a_short_lease_reaches_a_queued_message_behind_failures_at_six_tenths_of_a_second()
     {
         var result = await RunAsync(TimeSpan.FromSeconds(10), late: Rt1CExchange.Threshold);
 
@@ -50,9 +51,9 @@ public sealed class LiveStreamSlowSenderRt1CTests(ITestOutputHelper output)
         result.HostCalls.Should().Be(Junk + 1, "each is opened once, then held back while its pause lasts");
     }
 
-    /// <summary>The same queue just under τ at the mediator's default lease: the honest message is reached in the first cycle.</summary>
+    /// <summary>The same queue just under 0.6 s at the mediator's default lease: the honest message is reached in the first cycle.</summary>
     [Fact]
-    public async Task The_stream_at_the_default_lease_reaches_a_queued_message_behind_failures_just_under_the_slow_threshold()
+    public async Task The_stream_at_the_default_lease_reaches_a_queued_message_behind_failures_just_under_six_tenths_of_a_second()
     {
         var result = await RunAsync(new MessagePickupOptions().LeaseTimeout, late: Rt1CExchange.Threshold - TimeSpan.FromTicks(1));
 
@@ -108,8 +109,8 @@ internal sealed class Rt1CExchange
         typeof(SimExchange).GetField("_stalls", Private)!.SetValue(Sim, _waits);
     }
 
-    /// <summary>τ at the default UnpackTimeout.</summary>
-    public static TimeSpan Threshold => new DeliveredMessageUnpacker((_, _) => Task.FromException<DeliveredUnpack>(new InvalidOperationException()), new MediatorClientOptions().UnpackTimeout, TimeProvider.System).SlowThreshold;
+    /// <summary>The former slow threshold at the default UnpackTimeout ((B − B/4) / 25 = 0.6 s).</summary>
+    public static TimeSpan Threshold { get; } = TimeSpan.FromMilliseconds(600);
 
     public TimeSpan Late { get; }
 
