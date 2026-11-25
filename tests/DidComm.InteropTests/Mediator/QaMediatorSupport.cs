@@ -387,7 +387,10 @@ internal sealed class QaManualTimeProvider : TimeProvider
 
 /// <summary>
 /// A host <see cref="DidComm.Mediator.Pickup.IMessageStore"/> around the product's in-memory store: counts enqueues
-/// (the sink's only write) and can hold the next N enqueues at the door until released.
+/// (the sink's only write) and can hold the next N enqueues at the door until released. A held enqueue
+/// waits for its release or for the cancellation of its own token (the mediator shutting down, which a
+/// test that failed before the release reaches when it disposes the server), never for a length of
+/// time: a park that let itself go after a while would change what a slow run checks (L-065).
 /// </summary>
 internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
 {
@@ -419,7 +422,7 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
     {
         Interlocked.Increment(ref _entered);
         if (_parked.TryDequeue(out var parked))
-            await parked.ArriveAsync();
+            await parked.ArriveAsync(ct);
         var outcome = await Inner.EnqueueAsync(message, lease, now, ct);
         Interlocked.Increment(ref _enqueued);
         return outcome;
@@ -445,10 +448,10 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
 
         public void Release() => _gate.TrySetResult();
 
-        internal async Task ArriveAsync()
+        internal async Task ArriveAsync(CancellationToken ct)
         {
             _arrived.TrySetResult();
-            await Task.WhenAny(_gate.Task, Task.Delay(MediatorTestServer.Timeout));
+            await _gate.Task.WaitAsync(ct);
         }
     }
 }
