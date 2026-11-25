@@ -78,7 +78,7 @@ public sealed class SlowMemoryRt2BTests
     /// again at minute 30, when it opens). With the host clock stepping back one minute at minute
     /// 10.5, it is held back no longer than that: at minute 31 it is not held back.
     /// </summary>
-    [Fact(Skip = "RT2 defect: a clock that steps back can hold a message back longer than without the step")]
+    [Fact]
     public void A_clock_that_steps_back_never_holds_a_message_back_longer()
     {
         var clock = new Qa1Clock();
