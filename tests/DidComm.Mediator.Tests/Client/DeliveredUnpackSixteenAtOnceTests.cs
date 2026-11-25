@@ -57,7 +57,8 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
 
     /// <summary>
     /// The behaviour the relation protects: ten messages (what this library's mediator delivers at
-    /// once) and sixteen messages from one sender in one delivery, each taking one second to open.
+    /// once at its defaults) and sixteen messages from one sender in one delivery, each taking one
+    /// second to open.
     /// All of them open and none is refused; from a named sender, and without a named sender. The
     /// counts are printed, and are in the failure's text: with sixteen opened at once and a bound
     /// of four per sender, only four of the named sender's open and the others are refused.
@@ -105,7 +106,7 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
 
     /// <summary>
     /// The bound on one sender, across deliveries of ten (what this library's mediator delivers at
-    /// once): Mallory's lookups never end and ignore their token. Her first ten messages are let go
+    /// once at its defaults): Mallory's lookups never end and ignore their token. Her first ten messages are let go
     /// at their delivery's budget and still run. The next delivery brings eight more of hers and,
     /// behind them, a message of Alice's: six of Mallory's start, which makes sixteen running; her
     /// seventeenth and eighteenth are refused for her bound at once, without starting; and Alice's

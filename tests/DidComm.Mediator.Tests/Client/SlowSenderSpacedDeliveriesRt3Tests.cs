@@ -27,14 +27,14 @@ namespace DidComm.Mediator.Tests.Client;
 /// back, which needs the client's memory of them to be still there and still inside its pause.
 /// </para>
 /// <para>
-/// <strong>The residual, pinned here (R-5 restated).</strong> The memory lives in the process, and
+/// <strong>The residual, pinned here (R-5).</strong> The memory lives in the process, and
 /// its longest pause is 256 budgets (about 85 minutes at the default budget). So with sixteen or
 /// more that never open in front in one delivery, deliveries more than that apart (a fetch loop run
 /// every two hours; a mediator whose lease is two hours) or a new process for each loop open the
 /// sixteen again every time, and the message behind them is not reached by the loop alone; a host
 /// that discards the failures it is handed reaches it. This library's mediator delivers at most ten
-/// messages at once (<c>PickupClientSlowSenderAcceptanceTests</c> in <c>DidComm.InteropTests</c>
-/// measures it), so sixteen in one delivery takes another mediator.
+/// messages at once at its defaults (<c>PickupClientSlowSenderAcceptanceTests</c> in
+/// <c>DidComm.InteropTests</c> measures it), so sixteen in one delivery takes another mediator.
 /// </para>
 /// </remarks>
 public sealed class SlowSenderSpacedDeliveriesRt3Tests(ITestOutputHelper output)
@@ -248,7 +248,7 @@ public sealed class SlowSenderSpacedDeliveriesRt3Tests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// The residual, pinned (R-5 restated; see the class remarks): sixteen, seventeen or ninety-nine
+    /// The residual, pinned (R-5; see the class remarks): sixteen, seventeen or ninety-nine
     /// that never open in front of the message in one delivery (a limit of 100, at a mediator that
     /// delivers that many). With the loop run every two hours in one process, in a new process each
     /// time, or at a lease of two hours, no run returns the message behind them: every delivery
