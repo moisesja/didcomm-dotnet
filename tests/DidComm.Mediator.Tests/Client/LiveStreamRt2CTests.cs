@@ -223,6 +223,94 @@ public sealed class LiveStreamRt2CTests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// P-F2, a delivery the drain took whose last message is yielded after a step has failed: a drain
+    /// round brings two messages that open and one that does not. The consumer takes the first two
+    /// slowly, so the flush age passes and their acknowledgement is sent before the third is yielded;
+    /// it gets no answer, the stream backs off, and the third is handed over as a failure during the
+    /// back-off. The cycle that retries gets that message again: it came in a delivery this drain
+    /// took, so it is not something new and is not handed over again; the round ends the drain. The
+    /// next drain, one poll interval later, reports it again.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_yielded_during_a_back_off_from_a_delivery_the_drain_took_is_not_new_to_the_cycle_that_retries()
+    {
+        var exchange = new SimExchange();
+        var rounds = 0;
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => ++rounds == 1
+            ? Delivery(r, ("a", "ok:a"), ("b", "ok:b"), ("j", "bad:j"))
+            : Delivery(r, ("j", "bad:j")));
+        var acks = 0;
+        exchange.Inner.On(MessagePickup.MessagesReceivedType, r => ++acks == 1 ? throw new TimeoutException("no answer (test)") : Status(r));
+        await using var driver = new StreamDriver(exchange);
+        var slow = true;
+        var backingOffWhenTheFailureWasYielded = false;
+        await driver.RunAsync(() =>
+        {
+            if (slow && driver.Items.Count == 1)
+            {
+                // The driver has already asked for the item after the first one: the first is taken
+                // (the flush age runs from now) and the second is on its way to the consumer, which
+                // holds it for the flush age before it asks for the third.
+                slow = false;
+                exchange.Clock.Advance(LiveDeliveryStream.FlushAge);
+            }
+            if (driver.Items.Count == 2)
+                backingOffWhenTheFailureWasYielded = exchange.Log[^1].Type == Ack; // asked for the third: the acknowledgement was sent first, and got no answer
+            return driver.Items.Count >= 4;
+        }, TimeSpan.FromMinutes(5));
+
+        var interval = exchange.Options.LivePollInterval.TotalSeconds;
+        backingOffWhenTheFailureWasYielded.Should().BeTrue("precondition: the acknowledgement had failed before the third message was yielded");
+        driver.Items.Select(i => (i.Item.Id, i.At.TotalSeconds)).Should().Equal(new[] { ("a", 0.0), ("b", 10.0), ("j", 10.0), ("j", 11.0 + interval) },
+            "the failure is handed over once by the first drain (during the back-off, at 10 s) and not by the cycle that retries at 11 s; the next drain reports it again");
+        exchange.Log.Select(r => (r.At.TotalSeconds, r.Type)).Should().Equal(new[]
+        {
+            (0.0, LiveOn), (0.0, Drain),
+            (10.0, Ack), // no answer: the back-off starts with the third message still to be yielded
+            (11.0, Ack), (11.0, LiveOn), (11.0, Drain), // the retry: its round brings nothing new and ends the drain
+            (11.0 + interval, LiveOn), (11.0 + interval, Drain), (11.0 + interval, Drain), // the next drain: reported again, then nothing new
+        });
+    }
+
+    /// <summary>
+    /// What the set does not hold: a push taken during a back-off is not one of the drain's
+    /// deliveries, also when the back-off ends while it is being opened and its message is yielded
+    /// after the next cycle has started. A drain round that then brings the same message takes it as
+    /// new, once: the failure is handed over by the push and once more by that round, and the round
+    /// after it, bringing nothing new, ends the drain.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_from_a_push_taken_during_a_back_off_is_reported_once_more_when_a_drain_round_brings_it_back()
+    {
+        var exchange = new SimExchange();
+        var rounds = 0;
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => ++rounds == 1 ? throw new TimeoutException("no answer (test)") : Delivery(r, ("x", "bad:x")));
+        await using var driver = new StreamDriver(exchange);
+        var rememberedWhenTheRoundTookIt = -1;
+        exchange.BeforeBatch = () =>
+        {
+            if (exchange.Log[^1].Type == Drain && rounds == 1)
+                exchange.Clock.Advance(LiveDeliveryStream.FirstBackoff); // the push is being opened: the back-off ends now
+            else if (rounds == 2)
+                rememberedWhenTheRoundTookIt = driver.Reported;
+        };
+        var pushed = false;
+        await driver.RunAsync(() => exchange.Log.Count(r => r.Type == Drain) >= 3, TimeSpan.FromMinutes(5), onWait: () =>
+        {
+            if (pushed)
+                return false;
+            pushed = true; // the first wait: the first round got no answer, the stream backs off
+            return exchange.Inner.Registration!.TryPush(Push(("x", "bad:x")));
+        });
+
+        exchange.Loads.Select(l => l.RequestId is null ? "push" : "round").Should().Equal(new[] { "push", "round" }, "the push, then the round that brought the same message back");
+        exchange.Log.Select(r => (r.At.TotalSeconds, r.Type)).Should().Equal(new[] { (0.0, LiveOn), (0.0, Drain), (1.0, LiveOn), (1.0, Drain), (1.0, Drain) },
+            "the cycle that retries starts while the push is still to be yielded; its first round is new, its second brings nothing new and ends the drain");
+        rememberedWhenTheRoundTookIt.Should().Be(1, "the push added nothing: only the round's own id is remembered");
+        driver.Items.Select(i => (i.Item.Id, i.At.TotalSeconds)).Should().Equal(new[] { ("x", 1.0), ("x", 1.0) }, "handed over by the push, and once more by the round");
+    }
+
+    /// <summary>
     /// P-F3 (I-19, QA2-3): the per-drain set at its stated bound,
     /// <see cref="LiveDeliveryStream.MaxDoneThisDrain"/> = (50 rounds + 49 pushes) × 10 = 990. A
     /// mediator gives the same bytes a new id at every round, so every round brings ten new ids, and
