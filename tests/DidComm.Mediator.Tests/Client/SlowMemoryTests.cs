@@ -63,7 +63,7 @@ public sealed class SlowMemoryTests
         Held(memory, "q1").Should().BeFalse();
     }
 
-    // ---- M2: a clock that steps back never holds a message past due ----
+    // ---- M2: a reading below the strike's is due; one pause after the strike's reading it is due too ----
 
     [Fact]
     public void M2_a_reading_below_the_strikes_is_due_and_a_stepped_back_clock_never_holds_back_past_the_pause()
@@ -79,7 +79,7 @@ public sealed class SlowMemoryTests
         clock.Now -= TimeSpan.FromHours(2);
         Held(memory, "q1").Should().BeFalse("and so does one two hours below it");
 
-        // Back where the strike was, then past its pause: never held longer than the pause.
+        // Back where the strike was: held back again. One pause after the strike's reading: due.
         clock.Now = TimeSpan.FromHours(5);
         Held(memory, "q1").Should().BeTrue();
         clock.Now = TimeSpan.FromHours(5) + T0;

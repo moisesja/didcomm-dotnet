@@ -437,9 +437,9 @@ public sealed class SlowMemoryFetchQa1Tests
     /// I-12 through fetches: between a strike and the redelivery the host's clock steps forward two
     /// hours (the message is due and opened again: a second strike), then back two hours (a reading
     /// below the strike is due: opened again), then runs normally. The failure after the step back
-    /// is the same slow episode, not a third one (RT2B-2): the message is held back for the second
-    /// strike's pause again, counted from the stepped-back reading, never longer, and never locked
-    /// out.
+    /// is the same episode, not a third one (RT2B-2): the message is held back for the second
+    /// strike's pause again, counted from the stepped-back reading. One tick before that pause ends
+    /// it is still held back; at its end it is opened again.
     /// </summary>
     /// <remarks>
     /// Changed in #111 fix round 2 (RT2B-2): this test used to expect a third strike, and so a pause
@@ -447,7 +447,7 @@ public sealed class SlowMemoryFetchQa1Tests
     /// now adds no strike, so the pause is the second strike's 20 min.
     /// </remarks>
     [Fact]
-    public async Task A_clock_stepping_forward_and_back_never_holds_a_message_past_its_pause_or_locks_it_out()
+    public async Task After_a_clock_steps_forward_and_back_a_message_is_held_back_for_one_pause_from_its_repeat_failure_and_then_opened()
     {
         var (exchange, mediator) = SlowSenderFetchQa1Tests.Setup(_ => Qa1Step.Stall, lease: null);
         mediator.Enqueue("junk-0", Qa1.Anon("junk-0"));

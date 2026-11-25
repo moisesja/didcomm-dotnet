@@ -15,12 +15,16 @@ namespace DidComm.Mediator.Tests.Client;
 /// client opens, and was not turned away by the fetch's filter. The strikes are read from the
 /// memory (is the message held back at a lookup after the delivery), never from the flag. The
 /// deliveries are random mixes of every kind of message, from a fixed seed; the clock moves only to
-/// the next due timer, once every worker is parked. Real time is only a hang guard.
+/// the next due timer, once every worker is parked. Each mixed delivery follows, on its own exchange,
+/// a delivery of sixteen messages of one sender whose lookups ignore their token: those lookups
+/// hold that sender's bound, as lookups that never end, when the mixed delivery is opened. Real time
+/// is only a hang guard.
 /// </summary>
 public sealed class InconclusiveMatchesTheMemoryTests(ITestOutputHelper output)
 {
     private const string AnotherOfTheHostsDids = "did:example:bob-two";
     private const string SenderAtItsBound = "did:example:full";
+    private const string HoldsTheBound = "holds-the-bound-";
     private const int Deliveries = 200;
     private static readonly TimeSpan Lease = new MessagePickupOptions().LeaseTimeout; // 60 s
 
@@ -58,7 +62,8 @@ public sealed class InconclusiveMatchesTheMemoryTests(ITestOutputHelper output)
     /// <summary>
     /// Two hundred fetches, each of one delivery of 1 to 60 messages: messages that open or fail on
     /// their own at once or after 1.3, 4.1 or 9.7 s, messages that never open (honouring their token
-    /// or not), messages held back from before, messages of a sender whose bound is held, messages
+    /// or not), messages held back from before, messages of a sender whose bound is held (by the
+    /// lookups of the delivery before, which ignore their token), messages
     /// that open for another of the host's DIDs under the fetch's filter, and attachments that are
     /// not in encrypted form. For every failed item, the flag equals "not struck in this delivery,
     /// not held back, a message this client opens, and not filtered". A message out of time says
@@ -81,7 +86,7 @@ public sealed class InconclusiveMatchesTheMemoryTests(ITestOutputHelper output)
                 plan[$"m-{i}"] = (Mix[random.Next(Mix.Length)], Durations[random.Next(Durations.Length)]);
 
             var (exchange, mediator) = SlowSenderFetchQa1Tests.Setup(
-                label => plan[label] switch
+                label => label.StartsWith(HoldsTheBound, StringComparison.Ordinal) ? new Qa1Step(Qa1Kind.IgnoresToken) : plan[label] switch
                 {
                     (What.Opens or What.OpensForAnotherOfTheHostsDids, var after) => Qa1Step.OpenAfter(after),
                     (What.FailsOnItsOwn, var after) => Qa1Step.FailAfter(after),
@@ -91,39 +96,43 @@ public sealed class InconclusiveMatchesTheMemoryTests(ITestOutputHelper output)
                 Lease,
                 recipientOf: label => plan[label].What == What.OpensForAnotherOfTheHostsDids ? AnotherOfTheHostsDids : FakePickupExchange.L);
             var memory = exchange.Unpacker.Memory;
-            var held = new List<UnpackReservations.Reservation>();
-            for (var i = 0; i < UnpackReservations.MaxPerSender; i++)
-            {
-                exchange.Unpacker.Reservations.TryTake(Qa1.Bob, SenderAtItsBound, out var reservation, out _).Should().BeTrue();
-                held.Add(reservation!);
-            }
-            foreach (var (id, (what, _)) in plan)
-            {
-                mediator.Enqueue(id, what switch
-                {
-                    What.NotEncrypted => $"{{\"id\":\"{id}\",\"type\":\"https://example.org/plain\"}}",
-                    What.FromASenderAtItsBound => Qa1.From(SenderAtItsBound + "#key-x25519-1", id),
-                    _ => Qa1.From($"did:example:sender-{id}#key-x25519-1", id),
-                });
-                if (what == What.HeldBack)
-                    memory.Strike(Qa1.Bob, id);
-            }
             var client = exchange.Client();
-            var start = exchange.Clock.TrueNow;
-
+            TimeSpan elapsed;
             PickupBatch batch;
             try
             {
+                // The delivery before: sixteen messages of one sender whose lookups ignore their
+                // token. Each has the whole budget and keeps its reservation after it, so that
+                // sender's bound is held, by lookups the host counts as never ending, when the mixed
+                // delivery is opened. The mediator has these sixteen leased by then.
+                for (var i = 0; i < UnpackReservations.MaxPerSender; i++)
+                    mediator.Enqueue($"{HoldsTheBound}{i}", Qa1.From(SenderAtItsBound + "#key-x25519-1", $"{HoldsTheBound}{i}"));
+                var before = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: UnpackReservations.MaxPerSender, recipientDid: FakePickupExchange.L));
+                before.Items.Should().HaveCount(UnpackReservations.MaxPerSender).And.OnlyContain(i => i.Error is TimeoutException && !i.Inconclusive, "each had the whole budget (delivery {0})", delivery);
+                exchange.Host.NeverEnding.Should().Be(UnpackReservations.MaxPerSender);
+                exchange.Unpacker.Reserved.Should().Be(UnpackReservations.MaxPerSender, "the sender's bound is held by those lookups, and by nothing else");
+
+                foreach (var (id, (what, _)) in plan)
+                {
+                    mediator.Enqueue(id, what switch
+                    {
+                        What.NotEncrypted => $"{{\"id\":\"{id}\",\"type\":\"https://example.org/plain\"}}",
+                        What.FromASenderAtItsBound => Qa1.From(SenderAtItsBound + "#key-x25519-1", id),
+                        _ => Qa1.From($"did:example:sender-{id}#key-x25519-1", id),
+                    });
+                    if (what == What.HeldBack)
+                        memory.Strike(Qa1.Bob, id);
+                }
+                var start = exchange.Clock.TrueNow;
                 batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100, recipientDid: FakePickupExchange.L));
+                elapsed = exchange.Clock.TrueNow - start;
             }
             finally
             {
                 exchange.Host.ReleaseIgnored();
-                foreach (var reservation in held)
-                    reservation.Release();
             }
             Qa1.LookupsEnded(exchange.Unpacker);
-            if (exchange.Clock.TrueNow - start == Qa1.Budget)
+            if (elapsed == Qa1.Budget)
                 endedByTheirBudget++;
 
             batch.Items.Select(i => i.Id).Should().Equal(plan.Keys, "every message of the delivery is an item (delivery {0})", delivery);

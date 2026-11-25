@@ -158,7 +158,7 @@ public sealed class InconclusiveBusyPoolRt4Tests(ITestOutputHelper output)
     /// it opened.
     /// </summary>
     /// <remarks>
-    /// RT4's reproduction, red on 98a32ac ("Expected item.NotAttempted to be True ... but found
+    /// RT4's reproduction, red before the flag was widened ("Expected item.NotAttempted to be True ... but found
     /// False": the item read "while it was being opened", the flag was false, and that host
     /// discarded a message no host code had run for).
     /// </remarks>

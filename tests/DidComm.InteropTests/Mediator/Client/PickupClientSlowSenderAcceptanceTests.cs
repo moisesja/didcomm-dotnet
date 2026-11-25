@@ -118,7 +118,7 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
         var most = perMessage.Count == 0 ? 0 : perMessage.Values.Max();
         output.WriteLine(FormattableString.Invariant($"A2 | limit {limit} | N {slow} | lease {leaseSeconds} s | reached {(reached ? "yes" : "no")}, {total.TotalSeconds} s = opening {loop.Opening.TotalSeconds} s + waiting for leases {loop.WaitingForLeases.TotalSeconds} s ({loop.LeaseWaits} waits) + other {(total - loop.Opening - loop.WaitingForLeases).TotalSeconds} s; {loop.BudgetFetches} fetches took a budget, of {loop.Fetches}; {openings.Length} host calls for the {slow}; most openings of one message {most}; first re-opening {(firstReopening is { } t ? t.TotalSeconds + " s" : "none")}; second learning pass {(most > 1 ? "yes" : "no")}; bound {bound} learning fetches, {(budget * bound).TotalSeconds} s"));
 
-        // What this test asserted at 22973ae, unchanged: the bound of that head.
+        // What this test asserted before owner decision E, unchanged: the bound as it stood then.
         reached.Should().BeTrue("Alice's message is reached within {0} learning fetches; after {1} ({2} fetches, {3}) it was not", bound, loop.LearningFetches, loop.Fetches, loop.Elapsed);
         loop.LearningFetches.Should().BeLessThanOrEqualTo(bound);
         loop.Elapsed.Should().BeLessThanOrEqualTo(budget * bound, "each learning fetch takes at most one budget, and the others take none");
@@ -209,8 +209,8 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
     /// <remarks>
     /// Reworked for owner decision G (sixteen at once, sixteen per sender). With a bound of four per
     /// sender this test queued sixteen of Mallory's, one fetch filled her bound, and Alice's message
-    /// was reached in one learning fetch at both limits (measured on <c>22973ae</c> by this test as
-    /// it was then: 20 s at limit 4, 10 s at limit 10). With sixteen per sender, filling the bound
+    /// was reached in one learning fetch at both limits (measured before owner decision E by this
+    /// test as it was then: 20 s at limit 4, 10 s at limit 10). With sixteen per sender, filling the bound
     /// takes <c>ceil(16 / limit)</c> fetches of one budget each, so the row at limit 4 no longer
     /// holds "within one lease"; it pins the 80 s that is measured, and the name says what holds at
     /// both limits.

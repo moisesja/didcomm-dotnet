@@ -93,7 +93,7 @@ public sealed class PickupClientLiveSlowSenderTests(ITestOutputHelper output)
     {
         var cell = await MeasureAsync(slow, leaseSeconds, holdTheFirstRoundsEnds: false);
 
-        // What this test asserted at 22973ae, unchanged: the bound of that head.
+        // What this test asserted before owner decision E, unchanged: the bound as it stood then.
         cell.Reached.Should().BeTrue("the stream reaches the honest message within {0} cycles; after {1} it had not", cell.Bound, cell.Cycles);
         cell.Cycles.Should().BeLessThanOrEqualTo(cell.Bound);
         cell.MostOpenings.Should().Be(cell.FitsInFirstPause || slow < PerCycle(TimeSpan.FromSeconds(leaseSeconds)) ? 1 : 2, "a message that never opens is opened again only once its pause (ten minutes) has ended");

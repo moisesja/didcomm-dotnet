@@ -255,8 +255,8 @@ public sealed class SlowSenderSpacedDeliveriesRt3Tests(ITestOutputHelper output)
     /// opens sixteen of the ones in front again and the message is out of time before its turn.
     /// </summary>
     /// <remarks>
-    /// The same rows on <c>22973ae</c> (four opened at once, a time limit per message), measured by
-    /// this test on an export of it: not returned either, in any row.
+    /// The same rows before owner decision E (four opened at once, a time limit per message),
+    /// measured by this test on an export of that state: not returned either, in any row.
     /// </remarks>
     [Theory]
     [MemberData(nameof(SixteenOrMoreInOneDelivery))]

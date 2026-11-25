@@ -116,9 +116,10 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     /// first, every live-on is sent exactly one second (the first back-off) after an
     /// acknowledgement that was refused, one for one; and every refused acknowledgement was sent at
     /// the instant of a push and names the message that push brought. A refused acknowledgement is a
-    /// failed step: the stream backs off, and a cycle follows a failed step once its back-off has
-    /// passed. The back-off stays at one second because the drain of each of these cycles ends,
-    /// which starts the back-off again. So the mediator's pushes set the rate:
+    /// failed step: the stream backs off, the acknowledgement is sent again once the back-off has
+    /// passed, and a cycle follows once it is accepted. The back-off stays at one second because the
+    /// drain of each of these cycles ends, which starts the back-off again. So the mediator's pushes
+    /// set the rate:
     /// <list type="bullet">
     /// <item>
     /// P = 1 s: pushes at 1.5, 2.5, ..., 599.5 s, one acknowledgement each (599); the 300 sent at

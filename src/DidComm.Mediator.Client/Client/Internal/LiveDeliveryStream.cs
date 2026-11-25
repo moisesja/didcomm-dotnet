@@ -40,8 +40,12 @@ namespace DidComm.Mediator.Client.Internal;
 /// mark) or drained, never neither. The cycle runs at the start, one
 /// <see cref="MediatorClientOptions.LivePollInterval"/> after the previous cycle's drain ended (which
 /// also picks up delayed messages, never pushed when they fall due, and recovers a dropped
-/// connection), and after a failed step once its back-off has passed (1 s, doubling to 30 s). A
-/// cycle that has started is never pre-empted: it runs until its drain ends or one of its steps
+/// connection), and after a failed step once its back-off has passed (1 s, doubling to 30 s), with
+/// one order kept: taken messages whose acknowledgement is due are acknowledged before a cycle
+/// starts. So when the step that failed was an acknowledgement and nothing else is ready, the
+/// acknowledgement is sent again first, and a cycle follows only once it is accepted
+/// (<c>LiveStreamBackoffRt3Tests.With_cycles_answered_every_acknowledgement_refused_and_no_push_after_the_first_delivery_no_cycle_request_follows_the_first_and_the_stream_ends_with_the_refusal</c>).
+/// A cycle that has started is never pre-empted: it runs until its drain ends or one of its steps
 /// fails, and the alarm of the next cycle is armed only then, never while a drain runs (R1-1). The
 /// mediator has no scheduler for due messages, now or later (owner decision D2 on #88,
 /// 2026-11-14), so this polling is the permanent design, not a stopgap. Only a failure a retry can
@@ -66,7 +70,27 @@ namespace DidComm.Mediator.Client.Internal;
 /// a stream whose cycle requests all fail sends them one per back-off, at most one per 30 s once the
 /// back-off has reached it, however often pushes come and whatever acknowledgements are accepted,
 /// and it does not give up as long as such a push or acknowledgement comes before each give-up
-/// alarm fires (R-11).
+/// alarm fires (R-11). Measured over ten simulated minutes of that: 24 cycle requests when each is
+/// refused at once (at 0, 1, 3, 7, 15 and 31 s, then every 30 s), 12 when each times out after
+/// <see cref="MediatorClientOptions.RequestTimeout"/>
+/// (<c>LiveStreamRt2CTests.With_every_cycle_failing_and_acknowledgements_accepted_cycles_stay_at_one_per_growing_back_off</c>,
+/// <c>…With_every_cycle_timing_out_and_acknowledgements_accepted_cycles_stay_at_one_per_growing_back_off</c>).
+/// What starts the back-off again is pinned by
+/// <c>PickupClientLiveSchedulingTests.Only_a_drain_that_ends_or_a_drain_round_that_brings_something_new_starts_the_back_off_again</c>.
+/// </para>
+/// <para>
+/// <strong>What a mediator that refuses acknowledgements causes.</strong> This is not a bound on the
+/// stream; the mediator sets the rate. While cycle requests are answered, a refused acknowledgement
+/// is a failed step: the stream backs off, the acknowledgement is sent again, and once it is
+/// accepted a cycle follows, whose drain ends and starts the back-off again at 1 s. So one cycle
+/// follows each refused acknowledgement: 300 in ten minutes when acknowledgements are refused and
+/// accepted in turn while pushes come every one or two seconds
+/// (<c>LiveStreamBackoffRt3Tests.With_cycles_answered_and_acknowledgements_refused_and_accepted_in_turn_one_cycle_follows_each_refused_acknowledgement</c>).
+/// With every acknowledgement refused and no push after the first delivery, no cycle request
+/// follows the stream's first (one live-on request in ten minutes): the acknowledgement is sent
+/// again after each back-off, and the stream ends with the refusal that comes once the give-up
+/// alarm has fired, at 61 s when each is refused at once
+/// (<c>…With_cycles_answered_every_acknowledgement_refused_and_no_push_after_the_first_delivery_no_cycle_request_follows_the_first_and_the_stream_ends_with_the_refusal</c>).
 /// </para>
 /// <para>
 /// <strong>The drain's end (ADV5-4, QA2-3).</strong> A drain ends at a <c>status</c> (under 4.0 an
@@ -99,9 +123,11 @@ namespace DidComm.Mediator.Client.Internal;
 /// alarm the stream arms when the state that starts them begins (a drain ends, a step fails, the
 /// first message is taken, a run of failures starts), and each is due when its timer has fired. So
 /// a host clock that steps back or forward (an NTP correction, a restored snapshot), or whose
-/// readings keep going lower, costs nothing: no early cycle, retry or flush, no storm, and no
-/// postponement. Each arming is a new alarm and disposes the one it replaces; a replaced alarm's
-/// late callback sets only its own flag and changes no decision. The wait is one awaited operation —
+/// readings keep going lower, costs the stream's schedule nothing: no early cycle, retry or flush,
+/// no storm, and no postponement. (The pauses of messages that did not open are another matter:
+/// <see cref="SlowMemory"/> reads the clock.) Each arming is a new alarm and disposes the one it
+/// replaces; a replaced alarm's late callback sets only its own flag and changes no decision. The
+/// wait is one awaited operation —
 /// the mailbox's <c>WaitToReadAsync</c> on a wake source of its own — and the hand-over with an
 /// alarm cannot miss a firing: the wait publishes its fresh wake source and only then looks again at
 /// what is due; an alarm sets its flag and only then cancels the wake source it finds published.
@@ -120,9 +146,12 @@ namespace DidComm.Mediator.Client.Internal;
 /// acknowledged) is skipped and not opened again; one the duplicate filter remembers is
 /// acknowledged and not yielded; a failure is yielded, never acknowledged, and reported again when
 /// it comes back in a delivery that is opened (one that brings back only messages of deliveries the
-/// current drain took brings nothing new and is not: see "The drain's end"). A drain answered with a
-/// delivery in which no message has a usable id ends the stream (nothing in it could be
-/// acknowledged, so the drain would ask again for ever); such a push is ignored.
+/// current drain took brings nothing new and is not: see "The drain's end"). That is also why the
+/// stream does not spin on inconclusive items: messages refused for capacity are yielded once per
+/// cycle, and opened in the first cycle after the capacity is free
+/// (<c>LiveStreamDiscardingHostTests.On_a_live_stream_messages_refused_for_capacity_are_not_attempted_until_it_is_free_and_only_a_host_that_left_them_queued_receives_them</c>).
+/// A drain answered with a delivery in which no message has a usable id ends the stream (nothing in
+/// it could be acknowledged, so the drain would ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter
