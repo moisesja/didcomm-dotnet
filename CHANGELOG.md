@@ -117,7 +117,11 @@ reaching what was queued behind them (#96 documented this and the other limits b
   `DirectPushAdv110Pass3Tests.ADV_110_3a_2_…` waits until the operations abandoned at the earlier
   deadlines have settled, and checks that their lookups are still running. The QA store that holds an
   enqueue behind the slow-sink tests in `MediatorBoundsQaTests` keeps it held until the test releases
-  it or the mediator shuts down; it no longer lets go after 15 seconds.
+  it or the mediator shuts down; it no longer lets go after 15 seconds. The other test gates that
+  held a call for at most 15 seconds hold it the same way, until opened or until their call is
+  cancelled: the recipient inboxes, the parked pickup give-back and the held Kestrel completion
+  callback. The Kestrel deadline tests also check that the slow callback is still running when the
+  deadline passes.
 
 ### Added — the mediator can push a stored message to the recipient's own endpoint (`MediatorOptions.DirectPush`, FR-PICK-09 step 3, #110; epic #88); the plain receiving endpoints open a message a mediator re-wrapped
 
