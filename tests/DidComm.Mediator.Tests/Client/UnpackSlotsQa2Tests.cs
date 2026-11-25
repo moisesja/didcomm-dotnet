@@ -703,7 +703,7 @@ public sealed class UnpackSlotsQa2Tests
         // created is made by the worker that has just taken m-0, the target, for the start rule:
         // before it reserves and before its work item exists.
         var atTheTargetsTake = 0;
-        clock.OnCreate = _ => Volatile.Write(ref atTheTargetsTake, 1);
+        clock.OnCreate = _ => Interlocked.CompareExchange(ref atTheTargetsTake, 1, 0);
         clock.OnRead = () =>
         {
             if (Interlocked.CompareExchange(ref atTheTargetsTake, 2, 1) != 1)
