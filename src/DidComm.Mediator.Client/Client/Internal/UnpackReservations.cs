@@ -39,7 +39,7 @@ internal sealed class UnpackReservations
     internal const int MaxReserved = 256;
 
     /// <summary>P for a named sender: host unpack calls started and not yet ended per (mediator, mailbox, sender DID).</summary>
-    internal const int MaxPerSender = 4;
+    internal const int MaxPerSender = 16;
 
     /// <summary>P for the anonymous partition: host unpack calls started and not yet ended per (mediator, mailbox) for messages without a named sender.</summary>
     internal const int MaxPerAnonymous = 16;

@@ -99,7 +99,7 @@ namespace DidComm.Mediator.Client.Internal;
 internal sealed class DeliveredMessageUnpacker
 {
     /// <summary>How many messages of one delivery are opened at the same time.</summary>
-    internal const int FetchConcurrency = 4;
+    internal const int FetchConcurrency = 16;
 
     // T0 = 30·B (D-2) and Cap = Q·B (QA1-1): with the longest pause as long as Q budgets, the
     // memory can hold a whole mailbox's Q entries paused at once, even when a fetch of one learns
