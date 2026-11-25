@@ -291,14 +291,17 @@ internal static class CallbackLookups
                 return await ends.Task.ConfigureAwait(false);
         };
 
-    /// <summary>A lookup that never ends on its own and opens its message from inside the callback it registered on its token.</summary>
-    public static Func<string, CancellationToken, Task<DeliveredUnpack>> OpensWhenCancelled(HostCallLog calls, Task register)
+    /// <summary>
+    /// A lookup that never ends on its own and opens its message from inside the callback it
+    /// registered on its token, or on the token <paramref name="on"/> picks instead.
+    /// </summary>
+    public static Func<string, CancellationToken, Task<DeliveredUnpack>> OpensWhenCancelled(HostCallLog calls, Task register, Func<CancellationToken, CancellationToken>? on = null)
         => async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
             var ends = new TaskCompletionSource<DeliveredUnpack>(); // its continuations run inline, inside the callback
             await register.ConfigureAwait(false);
-            ct.UnsafeRegister(_ => ends.TrySetResult(UnpackFakes.Opened(label)), null);
+            (on is null ? ct : on(ct)).UnsafeRegister(_ => ends.TrySetResult(UnpackFakes.Opened(label)), null);
             using (calls.Enter(label, ct))
                 return await ends.Task.ConfigureAwait(false);
         };

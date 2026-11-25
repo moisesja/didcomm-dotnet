@@ -189,18 +189,24 @@ public sealed class DeliveredUnpackTokenStateTests
     // ---- no further message once the delivery is being ended ----------------------------------------
 
     /// <summary>
-    /// A worker takes no further message once the delivery's token is cancelled. The first message
-    /// opens from inside its cancellation callback when the budget ends, so its worker records the
-    /// success while the delivery is still open; the fifth message, not valid UTF-8, was waiting for
-    /// a worker. It is out of time before its turn: that worker did not take it.
+    /// A worker takes no further message once the delivery is being ended. The first message opens
+    /// from inside a cancellation callback, so its worker records the success while the delivery is
+    /// still open: when the budget ends (the callback is on the token the lookup was handed), and
+    /// when the caller cancels (the callback is on the caller's own token, which runs before the
+    /// delivery's token is cancelled). The fifth message, not valid UTF-8, was waiting for a worker;
+    /// a worker that took it would record it as malformed at once. No worker takes it: one outcome
+    /// was recorded by a worker, and the fifth message is out of time before its turn.
     /// </summary>
-    [Fact]
-    public async Task A_worker_takes_no_further_message_once_the_deliverys_token_is_cancelled()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_worker_takes_no_further_message_once_the_delivery_is_being_ended(bool byTheCaller)
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
         var register = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var opensWhenCancelled = CallbackLookups.OpensWhenCancelled(calls, register.Task);
+        using var caller = new CancellationTokenSource();
+        var opensWhenCancelled = CallbackLookups.OpensWhenCancelled(calls, register.Task, byTheCaller ? _ => caller.Token : null);
         var unpacker = new DeliveredMessageUnpacker(async (packed, ct) =>
         {
             var label = TestJwe.LabelOf(packed);
@@ -213,16 +219,30 @@ public sealed class DeliveredUnpackTokenStateTests
             .Append(new DeliveredInput("not-utf8-4", new byte[] { 0xC3, 0x28, 0xFF }))
             .ToArray();
 
-        var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
+        var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", caller.Token);
         register.SetResult();
         await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
-        await Task.Run(() => time.Advance(Budget)).WaitAsync(RealTime);
-        var outcomes = await delivery.WaitAsync(RealTime);
+        await Task.Run(() =>
+        {
+            if (byTheCaller)
+                caller.Cancel();
+            else
+                time.Advance(Budget);
+        }).WaitAsync(RealTime);
+        await Ended(delivery);
 
-        outcomes[0].Succeeded.Should().BeTrue("it opened inside the budget's cancellation, before the delivery was closed, on its worker's own thread");
-        outcomes[4].Error.Should().BeOfType<TimeoutException>("the worker that recorded the first message took nothing more: the delivery's token was cancelled")
-            .Which.Message.Should().Contain("before its turn came");
-        outcomes.Skip(1).Take(3).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+        unpacker.Settled.Should().Be(1, "the first message's success was recorded by its worker, on the thread that ended the delivery, and that worker took nothing more");
+        if (byTheCaller)
+        {
+            delivery.Status.Should().Be(TaskStatus.Canceled);
+        }
+        else
+        {
+            var outcomes = await delivery;
+            outcomes[0].Succeeded.Should().BeTrue("it opened inside the budget's cancellation, before the delivery was closed");
+            outcomes[4].Error.Should().BeOfType<TimeoutException>("no worker took it once the delivery's token was cancelled").Which.Message.Should().Contain("before its turn came");
+            outcomes.Skip(1).Take(3).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+        }
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 

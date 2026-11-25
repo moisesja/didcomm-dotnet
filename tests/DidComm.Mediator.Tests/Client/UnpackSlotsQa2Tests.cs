@@ -647,7 +647,9 @@ public sealed class UnpackSlotsQa2Tests
     /// shutdown — in both windows: while its worker is starting it, before its work item exists, and
     /// on the pool thread that runs its work item, after the task's own cancellation check and before
     /// the unpack is called. In every case its host code never starts, it is not remembered, and its
-    /// reservation comes back.
+    /// reservation comes back. The clock's readings count from zero, so that the start reading of a
+    /// call that never ran (never taken, so zero) is not below the budget's start: such a call is
+    /// not remembered because its code did not run.
     /// </summary>
     [Theory]
     [InlineData(Ending.Budget, Window.BeforeTheWorkItem)]
@@ -658,7 +660,7 @@ public sealed class UnpackSlotsQa2Tests
     [InlineData(Ending.Shutdown, Window.AfterTheWorkItemStarted)]
     public async Task No_host_code_starts_once_its_delivery_has_ended(Ending ending, Window window)
     {
-        var clock = new CountingTimeProvider(new ManualTimeProvider());
+        var clock = new CountingTimeProvider(new ManualTimeProvider(), readingsFromZero: true);
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
         var calls = new HostCallLog();

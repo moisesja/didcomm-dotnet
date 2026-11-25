@@ -8,8 +8,11 @@ namespace DidComm.Mediator.Tests.Client;
 /// deterministic rendezvous inside the unpacker's worker, which reads the clock for the start rule
 /// right before it reserves and starts the host code).
 /// </summary>
-internal sealed class CountingTimeProvider(ManualTimeProvider inner) : TimeProvider
+internal sealed class CountingTimeProvider(ManualTimeProvider inner, bool readingsFromZero = false) : TimeProvider
 {
+    // With readingsFromZero the timestamps count from this clock's creation, as a host clock's may:
+    // a reading of zero is then a reading the clock can give.
+    private readonly long _origin = readingsFromZero ? inner.GetTimestamp() : 0;
     private int _live;
     private int _created;
 
@@ -29,7 +32,7 @@ internal sealed class CountingTimeProvider(ManualTimeProvider inner) : TimeProvi
     public override long GetTimestamp()
     {
         OnRead?.Invoke();
-        return inner.GetTimestamp();
+        return inner.GetTimestamp() - _origin;
     }
 
     public override DateTimeOffset GetUtcNow() => inner.GetUtcNow();
