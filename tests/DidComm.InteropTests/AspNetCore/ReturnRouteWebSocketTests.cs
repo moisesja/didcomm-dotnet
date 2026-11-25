@@ -208,6 +208,10 @@ public sealed class ReturnRouteWebSocketTests
         // writer and answers the client's close; with subscribers raised inline, one that blocked held
         // the close handshake (and the request) for as long as it blocked.
         await using var host = await ReturnRouteTestHost.StartAsync(o => o.AllowSameSocketReplies = true);
+        // The subscriber is held until the test opens the gate, which the finally below does when
+        // the test's body ends, passed or failed (so a run that fails still lets the subscriber
+        // return), never for a length of time: on a slow run the subscriber is still held when
+        // the test reads whether it has returned.
         var release = new ManualResetEventSlim(false);
         var entered = new TaskCompletionSource<ReturnRouteSessionEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
         var returned = 0;
@@ -216,7 +220,7 @@ public sealed class ReturnRouteWebSocketTests
             if (e.Reason != SessionCloseReason.Unregistered)
                 return;
             entered.TrySetResult(e);
-            release.Wait(TimeSpan.FromSeconds(15)); // capped, so a failing run cannot hold a pool thread forever
+            release.Wait();
             Interlocked.Exchange(ref returned, 1);
         };
 
@@ -313,12 +317,17 @@ public sealed class ReturnRouteWebSocketTests
             };
         });
         var registry = (InMemoryReturnRouteSessionRegistry)host.Registry;
+        // Every SessionOpened subscriber call is held until the test opens the gate, which the
+        // finally below does when the test's body ends, passed or failed, never for a length of
+        // time: on a slow run the first call is still held when the backlog is counted.
         using var release = new ManualResetEventSlim(false);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var returned = 0;
         host.Registry.SessionOpened += (_, _) =>
         {
             entered.TrySetResult();
-            release.Wait(TimeSpan.FromSeconds(30)); // every SessionOpened waits for the gate (capped)
+            release.Wait();
+            Interlocked.Increment(ref returned);
         };
         var sockets = new List<WebSocket>();
         try
@@ -347,6 +356,7 @@ public sealed class ReturnRouteWebSocketTests
                 .Should().BeTrue("every evicted connection ended while the subscriber was blocked");
             entered.Task.IsCompleted.Should().BeTrue();
             release.IsSet.Should().BeFalse("the gate was held throughout");
+            Volatile.Read(ref returned).Should().Be(0, "precondition: the first subscriber call was still held, so the counts below are those of a blocked subscriber");
             registry.PendingNotifications.Should().Be(Capacity + 1, "the one being delivered plus a full queue");
             registry.DroppedNotifications.Should().Be(Reconnects - Capacity, "each reconnect past the bound dropped the oldest waiting notification");
         }
