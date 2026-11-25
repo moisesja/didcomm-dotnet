@@ -364,22 +364,25 @@ public sealed class PickupClient
     /// envelope names in <c>skid</c>), 16 per mailbox for messages whose outer envelope names no
     /// sender (anoncrypted ones, for example), and 256 per container. A message whose sender, mailbox
     /// or container is at its bound fails at once as "unpack capacity exhausted": it is not opened,
-    /// not remembered and not acknowledged, and comes back later. So one sender whose lookups do not
-    /// return holds 16 openings, and its seventeenth and later messages are refused at once while
-    /// other senders' messages still open. Measured at this library's mediator with thirty messages
-    /// from such a sender in front: sixteen were opened, fourteen were refused at once, and another
+    /// not remembered and not acknowledged, and comes back later. An opening counts toward its
+    /// sender's 16 until its lookup returns: while 16 are held for one sender, a seventeenth and
+    /// later message naming that sender is refused at once, and other senders' messages still open.
+    /// Measured at this library's mediator with thirty messages in front that name one sender whose
+    /// lookups do not return: sixteen were opened, fourteen were refused at once, and another
     /// sender's message behind them was returned after 40 seconds with <paramref name="limit"/> 10
     /// and after 80 seconds with <paramref name="limit"/> 4, the time sixteen messages that never
     /// open take. With the same thirty and lookups that honour their token, every one of the thirty
     /// was opened once, none was refused, and the other sender's message was returned after 60
     /// seconds with <paramref name="limit"/> 10 and after 160 seconds with <paramref name="limit"/>
     /// 4. The sender the outer envelope names is not authenticated at that point: it decides
-    /// only which bound a message counts against, never what is opened or how. The bounds do not cap
-    /// the lookups of one sender's DID: per mailbox, up to 16 messages naming it and up to 16 that
-    /// name no sender can be resolving it at once, and spellings of the DID that differ count as
-    /// different senders. One sender's stalled lookups therefore do not refuse another sender's
-    /// message within a mailbox; across the container's mailboxes they do once 256 openings are held
-    /// in all (below). A resolver that blocks its thread can hold up to 256 threads of the container.
+    /// only which bound a message counts against, never what is opened or how. What a sender's bound
+    /// counts is openings of messages whose outer envelope names that sender, the DID compared
+    /// exactly as it is written there. It is not a bound on lookups of a DID: a message that names
+    /// no sender can resolve the same DID, and counts toward the mailbox's 16 for such messages. The
+    /// openings held for one sender do not refuse another sender's message within a mailbox; a
+    /// message is refused for the container once 256 openings are held in all, whichever senders and
+    /// mailboxes they count for (below). A resolver that blocks its thread can hold up to 256
+    /// threads of the container.
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
@@ -393,22 +396,21 @@ public sealed class PickupClient
     /// fetches again at once would spin. Until a message is discarded, or ages out at the mediator
     /// (after 30 days by default), it stays queued and counts against your mailbox's quota there (at
     /// this library's mediator, <c>MessagePickupOptions.MaxQueueMessages</c>, 100 by default).
-    /// Messages that never open — junk anyone who can address you can send — can fill that quota, and
-    /// then the mediator refuses honest senders' messages, until you discard them.
+    /// A message that does not open counts against that quota like any other until it is discarded or
+    /// ages out, and a mailbox at its quota accepts no further message.
     /// </para>
     /// <para>
     /// <strong>What remains with slow senders:</strong>
     /// </para>
     /// <list type="bullet">
-    /// <item><description>Many senders, each with a DID of its own, whose lookups ignore cancellation
-    /// can still hold all 256 openings of the container: sixteen such senders in one mailbox, or one
-    /// such sender in sixteen mailboxes. Until those lookups end, every delivered message fails at
-    /// once ("unpack capacity exhausted"), for every DID and tenant of the container. Use a resolver
-    /// that honours its cancellation token.</description></item>
-    /// <item><description>Even with lookups that honour their token, one sender that keeps sixteen
-    /// mailboxes of one container busy, each with sixteen messages that are being opened, holds all
-    /// 256 while they run. A message of another mailbox is then refused for the container; it is not
-    /// remembered, and it comes back.</description></item>
+    /// <item><description>The bound of 256 openings is one for the whole container, and a sender
+    /// counts up to 16 in each mailbox: the openings of sixteen senders in one mailbox, or of one
+    /// sender in sixteen mailboxes, add up to it. While 256 are held, every delivered message is
+    /// refused at once ("unpack capacity exhausted"), for every DID and tenant of the container; it
+    /// is inconclusive, and it comes back. A lookup that honours its token gives its opening back
+    /// when it ends, once its delivery's budget has ended at the latest; one that ignores its token
+    /// holds the opening until it returns. Use a resolver that honours its cancellation
+    /// token.</description></item>
     /// <item><description>Messages whose outer envelope names no sender (anoncrypted, authcrypted
     /// naming the sender only in <c>apu</c>, or re-wrapped by a mediator) share one bound of 16 per
     /// mailbox.</description></item>
@@ -416,14 +418,15 @@ public sealed class PickupClient
     /// place for one budget. The messages behind them in that fetch run out of time before their
     /// turn (inconclusive), and get it in the next fetch that brings them, where the sixteen are held
     /// back. Only a fetch of more than sixteen messages has messages behind sixteen; this library's
-    /// mediator delivers at most ten.</description></item>
+    /// mediator delivers at most ten per fetch at its defaults.</description></item>
     /// <item><description>The memory lives in this process, and its longest pause is 256 budgets
-    /// (about 85 minutes). So when sixteen or more messages that never open are in front of yours in
-    /// one fetch, a loop that is run only every two hours, a mediator whose lease is two hours, or a
-    /// new process for each loop finds nothing held back, opens the sixteen again, and does not
-    /// return your message (measured: not in twelve runs, and not in two simulated days). Run again
-    /// five minutes later in the same process, the loop returns it in its second run. This takes a
-    /// mediator that delivers more than sixteen per fetch.</description></item>
+    /// (about 85 minutes): a message is held back only in the process that remembered it, and only
+    /// while its pause lasts. With sixteen or more messages that never open in front of yours in one
+    /// fetch, yours is returned by a fetch that finds those sixteen still held back. Measured: a
+    /// loop run again five minutes later in the same process returns it in its second run; fetches
+    /// two hours apart (the loop's own spacing, or a lease of two hours) and a new process for each
+    /// run open the sixteen again and do not return it (not in twelve runs, and not in two simulated
+    /// days). This applies at a mediator that delivers more than sixteen per fetch.</description></item>
     /// <item><description>More than 256 messages that never open queued in front of yours (which needs
     /// a mediator whose quota is above this library's 100): the memory cannot keep them all, and the
     /// loop reaches your message only once you discard the failed items you have given up on with
@@ -878,9 +881,9 @@ public sealed class PickupClient
     /// the stream has not counted this delivery against that message; it is delivered again and
     /// started again then, once what was in its way is gone. The stream needs no waiting on your side
     /// for such items: a drain round that brings back only what the drain was already handed ends
-    /// the drain, so an inconclusive item is yielded at most once per drain, and the next cycle
-    /// starts one <see cref="MediatorClientOptions.LivePollInterval"/> after the drain ended. Until a
-    /// message is discarded or ages out it counts against your mailbox's quota at the
+    /// the drain, so an inconclusive item is yielded at most once per drain, and again at the next
+    /// cycle in which the mediator delivers it. Until a message is discarded or ages out it counts
+    /// against your mailbox's quota at the
     /// mediator (see <see cref="FetchAsync"/>). The error's text can quote DIDs and key ids (see
     /// <see cref="PickupItem.Error"/>), and the messages are not replay-checked (see the class
     /// remarks).
@@ -942,15 +945,14 @@ public sealed class PickupClient
     /// disposal.
     /// </para>
     /// <para>
-    /// <strong>A mediator that keeps pushing while it refuses requests.</strong> Since a push with
-    /// something new, like an accepted acknowledgement, lets the give-up point go, a stream whose
-    /// cycle requests all fail does not give up while such pushes or acknowledgements keep coming
-    /// before each give-up point. Its cycle requests stay at one per pause: after 1, 2, 4, 8 and 16
-    /// seconds, then every 30 seconds, however often the pushes come. Measured over ten minutes: 24
+    /// <strong>When requests fail while pushes arrive.</strong> A push that brings something new,
+    /// like an accepted acknowledgement, lets the give-up point go. So a stream whose cycle requests
+    /// all fail does not end while such pushes or acknowledgements arrive before each give-up
+    /// point: it keeps retrying. Its cycle requests stay at one per pause: after 1, 2, 4, 8 and 16
+    /// seconds, then every 30 seconds, however often pushes arrive. Measured over ten minutes: 24
     /// cycle requests when each is refused at once, 12 when each gets no answer within the default
-    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Once the pushes stop, the first request
-    /// that fails after the give-up point ends the stream. That affects a recipient whose mediator
-    /// still pushes but refuses or drops its requests: its stream keeps retrying instead of ending.
+    /// <see cref="MediatorClientOptions.RequestTimeout"/>. Once none arrives before a give-up point,
+    /// the first request that fails after it ends the stream.
     /// </para>
     /// <para>
     /// <strong>A mediator that does not set delivered messages aside</strong> (Message Pickup 3.0 does

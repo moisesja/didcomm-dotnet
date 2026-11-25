@@ -125,7 +125,10 @@ public sealed class PickupItem
     /// <para>
     /// These are exactly the failed messages the client does not remember as "did not open" (see
     /// <see cref="PickupClient.FetchAsync"/>, "Messages that did not open"): the flag and that memory
-    /// are one decision. One more case follows from that, for a host that passes a clock of its own:
+    /// are one decision. That is exact for one delivery. When two deliveries of the same message
+    /// overlap (a fetch and a live stream on one mailbox, for example), each item says whether that
+    /// delivery gave the message the whole time, and the message is remembered once. One more case
+    /// follows from the one decision, for a host that passes a clock of its own:
     /// if that clock throws at the moment the client would record that a message did not open,
     /// nothing is recorded, and the item is inconclusive whatever its error.
     /// </para>

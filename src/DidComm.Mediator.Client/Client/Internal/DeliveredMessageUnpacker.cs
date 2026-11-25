@@ -126,6 +126,11 @@ namespace DidComm.Mediator.Client.Internal;
 /// (<c>InconclusiveMatchesTheMemoryTests.For_every_failed_item_of_two_hundred_mixed_deliveries_the_flag_says_what_the_memory_says</c>);
 /// an inconclusive message is started again at the next delivery once what was in its way is gone
 /// (<c>DeliveredUnpackInconclusiveTests.An_inconclusive_message_is_started_again_at_the_next_delivery_once_what_was_in_its_way_is_gone</c>).
+/// The rule is exact for one delivery. When two deliveries of one message overlap (a fetch and a
+/// live stream on one mailbox), each outcome says whether that delivery gave the message the whole
+/// budget, and the memory counts the message once: an entry inside its pause takes no further
+/// strike
+/// (<c>InconclusiveOverlappingDeliveriesRt4Tests.A_message_that_two_overlapping_deliveries_both_cut_is_counted_once_and_each_outcome_says_whether_that_delivery_gave_it_the_whole_budget</c>).
 /// </para>
 /// <para>
 /// <strong>What stays inconclusive (R-14, the coordinator's call).</strong> A message that never

@@ -69,7 +69,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// (<c>SlowSenderSpacedDeliveriesRt3Tests.Residual_with_sixteen_or_more_in_front_in_one_delivery_and_deliveries_further_apart_than_the_longest_pause_or_a_new_process_each_time_the_message_behind_is_not_returned</c>).
 /// Run again five minutes later in the same process, a fetch loop returns it in its second run
 /// (<c>…With_sixteen_or_more_in_front_in_one_delivery_a_fetch_loop_run_every_five_minutes_in_one_process_returns_the_message_behind_them_in_its_second_run</c>).
-/// This library's mediator delivers at most ten per fetch, so it takes another mediator.
+/// This library's mediator delivers at most ten per fetch at its defaults, so it takes another
+/// mediator, or a larger <c>MessagePickupOptions.MaxDeliveryBatch</c>.
 /// </para>
 /// <para>
 /// One leaf lock protects the partitions and the counter: no other lock is taken while it is held,
