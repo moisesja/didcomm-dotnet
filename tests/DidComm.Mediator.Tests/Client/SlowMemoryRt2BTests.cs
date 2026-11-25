@@ -76,7 +76,10 @@ public sealed class SlowMemoryRt2BTests
     /// message back longer"): an honest message whose sender's DID host is unreachable from minute
     /// 0 to minute 11 fails at minute 0 (paused 10 min) and at minute 10 (paused 20 min, so opened
     /// again at minute 30, when it opens). With the host clock stepping back one minute at minute
-    /// 10.5, it is held back no longer than that: at minute 31 it is not held back.
+    /// 10.5, it is opened once more, fails, and is paused for the same 20 min again, not for a third
+    /// strike's 40 min (which lasted until minute 50.5): at minute 31 it is not held back. (When
+    /// exactly it is due again, minute 30.5, is measured by
+    /// <c>SlowMemoryClockStepTests.After_a_step_back_the_message_is_due_one_pause_after_its_repeat_failure</c>.)
     /// </summary>
     [Fact]
     public void A_clock_that_steps_back_never_holds_a_message_back_longer()

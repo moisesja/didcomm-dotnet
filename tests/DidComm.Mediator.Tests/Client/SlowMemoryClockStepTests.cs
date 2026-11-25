@@ -87,6 +87,33 @@ public sealed class SlowMemoryClockStepTests
         Held(memory, "q1").Should().BeFalse("the pause, counted from the lower reading, has ended");
     }
 
+    /// <summary>
+    /// What a step back costs in time, measured: the second strike is at minute 10 (pause 20 min, so
+    /// due at minute 30 without a step). Half a minute later the clock steps back one minute and the
+    /// message, opened once more, fails. It is then held back for the same 20 min from that failure:
+    /// still held at minute 30, due at minute 30.5 — half a minute later than without the step (the
+    /// time from the strike to the repeat failure), and not at minute 50.5 as with a third strike.
+    /// </summary>
+    [Fact]
+    public void After_a_step_back_the_message_is_due_one_pause_after_its_repeat_failure()
+    {
+        var (clock, memory) = WithTwoStrikes("q1"); // the second strike: minute 10 of the test, pause 20 min
+        var strike = clock.Now;
+        var stepBack = TimeSpan.FromMinutes(1);
+        TimeSpan ReadingAt(TimeSpan sinceTheStrike) => strike + sinceTheStrike - stepBack; // the reading that long after the strike, once the clock has stepped back
+
+        clock.Now = ReadingAt(TimeSpan.FromSeconds(30)); // minute 10.5: the clock has stepped back one minute
+        Held(memory, "q1").Should().BeFalse("a reading below the strike's counts as due (I-12)");
+        memory.Strike(Bob, "q1"); // the repeat failure
+
+        clock.Now = ReadingAt(TimeSpan.FromMinutes(20)); // minute 30: where the pause ends without a step
+        Held(memory, "q1").Should().BeTrue("the same pause runs again from the repeat failure, half a minute after the strike");
+        clock.Now = ReadingAt(TimeSpan.FromMinutes(20.5)) - Tick;
+        Held(memory, "q1").Should().BeTrue("one tick before minute 30.5");
+        clock.Now = ReadingAt(TimeSpan.FromMinutes(20.5)); // minute 30.5
+        Held(memory, "q1").Should().BeFalse("due one pause ({0}) after the repeat failure: half a minute later than without the step", memory.PauseAfter(2));
+    }
+
     // ---- the eviction order ----
 
     /// <summary>
