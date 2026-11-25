@@ -74,9 +74,10 @@ namespace DidComm.Mediator.Client;
 /// delivery against the message (its turn did not come before the time ran out, it was refused for
 /// capacity, or it was started late and cut). It is delivered again and started again then, once
 /// what was in its way is gone. A host that discards every failed item also deletes messages that
-/// were not given their chance to open. And <c>false</c> alone is not a reason to discard: a
-/// message a <c>recipientDid</c> filter turned away is a failed item whose
-/// <see cref="PickupItem.Inconclusive"/> is <c>false</c>, and a fetch without the filter returns it.
+/// were not given their chance to open. And <c>false</c> alone is not a reason to discard: it
+/// means that the delivery counted against the message, and the client tries the message again
+/// after its pause; giving up on it is your decision. (A message a <c>recipientDid</c> filter
+/// turned away is a case of its own: see "Several of your DIDs".)
 /// </para>
 /// <para>
 /// <strong>No replay check.</strong> Messages these clients return have not been through the
@@ -88,8 +89,10 @@ namespace DidComm.Mediator.Client;
 /// one of that DID's own keys opened. A message a sender encrypted to two of your DIDs opens with
 /// the key its envelope lists first among those this agent holds, so it is accepted without a
 /// filter or under that first DID's filter; under the second DID's filter it is a failed item,
-/// "for another of your DIDs", and stays queued: discard it with <see cref="AckAsync"/>, or it ages
-/// out at the mediator.
+/// "for another of your DIDs". A message the filter turned away is yours to settle: take it with a
+/// fetch without the filter, or discard it with <see cref="AckAsync"/>. Do not leave it queued:
+/// while it is queued it is opened again at every fetch under the filter, and it stays in front of
+/// what came after it (see <see cref="FetchAsync"/>, "The <c>recipientDid</c> filter").
 /// </para>
 /// <para>
 /// <strong>Which endpoint.</strong> The first <c>DIDCommMessaging</c> service entry of the
@@ -441,8 +444,12 @@ public sealed class PickupClient
     /// with the very next fetch there, and a fetch of nothing but items refused for capacity takes
     /// no time either: when a fetch brings only inconclusive items, wait before you fetch again,
     /// until the openings that were in their way have ended.</description></item>
-    /// <item><description>A message refused under a <paramref name="recipientDid"/> filter ("for
-    /// another of your DIDs") is not remembered: it is opened again each time it comes.</description></item>
+    /// <item><description>A message a <paramref name="recipientDid"/> filter turned away ("for
+    /// another of your DIDs") opened: its <see cref="PickupItem.Inconclusive"/> is <c>false</c>, it
+    /// is not remembered and it is not acknowledged. It is yours to settle: take it with a fetch
+    /// without the filter, or discard it with <see cref="AckAsync"/>. Left queued, it is opened again
+    /// at every fetch under the filter and stays in front of what came after it (see "The
+    /// <paramref name="recipientDid"/> filter" below).</description></item>
     /// <item><description>Up to 256 openings per container can be held by host code that does not
     /// return. A resolver that blocks its thread holds a thread-pool thread for each of its lookups,
     /// up to sixteen per fetch. While threads are held that way, a message can get its thread late:
@@ -451,12 +458,19 @@ public sealed class PickupClient
     /// and the timer that ends the budget can fire late.</description></item>
     /// <item><description>A message that never opens and whose code starts later than an eighth of
     /// the budget in every delivery is inconclusive every time and is never remembered. Under test
-    /// this was produced by moving the clock; no way for a remote party to cause it was found. On a
-    /// real clock such late starts come from a resolver that blocks its thread while the thread pool
-    /// is small (the item above). Nothing else keeps a message inconclusive from one delivery to the
-    /// next, on one assumption: the mediator delivers oldest first. Whatever was in front of a late
-    /// start has then opened, been remembered or been discarded by the next delivery, so the message
-    /// starts first.</description></item>
+    /// this was produced by moving the clock; on a real clock such late starts come from a resolver
+    /// that blocks its thread while the thread pool is small (the item above). For fetches without a
+    /// filter, and for a host that settles what a filter turned away, no sequence of deliveries that
+    /// keeps a message inconclusive was found. That is reasoning, not a test, and it assumes a
+    /// mediator that delivers oldest first: what was in front of a late start has by the next
+    /// delivery been opened and acknowledged, been remembered, or been discarded by you, so the
+    /// message starts first.
+    /// Under a filter, with messages the filter turned away left queued, one is known: a message
+    /// behind sixteen of them that are slow to open comes back inconclusive at every fetch. Its
+    /// conditions: the host fetches under the filter and never without it; the messages in front
+    /// are encrypted to another DID whose keys this agent holds, which their sender has to know;
+    /// and a fetch brings more than sixteen messages (not this library's mediator at its
+    /// defaults).</description></item>
     /// <item><description>A lookup that has been cancelled keeps its place until it ends; one that
     /// never got a thread keeps its place until the thread pool reaches its cancelled work item.
     /// When the next fetch starts before that, messages of the same sender (or, for messages that
@@ -493,7 +507,14 @@ public sealed class PickupClient
     /// <strong>The <paramref name="recipientDid"/> filter.</strong> Under a filter a message counts as
     /// that DID's only when one of that DID's own keys opened it. The other recipients an envelope
     /// lists are not proof: whoever writes an envelope can list anyone, so a message is never
-    /// accepted for a DID because its envelope names that DID.
+    /// accepted for a DID because its envelope names that DID. A message the filter turned away is
+    /// returned as a failed item ("for another of your DIDs"). It opened, so its
+    /// <see cref="PickupItem.Inconclusive"/> is <c>false</c> and it is not remembered; and it is not
+    /// acknowledged. It is yours to settle: take it with a fetch without the filter, or discard it
+    /// with <see cref="AckAsync"/>. Do not leave it queued. While it is queued it is opened again at
+    /// every fetch under the filter and stays in front of what came after it; where a fetch brings
+    /// more than sixteen messages, sixteen such messages that are slow to open keep the ones behind
+    /// them from their turn at every fetch (those come back inconclusive each time).
     /// </para>
     /// <para>
     /// <strong>One message to several of your DIDs.</strong> A sender can encrypt one message to
@@ -503,8 +524,8 @@ public sealed class PickupClient
     /// <paramref name="from"/>, the copies are the same message: it is returned once and the other
     /// copies are acknowledged as repeats. Such a message is accepted without a filter, or under the
     /// filter of the DID whose key opened it. Under the filter of another of those DIDs its copy is
-    /// a failed item, "for another of your DIDs", and stays queued: fetch without a filter to take
-    /// it, discard it with <see cref="AckAsync"/>, or let it age out at the mediator.
+    /// a failed item, "for another of your DIDs", and yours to settle as the paragraph above says:
+    /// fetch without a filter to take it, or discard it with <see cref="AckAsync"/>.
     /// </para>
     /// <para>
     /// <strong>Who sent it.</strong> A delivered message is encrypted (one that is not, as delivered,
@@ -1070,8 +1091,10 @@ public sealed class PickupClient
     // relay that appends a label to an envelope without `apv`, can write any of them (ADV1-2,
     // ADV1-3). The consequence for a message a sender encrypted to two of our DIDs is documented on
     // FetchAsync: it passes the filter of the DID whose key opened it (the first held key the
-    // envelope lists), not the other one's. One comparison, no early exit; the key id is checked
-    // against the FR-API-09 bound before it is parsed (L-055).
+    // envelope lists), not the other one's. Under the other one's filter it is a failed item that
+    // opened: not inconclusive, not remembered, not acknowledged, and the host's to settle (R-7).
+    // One comparison, no early exit; the key id is checked against the FR-API-09 bound before it is
+    // parsed (L-055).
     private static bool IsFor(UnpackResult unpacked, string recipientDid)
     {
         var kid = unpacked.RecipientKid;

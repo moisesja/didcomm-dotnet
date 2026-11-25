@@ -79,17 +79,17 @@ namespace DidComm.Mediator.Client.Internal;
 /// <c>PickupClientLiveSchedulingTests.Only_a_drain_that_ends_or_a_drain_round_that_brings_something_new_starts_the_back_off_again</c>.
 /// </para>
 /// <para>
-/// <strong>What a mediator that refuses acknowledgements causes.</strong> This is not a bound on the
-/// stream; the mediator sets the rate. While cycle requests are answered, a refused acknowledgement
-/// is a failed step: the stream backs off, the acknowledgement is sent again, and once it is
-/// accepted a cycle follows, whose drain ends and starts the back-off again at 1 s. So one cycle
-/// follows each refused acknowledgement: 300 in ten minutes when acknowledgements are refused and
-/// accepted in turn while pushes come every one or two seconds
+/// <strong>When acknowledgements fail while cycle requests are answered.</strong> The back-off does
+/// not bound the cycle requests then: how often an acknowledgement fails sets their rate. A failed
+/// acknowledgement is a failed step: the stream backs off, the acknowledgement is sent again, and
+/// once it is accepted a cycle follows, whose drain ends and starts the back-off again at 1 s. So
+/// one cycle follows each failed acknowledgement: 300 in ten minutes when acknowledgements fail and
+/// are accepted in turn while pushes arrive every one or two seconds
 /// (<c>LiveStreamBackoffRt3Tests.With_cycles_answered_and_acknowledgements_refused_and_accepted_in_turn_one_cycle_follows_each_refused_acknowledgement</c>).
-/// With every acknowledgement refused and no push after the first delivery, no cycle request
+/// When every acknowledgement fails and no push arrives after the first delivery, no cycle request
 /// follows the stream's first (one live-on request in ten minutes): the acknowledgement is sent
-/// again after each back-off, and the stream ends with the refusal that comes once the give-up
-/// alarm has fired, at 61 s when each is refused at once
+/// again after each back-off, and the stream ends with the failure that comes once the give-up
+/// alarm has fired, at 61 s when each fails at once
 /// (<c>…With_cycles_answered_every_acknowledgement_refused_and_no_push_after_the_first_delivery_no_cycle_request_follows_the_first_and_the_stream_ends_with_the_refusal</c>).
 /// </para>
 /// <para>

@@ -61,13 +61,14 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>What the memory does not outlast (R-5):</strong> it lives in the process, and its longest
-/// pause is <c>cap</c> (256 budgets in production, about 85 minutes at the default budget). With
-/// sixteen or more messages that never open in front of another in one delivery, deliveries further
-/// apart than that pause (a loop run every two hours; a lease of two hours) or a new process for
-/// each loop find nothing held back, open the sixteen again, and do not return the message behind
-/// them: not in twelve runs, and not in two simulated days
+/// pause is <c>cap</c> (256 budgets in production, about 85 minutes at the default budget): an entry
+/// holds a message back only in the process that struck it, and only while its pause lasts. With
+/// sixteen or more messages that never open in front of another in one delivery, the message behind
+/// is returned by a delivery that finds those sixteen still held back. Where deliveries are two
+/// hours apart, or each run is a new process, the sixteen are opened again every time and the
+/// message behind is not returned: not in twelve runs, and not in two simulated days
 /// (<c>SlowSenderSpacedDeliveriesRt3Tests.Residual_with_sixteen_or_more_in_front_in_one_delivery_and_deliveries_further_apart_than_the_longest_pause_or_a_new_process_each_time_the_message_behind_is_not_returned</c>).
-/// Run again five minutes later in the same process, a fetch loop returns it in its second run
+/// Where runs are five minutes apart in one process, it is returned in the second run
 /// (<c>…With_sixteen_or_more_in_front_in_one_delivery_a_fetch_loop_run_every_five_minutes_in_one_process_returns_the_message_behind_them_in_its_second_run</c>).
 /// This library's mediator delivers at most ten per fetch at its defaults, so it takes another
 /// mediator, or a larger <c>MessagePickupOptions.MaxDeliveryBatch</c>.

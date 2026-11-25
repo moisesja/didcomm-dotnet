@@ -137,13 +137,23 @@ namespace DidComm.Mediator.Client.Internal;
 /// opens and whose code starts later than <see cref="StartAllowance"/> in every delivery is
 /// inconclusive every time and is never remembered
 /// (<c>DeliveredUnpackInconclusiveTests.A_message_that_never_opens_and_whose_code_starts_late_in_every_delivery_is_inconclusive_every_time_and_never_remembered</c>,
-/// ten deliveries). That test makes the late starts by moving the clock; no way for a remote party to
-/// cause them was found. On a real clock they happen with a resolver that blocks its thread on a
-/// small thread pool (R-8 (a); the opt-in measurement
+/// ten deliveries). That test makes the late starts by moving the clock. On a real clock they happen
+/// with a resolver that blocks its thread on a small thread pool (R-8 (a); the opt-in measurement
 /// <c>RealClockBlockingLookups111Tests.Measurement_A_blocking_lookups_under_a_small_pool_how_many_start_within_the_allowance_and_when_all_sixteen_are_held_back</c>
-/// prints when). That nothing else keeps a message inconclusive rests on one assumption: the mediator
-/// delivers oldest first. Whatever was in front of a late start has then opened, been remembered or
-/// been discarded by the next delivery, so the message starts first.
+/// prints when). What was shown, and no more: no schedule that keeps a message inconclusive was
+/// found without a <c>recipientDid</c> filter, or with a host that settles what the filter turned
+/// away. For those cases the argument is reasoning only, and assumes a mediator that delivers oldest
+/// first: what was in front of a late start has by the next delivery been opened and acknowledged,
+/// been remembered or been discarded, so the message starts first. Under a filter, with the
+/// messages it turned away left queued, a remote party who knows two of the host's DIDs can keep a
+/// message inconclusive (F5): a message the filter turned away opened, so it is neither remembered
+/// nor acknowledged, is opened again at every delivery under the filter and stays in front (R-7),
+/// and sixteen such messages that are slow to open keep the ones behind them from their turn at
+/// every fetch. Its limits: the host fetches under the filter and never without it; the sender
+/// knows another DID whose keys the host holds; deliveries exceed sixteen (not this library's
+/// mediator at its defaults). The host's remedy is the contract of
+/// <see cref="PickupClient.FetchAsync"/>: take such a message with a fetch without the filter, or
+/// discard it.
 /// </para>
 /// <para>
 /// <strong>Host code never runs on the caller's stack (ADV3-4).</strong> Every host unpack call (the
