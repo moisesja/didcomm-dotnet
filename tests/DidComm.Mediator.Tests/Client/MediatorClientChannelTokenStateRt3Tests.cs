@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using AwesomeAssertions;
 using DidComm.Exceptions;
 using DidComm.Mediator.Client;
@@ -169,37 +168,118 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
     // ---- what the log keeps -----------------------------------------------------------------------------
 
     /// <summary>
-    /// The call's deadline passes and its host code reports the cancellation of its token as a
-    /// failure of its own; the call ends as the timeout. Some log line, at any level, names the
-    /// type of what the host code reported.
+    /// The call is ended (the caller cancels, its deadline passes or the container is disposed) and
+    /// its host code reports the cancellation of its token as a failure of its own; the call ends
+    /// as what ended it. One Debug line of the channel names the type of what the host code
+    /// reported, the step and, for a send, the request's id.
     /// </summary>
-    /// <remarks>
-    /// Observed on the head of fix round 2: no log line names it; the lines written name the
-    /// timeout only (an endpoint lookup writes none).
-    /// </remarks>
-    [Theory(Skip = "RT3: whether the log keeps the type of what a send or an endpoint lookup reported while its call was being ended")]
+    [Theory]
+    [MemberData(nameof(EachStepEndedEachWay))]
+    public async Task What_the_host_code_reported_while_its_call_was_being_ended_is_named_in_the_log(Step step, Ending ending)
+    {
+        var (logs, request, reported) = await EndWhileTheHostCodeReportsAsync(step, ending);
+
+        var named = reported.GetType().Name;
+        var line = logs.Of<MediatorClientChannel>()
+            .Should().ContainSingle(l => Equals(l.State.GetValueOrDefault("ExceptionType"), named),
+                "one line names what the host code reported ({0}); the lines written: {1}", named, string.Join(" | ", logs.Entries.Select(e => e.Formatted)))
+            .Subject;
+        line.Level.Should().Be(LogLevel.Debug);
+        line.Formatted.Should().Contain(named).And.Contain("while the call was being ended");
+        if (step == Step.EndpointLookup)
+        {
+            line.Formatted.Should().Contain("the lookup step");
+            line.State.Should().NotContainKey("RequestId", "an endpoint lookup has no request");
+        }
+        else
+        {
+            line.Formatted.Should().Contain("the send step").And.Contain(request!.Id);
+            line.State.GetValueOrDefault("RequestId").Should().Be(request.Id, "the line names the request");
+        }
+    }
+
+    /// <summary>
+    /// The same calls. No log line, in its text, in any of its values or in an exception handed to
+    /// the logger, carries the text of what the host code reported: only its type is kept.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EachStepEndedEachWay))]
+    public async Task No_log_line_carries_the_text_of_what_the_host_code_reported_while_its_call_was_being_ended(Step step, Ending ending)
+    {
+        var (logs, _, reported) = await EndWhileTheHostCodeReportsAsync(step, ending);
+
+        logs.Entries.Should().NotBeEmpty("the call wrote its lines");
+        foreach (var entry in logs.Entries)
+        {
+            entry.Exception.Should().BeNull("no exception is handed to the logger");
+            entry.Everything.Should().NotContain(reported.Message, "the text of what the host code reported is not logged");
+            if (reported is DidResolutionException resolution)
+                entry.Everything.Should().NotContain(resolution.Did).And.NotContain(resolution.Reason);
+        }
+    }
+
+    /// <summary>
+    /// The call's deadline passes while its host code runs on and reports nothing. The line is
+    /// written all the same: what the channel observed then is the cancellation of its own wait on
+    /// the host code, and the line names that.
+    /// </summary>
+    [Theory]
     [InlineData(Step.EndpointLookup)]
     [InlineData(Step.Send)]
     [InlineData(Step.SendAllowingNoAnswer)]
     [InlineData(Step.OneWaySend)]
-    public async Task What_the_host_code_reported_while_its_call_was_being_ended_is_named_in_the_log(Step step)
+    public async Task For_host_code_that_reports_nothing_the_line_names_the_cancellation_of_the_channels_own_wait(Step step)
     {
         var time = new ManualTimeProvider();
-        var logs = new CapturedLogs();
-        var host = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step) };
+        var logs = new ClientLogCapture();
+        var host = new HeldHostCode();
         using var caller = new CancellationTokenSource();
         var (channel, _) = ChannelOver(time, logs, host);
-        var reported = FailureOf(step).GetType().Name;
 
         var (call, _) = Start(channel, step, caller.Token);
         await host.ParkAsync();
         await Task.Run(() => End(Ending.RequestTimesOut, caller, time, channel)).WaitAsync(PickupTest.Timeout);
 
         (await EndOf(call)).Should().BeOfType<TimeoutException>("the call's deadline passed");
-        host.Reported.Should().Be(1);
-        logs.Lines.Should().Contain(line => line.Contains(reported, StringComparison.Ordinal),
-            "what the host code reported ({0}) is kept somewhere ({1} lines were written: {2})", reported, logs.Lines.Count, string.Join(" | ", logs.Lines));
+        var line = logs.Of<MediatorClientChannel>()
+            .Should().ContainSingle(l => l.Formatted.Contains("while the call was being ended", StringComparison.Ordinal)).Subject;
+        line.State.GetValueOrDefault("ExceptionType").Should().BeOneOf(
+            new object[] { nameof(OperationCanceledException), nameof(TaskCanceledException) }, "the channel's own wait was cancelled");
         await channel.DisposeAsync();
+    }
+
+    /// <summary>Each step ended each of the three ways.</summary>
+    public static TheoryData<Step, Ending> EachStepEndedEachWay()
+    {
+        var rows = new TheoryData<Step, Ending>();
+        foreach (var step in Enum.GetValues<Step>())
+        {
+            foreach (var ending in Enum.GetValues<Ending>())
+                rows.Add(step, ending);
+        }
+        return rows;
+    }
+
+    // A call of a step, ended while its host code runs; the host code reports the cancellation of
+    // the token it was handed as a failure of its own. Returns once the call has ended as what
+    // ended it: the lines written, the request (none for an endpoint lookup) and what was reported.
+    private async Task<(ClientLogCapture Logs, Message? Request, Exception Reported)> EndWhileTheHostCodeReportsAsync(Step step, Ending ending)
+    {
+        var time = new ManualTimeProvider();
+        var logs = new ClientLogCapture();
+        var reported = FailureOf(step);
+        var host = new HeldHostCode { ReportsWhenCancelled = () => reported };
+        using var caller = new CancellationTokenSource();
+        var (channel, _) = ChannelOver(time, logs, host);
+
+        var (call, request) = Start(channel, step, caller.Token);
+        await host.ParkAsync();
+        await Task.Run(() => End(ending, caller, time, channel)).WaitAsync(PickupTest.Timeout);
+
+        ShouldHaveEndedAs(await EndOf(call), ending, caller.Token);
+        host.Reported.Should().Be(1, "the host code reported the cancellation of its token as a failure of its own");
+        await channel.DisposeAsync();
+        return (logs, request, reported);
     }
 
     // ---- an answer that won, and a send that then fails on its own -----------------------------------
@@ -283,34 +363,6 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
 
         /// <summary>End it with <paramref name="failure"/>, on the calling thread.</summary>
         public bool EndWith(Exception failure) => _ends.TrySetException(failure);
-    }
-
-    /// <summary>Keeps every log line written, at any level, with its level and category.</summary>
-    private sealed class CapturedLogs : ILoggerFactory
-    {
-        private readonly ConcurrentQueue<string> _lines = new();
-
-        public IReadOnlyList<string> Lines => _lines.ToArray();
-
-        public void AddProvider(ILoggerProvider provider)
-        {
-        }
-
-        public ILogger CreateLogger(string categoryName) => new Capture(this, categoryName);
-
-        public void Dispose()
-        {
-        }
-
-        private sealed class Capture(CapturedLogs owner, string category) : ILogger
-        {
-            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
-
-            public bool IsEnabled(LogLevel logLevel) => true;
-
-            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
-                => owner._lines.Enqueue($"{logLevel} {category}: {formatter(state, exception)}{(exception is null ? string.Empty : " [" + exception.GetType().Name + "]")}");
-        }
     }
 
     // A channel whose sends and endpoint lookups are the given host code, one per call in the order
