@@ -61,10 +61,10 @@ namespace DidComm.Mediator.Client;
 /// other kind of attachment, so it is never unpacked. The clients never discard
 /// one on their own: discard one you have given up on with <see cref="AckAsync"/>. That includes a
 /// message that did not open in time (all the messages of one delivery share one
-/// <see cref="MediatorClientOptions.UnpackTimeout"/>), and one the client remembers as slow to open
-/// from an earlier delivery: such a message is not opened again while its pause lasts, and is
-/// returned at once as a failed item with a <see cref="TimeoutException"/> (see
-/// <see cref="FetchAsync"/>, "Messages that were slow to open"). The error is the unpack's own
+/// <see cref="MediatorClientOptions.UnpackTimeout"/>), and one the client remembers because it did
+/// not open when it was delivered before: such a message is not opened again while its pause lasts,
+/// and is returned at once as a failed item with a <see cref="TimeoutException"/> (see
+/// <see cref="FetchAsync"/>, "Messages that did not open"). The error is the unpack's own
 /// exception, and its text can quote DIDs and key ids: log its type, not its message, wherever
 /// identifiers must not go.
 /// </para>
@@ -246,10 +246,10 @@ public sealed class PickupClient
     /// <see cref="AckAsync"/>'s "Before you close the connection"); after an abrupt drop the messages
     /// can come back. A message that failed stays leased to you for the
     /// mediator's lease, so a loop that fetches until drained gets past failures to what is behind
-    /// them (past messages that are slow to open as well: see "Messages that were slow to open"
-    /// below); one that polls more slowly than the lease, with more failures than
-    /// <paramref name="limit"/> that are not remembered as slow, keeps seeing only the failures until
-    /// it discards them with <see cref="AckAsync"/>.
+    /// them (past messages that never open as well: see "Messages that did not open" below); one
+    /// that polls more slowly than the lease, with more failures than <paramref name="limit"/> that
+    /// are not remembered, keeps seeing only the failures until it discards them with
+    /// <see cref="AckAsync"/>.
     /// </para>
     /// <para>
     /// <strong>Time to open the messages.</strong> All the messages of one fetch share one budget,
@@ -273,26 +273,37 @@ public sealed class PickupClient
     /// mediator's lease. A smaller <paramref name="limit"/> gives each message a larger share.
     /// </para>
     /// <para>
-    /// <strong>Messages that were slow to open</strong> are remembered, per mediator and mailbox (the
+    /// <strong>Messages that did not open</strong> are remembered, per mediator and mailbox (the
     /// <paramref name="mediatorDid"/> and <paramref name="from"/> of the call), by the mediator's id
-    /// for them: a message that did not open, after it was cut or the budget ended while it was being
-    /// opened, or after its opening ran for at least 3 percent of the budget (0.6 seconds by default)
-    /// before it failed. The client measures that time itself; nothing in the message decides it.
-    /// When the mediator delivers such a message again, it is not opened: it is returned at once as a
-    /// failed item (a <see cref="TimeoutException"/>), runs none of your code, costs none of the budget
-    /// and is not acknowledged. Its pause is 10 minutes (30 times
-    /// <see cref="MediatorClientOptions.UnpackTimeout"/>) and doubles each time it is slow again, up to
-    /// 256 times (about 85 minutes); deliveries of the same message that were opened at the same time
-    /// count as one slow episode, since a message is struck again only once its pause has ended. A
-    /// message that opens is forgotten. The memory keeps 256 messages per mediator and mailbox and 256
-    /// such pairs, the least recently seen going first, and it lives in this process only.
+    /// for them. A message is remembered when your code ran for it and it did not open, and either it
+    /// failed on its own, however quickly, or it ran for its share (measured from when its code
+    /// started) and was then cut: at its share, by a refusal while it kept the budget, or at the
+    /// budget's end. A host call waits a moment for a thread before its code runs, so a cut message
+    /// counts as having run its share when its code lost at most an eighth of the budget (2.5 seconds
+    /// by default) before it started (our choice, not an owner decision). So an honest message whose
+    /// code starts up to 2.5 seconds late (half the 5-second floor), delayed by a busy thread pool, and
+    /// then runs out its share without opening, is still remembered. It is not remembered when
+    /// it was cut before its code had run its share (it is opened again at the next fetch), when you
+    /// cancelled or the container was disposed, when it was refused for capacity, or when it was held
+    /// back. The client measures the time itself; nothing in the message decides it. When the
+    /// mediator delivers a remembered message again, it is not opened: it is returned at once as a
+    /// failed item (a <see cref="TimeoutException"/>: "it did not open when it was delivered
+    /// before"), runs none of your code, costs none of the budget and is not acknowledged. Its pause
+    /// is 10 minutes (30 times <see cref="MediatorClientOptions.UnpackTimeout"/>) and doubles each
+    /// time it fails again, up to 256 times (about 85 minutes); a message still inside its pause is not
+    /// struck again, so deliveries of it opened at the same time count once. A message that opens is
+    /// forgotten. So every failure is remembered for at least its first pause, an honest message that
+    /// failed only for a passing reason included (its sender's DID host briefly down, for example):
+    /// it comes back after 10 minutes, not at the next fetch. The memory keeps 256 messages per
+    /// mediator and mailbox and 256 such pairs, the least recently seen going first, and it lives in
+    /// this process only.
     /// </para>
     /// <para>
-    /// <strong>How long a loop takes to get past slow messages.</strong> A loop that fetches until
-    /// drained reaches a message behind slow ones: each fetch that meets new ones learns them within
-    /// its budget, and the fetches that meet only remembered ones take no time. With <c>ℓ</c> the
-    /// messages each fetch gets (<paramref name="limit"/>, or fewer when the mediator delivers fewer)
-    /// and <c>N</c> slow messages in front (up to 256), learning them all once takes
+    /// <strong>How long a loop takes to get past messages that never open.</strong> A loop that
+    /// fetches until drained reaches a message behind them: each fetch that meets new ones learns them
+    /// within its budget, and the fetches that meet only remembered ones take no time. With <c>ℓ</c>
+    /// the messages each fetch gets (<paramref name="limit"/>, or fewer when the mediator delivers
+    /// fewer) and <c>N</c> such messages in front (up to 256), learning them all once takes
     /// <c>L = ceil(N / ℓ)</c> budgets when ℓ is at most 16, and
     /// <c>L = ceil(ℓ / 16) × (ceil(N / ℓ) budgets + one of the mediator's leases)</c> above 16,
     /// because one fetch starts at most 16 of its messages. When L fits in the first pause, the
@@ -300,7 +311,7 @@ public sealed class PickupClient
     /// pauses end and are learned again, each time paused twice as long, and it reaches your message
     /// within <c>2 × ceil(log2(L / first pause)) × L</c>. (This bound was checked by simulation, not
     /// proven.) At this library's mediator (a quota of 100 messages per mailbox, at most 10 per
-    /// delivery), 99 slow messages in front of yours are passed within about 500 seconds with
+    /// delivery), 99 such messages in front of yours are passed within about 500 seconds with
     /// <paramref name="limit"/> 4 and about 200 seconds with 10. With limits 1 to 3, learning 99 takes
     /// longer than the first pause, so some are learned again: within about 2 hours 12 minutes, 33
     /// minutes and 22 minutes. At a mediator that delivers more than 16 at a time a fetch may wait out
@@ -323,7 +334,7 @@ public sealed class PickupClient
     /// reservation until it returns. Each opening is reserved before it starts, and at most 4 are held
     /// at a time per sender (the DID of the sender key the message's outer envelope names in
     /// <c>skid</c>), 16 per mailbox for messages whose outer envelope names no sender (anoncrypted
-    /// ones, for example), and 64 per container. A message whose sender, mailbox or container is at
+    /// ones, for example), and 256 per container. A message whose sender, mailbox or container is at
     /// its bound fails at once as "unpack capacity exhausted": it is not opened, not remembered and
     /// not acknowledged, and comes back later. So one sender whose lookups never end holds 4 openings,
     /// and its fifth and later messages are refused at once while other senders' messages still open.
@@ -331,6 +342,9 @@ public sealed class PickupClient
     /// bound a message counts against, never what is opened or how. The bounds do not cap the lookups
     /// of one sender's DID: per mailbox, up to 4 messages naming it and up to 16 that name no sender
     /// can be resolving it at once, and spellings of the DID that differ count as different senders.
+    /// One sender's stalled lookups therefore do not refuse another sender's message within a
+    /// mailbox, nor across the container's mailboxes up to its bound of 256 (below). A resolver that
+    /// blocks its thread can hold up to 256 threads of the container.
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
@@ -345,15 +359,20 @@ public sealed class PickupClient
     /// </para>
     /// <list type="bullet">
     /// <item><description>Many senders, each with a DID of its own, whose lookups ignore cancellation
-    /// can still hold all 64 openings of the container. Until those lookups end, every delivered
+    /// can still hold all 256 openings of the container. Until those lookups end, every delivered
     /// message fails at once ("unpack capacity exhausted"), for every DID and tenant of the container.
     /// Use a resolver that honours its cancellation token.</description></item>
+    /// <item><description>Even with lookups that honour their token, someone who keeps 64 mailboxes
+    /// of one container busy, each with 4 messages that open slowly every budget (about 13 fresh
+    /// messages a second at the defaults), holds all 256 while they run. A message of another mailbox
+    /// is then refused for the container; it is not remembered, and it comes back.</description></item>
     /// <item><description>Messages whose outer envelope names no sender (anoncrypted, authcrypted
     /// naming the sender only in <c>apu</c>, or re-wrapped by a mediator) share one bound of 16 per
     /// mailbox.</description></item>
-    /// <item><description>While new messages that are slow to open keep arriving, an honest message
-    /// that takes longer than a quarter of the budget (5 seconds by default) to open can be cut at
-    /// that quarter each time (a signed and authcrypted message resolves its sender twice).</description></item>
+    /// <item><description>While new messages that open slowly keep arriving, an honest message that
+    /// takes longer than a quarter of the budget (5 seconds by default) to open can be cut at that
+    /// quarter each time, and is then held back like them (a signed and authcrypted message resolves
+    /// its sender twice).</description></item>
     /// <item><description>More than 256 messages that never open queued in front of yours (which needs
     /// a mediator whose quota is above this library's 100): the memory cannot keep them all, and the
     /// loop reaches your message only once you discard the failures it hands you with
@@ -366,16 +385,18 @@ public sealed class PickupClient
     /// remembered messages take no time and run none of your code.</description></item>
     /// <item><description>A message refused under a <paramref name="recipientDid"/> filter ("for
     /// another of your DIDs") is not remembered: it is opened again each time it comes.</description></item>
-    /// <item><description>Up to 64 openings per container can be held by host code that never
+    /// <item><description>Up to 256 openings per container can be held by host code that never
     /// returns.</description></item>
     /// <item><description>Right after a message is cut at its share, its sender's lookups that are
     /// still ending can make that sender's next message in the same delivery be refused once for its
     /// bound ("unpack capacity exhausted"); that message is not remembered and opens at the next
     /// delivery.</description></item>
+    /// <item><description>An attacker who can tie up the pool, possible only with a host resolver that
+    /// blocks its thread, can make junk start late and dodge being remembered.</description></item>
     /// <item><description>A host clock that jumps forward while messages are being opened ends their
-    /// shares, or the whole budget, early: they are cut, and then remembered and held back for a
-    /// pause (a quick failure can look slow the same way). A clock that steps back never holds a
-    /// message back longer.</description></item>
+    /// shares, or the whole budget, early, and they are cut. They are remembered only if their code
+    /// ran its share as that clock measures it, and the jump counts toward it. A clock that steps back
+    /// never holds a message back longer.</description></item>
     /// </list>
     /// <para>
     /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
@@ -717,7 +738,8 @@ public sealed class PickupClient
     /// <see cref="MediatorClientOptions.UnpackTimeout"/>, during your own <c>MoveNextAsync</c>, the
     /// way <see cref="FetchAsync"/> opens a fetch: four at a time, each with a share of the time
     /// left, each on a thread-pool work item of its own and reserved before it starts, and a message
-    /// the client remembers as slow to open yielded at once as a failed item, without being opened.
+    /// the client remembers because it did not open before yielded at once as a failed item, without
+    /// being opened.
     /// The time you spend on an item never counts against it. Messages it runs out on are yielded as
     /// failed items (<see cref="TimeoutException"/>) and not acknowledged; the rest are yielded and
     /// acknowledged as usual. A delivery that brings nothing new is not opened at all.
@@ -754,8 +776,8 @@ public sealed class PickupClient
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing</strong> is yielded again each time the mediator delivers
-    /// it again; while the client remembers it as slow to open, it is yielded at once, without being
-    /// opened (see <see cref="FetchAsync"/>, "Messages that were slow to open"). Discard it with
+    /// it again; while the client remembers it, it is yielded at once, without being opened (see
+    /// <see cref="FetchAsync"/>, "Messages that did not open"). Discard it with
     /// <c>AckAsync(mediatorDid, from, new[] { item.Id })</c> once you have given up on it: the stream
     /// never does. Until it is discarded or ages out it counts against your mailbox's quota at the
     /// mediator (see <see cref="FetchAsync"/>). The error's text can quote DIDs and key ids (see
@@ -763,11 +785,11 @@ public sealed class PickupClient
     /// remarks).
     /// </para>
     /// <para>
-    /// <strong>Slow messages in front of yours.</strong> Each drain round learns up to 10 messages
-    /// that are slow to open within its budget, and a cycle drains as many such rounds as fit in the
+    /// <strong>Messages that never open, in front of yours.</strong> Each drain round learns up to 10
+    /// of them within its budget, and a cycle drains as many such rounds as fit in the
     /// mediator's lease before the first round's messages come back (at least one); rounds that meet
     /// only remembered messages take no time. So at this library's mediator, with the default lease
-    /// and settings, the stream reaches what is behind 99 slow messages in its fourth cycle (about 6
+    /// and settings, the stream reaches what is behind 99 of them in its fourth cycle (about 6
     /// minutes). With a lease shorter than <see cref="MediatorClientOptions.UnpackTimeout"/> it learns
     /// 10 per cycle, and when learning them all takes longer than their first pause (10 minutes), the
     /// ones learned first are opened once more as their pauses end: 99 then take about 18 cycles
@@ -837,8 +859,8 @@ public sealed class PickupClient
     /// many messages to send, never where to start (a Message Pickup 3.0 <c>delivery-request</c> has no
     /// offset). A round made only of them ends the drain, so messages queued behind them wait one more
     /// <see cref="MediatorClientOptions.LivePollInterval"/>. Nothing is lost: live delivery stays on,
-    /// and what is not acknowledged stays queued. That affects a recipient with more messages that are
-    /// slow to open than one drain can pass within a lease (our call, not an owner decision).
+    /// and what is not acknowledged stays queued. That affects a recipient with more messages that do
+    /// not open than one drain can pass within a lease (our call, not an owner decision).
     /// </para>
     /// </remarks>
     /// <param name="mediatorDid">The mediator's DID: a bare DID.</param>

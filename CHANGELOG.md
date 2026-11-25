@@ -6,32 +6,43 @@ All notable changes to didcomm-dotnet are documented here. Format follows
 
 ## [Unreleased]
 
-### Changed — the recipient client gets past senders whose messages are slow to open: it remembers them, sizes each message's time from what is left, reserves every unpack, and the live stream schedules with its own timers (FR-PICK-11, #111; epic #88)
+### Changed — the recipient client gets past messages that do not open: it remembers them, sizes each message's time from what is left, reserves every unpack, and the live stream schedules with its own timers (FR-PICK-11, #111; epic #88)
 
 **`DidComm.Core`: sender and signer keys are resolved asynchronously and honour cancellation.**
 
 **`DidComm.Mediator.Client` (not yet published): no public API is added or changed.** What changes
 is how `PickupClient.FetchAsync` and `PickupClient.ReceiveLiveAsync` open the messages a mediator
-delivers, and how the live stream schedules its work. Until now the client forgot a slow message as
-soon as a fetch ended, so more slow messages than about three fetches pass over within one of the
-mediator's leases kept a loop that fetches until drained, or a live stream's drain, from ever
+delivers, and how the live stream schedules its work. Until now the client forgot a message that
+did not open as soon as a fetch ended, so more slow messages than about three fetches pass over
+within one of the mediator's leases kept a loop that fetches until drained, or a live stream's drain, from ever
 reaching what was queued behind them (#96 documented this and the other limits below as deferred to
 #111).
 
-- **Messages that were slow to open are remembered.** Per mediator and mailbox, the client remembers
-  a delivered message that did not open after it was cut or the budget ended while it was being
-  opened, or after its opening ran for at least 3 percent of `MediatorClientOptions.UnpackTimeout`
-  (0.6 seconds by default) before it failed. The client measures that time itself; nothing in the
-  message decides it. When the mediator delivers such a message again, it is not opened: it is
-  returned (or yielded) at once as a failed item with a `TimeoutException`, runs none of the host's
-  code, costs none of the budget and is not acknowledged. Its pause is 30 times `UnpackTimeout` (10
-  minutes) and doubles each time it is slow again, up to 256 times (about 85 minutes); deliveries of
-  the same message opened at the same time count as one slow episode; a message that opens is
-  forgotten; a host clock that steps back never holds a message back longer. The memory keeps at
-  most 256 messages per mediator and mailbox and 256 such pairs, the least recently seen going
-  first, in this process only.
+- **Messages that did not open are remembered.** Per mediator and mailbox, the client remembers a
+  delivered message whose code ran and did not open, when it failed on its own, however quickly, or
+  when it ran for its share (measured from when its code started) and was then cut: at its share,
+  by a refusal while it kept the budget, or at the budget's end (owner decision on #111). A host call
+  waits a moment for a thread before its code runs, so a cut message counts as having run its share
+  when its code lost at most an eighth of `MediatorClientOptions.UnpackTimeout` (2.5 seconds by
+  default) before it started (our choice, not the owner's). So an honest message whose code starts
+  up to 2.5 seconds late (half the 5-second floor), delayed by a busy thread pool, and then runs out
+  its share without opening, is still remembered. It is not remembered when it was cut
+  before its code ran its share (it is opened again at the next fetch), when the caller cancelled or
+  the container shut down, when it was refused for capacity, or when it was held back. The client
+  measures the time itself; nothing in the message decides it. When the mediator delivers a
+  remembered message again, it is not opened: it is returned (or yielded) at once as a failed item
+  with a `TimeoutException` ("it did not open when it was delivered before"), runs none of the
+  host's code, costs none of the budget and is not acknowledged. Its pause is 30 times
+  `UnpackTimeout` (10 minutes) and doubles each time it fails again, up to 256 times (about 85
+  minutes); a message still inside its pause is not struck again, so deliveries of it opened at the
+  same time count once; a message that opens is forgotten; a host clock that steps back never holds
+  a message back longer. So every failure is remembered for at least its first pause, an honest
+  message that failed only for a passing reason included (its sender's DID host briefly down, for
+  example): it comes back after 10 minutes, not at the next fetch. The memory keeps at most 256
+  messages per mediator and mailbox and 256 such pairs, the least recently seen going first, in this
+  process only.
 - **How long a loop takes.** A loop that fetches until drained reaches the message behind up to 256
-  slow ones. With ℓ the messages each fetch gets and N in front, learning them once takes
+  that never open. With ℓ the messages each fetch gets and N in front, learning them once takes
   `ceil(N / ℓ)` budgets when ℓ is at most 16, and `ceil(ℓ / 16) × (ceil(N / ℓ) budgets + one lease)`
   above 16; the message is reached within that time L when L fits in the first pause, and within
   `2 × ceil(log2(L / first pause)) × L` otherwise (checked by simulation, not proven). At
@@ -52,8 +63,11 @@ reaching what was queued behind them (#96 documented this and the other limits b
   which is still well inside the mediator's lease.
 - **Every unpack is reserved before it starts.** At most 4 at a time per sender (the sender the
   message's outer envelope names in `skid`), 16 per mailbox for messages whose outer envelope names
-  no sender, and 64 per container. A message beyond a bound fails at once as "unpack capacity
-  exhausted", is not remembered and is not acknowledged; it comes back. This replaces the bound of 16
+  no sender, and 256 per container (owner decision on #111). A message beyond a bound fails at once
+  as "unpack capacity exhausted", is not remembered and is not acknowledged; it comes back. So one
+  sender's stalled lookups do not refuse another sender's message within a mailbox, nor across the
+  container's mailboxes up to that bound; a resolver that blocks its thread can hold up to 256
+  threads. This replaces the bound of 16
   abandoned unpacks, which was checked rather than reserved (so deliveries opened together could
   leave more running) and shared by the whole container (so one sender whose lookups ignored
   cancellation could stop every tenant's messages). Now such a sender holds its own four. The bounds
@@ -77,20 +91,26 @@ reaching what was queued behind them (#96 documented this and the other limits b
   never opens now costs two delivery requests and one yield per cycle, not fifty of each, and so
   does a message such a mediator keeps after it was acknowledged.
 - **What remains** (documented in `FetchAsync`, `ReceiveLiveAsync`, `UnpackTimeout`, FR-PICK-11 and
-  the architecture doc): many senders whose lookups ignore cancellation can still hold all 64
+  the architecture doc): many senders whose lookups ignore cancellation can still hold all 256
   reservations of a container, and then every delivered message fails at once until those lookups
-  end (use a resolver that honours its token); messages naming no sender share 16 per mailbox; under
-  a steady flow of fresh slow junk, an honest message that takes longer than a quarter of the budget
-  to open is cut each time (a signed and authcrypted message resolves its sender twice); with more
+  end (use a resolver that honours its token); with lookups that do honour it, someone who keeps 64
+  mailboxes of one container busy, each with 4 slow messages per budget (about 13 fresh messages a
+  second at the defaults), holds all 256 while they run, and a message of another mailbox is then
+  refused for the container, not remembered, and comes back; messages naming no sender share 16 per
+  mailbox; under a steady flow of fresh slow junk, an honest message that takes longer than a
+  quarter of the budget to open is cut each time and then held back (a signed and authcrypted
+  message resolves its sender twice); an attacker who can tie up the pool, possible only with a host
+  resolver that blocks its thread, can make junk start late and dodge being remembered; with more
   than 256 messages that never open in front (a mediator whose quota is above this library's 100),
   the message behind is reached only once the host discards the failures it is handed with
   `AckAsync`, and more than 256 mediator and mailbox pairs, or a restart, make remembered messages be
   learned again; a mediator that does not lease still needs the host to discard what keeps failing
-  with `AckAsync`; a message refused by the `recipientDid` filter is not remembered; up to 64
+  with `AckAsync`; a message refused by the `recipientDid` filter is not remembered; up to 256
   reservations can be held by host code that never returns; right after a cut, a sender's lookups
   still ending can make its next message in the same delivery be refused once (it opens at the next
-  delivery); a host clock that jumps forward cuts the messages being opened early, and they are then
-  remembered; and a live stream learns slow messages in proportion to the mediator's lease (with a
+  delivery); a host clock that jumps forward cuts the messages being opened early, and they are
+  remembered only if their code ran its share as that clock measures it, the jump counting toward
+  it; and a live stream learns messages that never open in proportion to the mediator's lease (with a
   lease shorter than `UnpackTimeout`, 99 take about 18 cycles). A live stream whose requests all fail
   never gives up while the mediator keeps pushing new messages, and sends at most one request per
   back-off meanwhile (1, 2, 4, 8, 16, then every 30 seconds: about 24 in 10 minutes; owner decision
