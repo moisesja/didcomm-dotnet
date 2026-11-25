@@ -572,10 +572,11 @@ public sealed class DeliveredUnpackSlowSenderTests
     /// <summary>
     /// T11 (I-1, I-2): thousands of deliveries over three mailboxes, with named and anonymous senders
     /// and every kind of message — opens, fails at once, fails after a second, honours its token,
-    /// ignores its token and ends later, held back — and callers that cancel mid-delivery. After every
-    /// round the reservations held are exactly the lookups still running (no release missed or
-    /// doubled); once the late lookups end, nothing is reserved, no partition is left and no timer is
-    /// scheduled.
+    /// ignores its token and ends later, held back — and callers that cancel mid-delivery. A delivery
+    /// has up to three times as many messages as are opened at once, so in the larger ones messages
+    /// wait for a worker. After every round the reservations held are exactly the lookups still
+    /// running (no release missed or doubled); once the late lookups end, nothing is reserved, no
+    /// partition is left and no timer is scheduled.
     /// </summary>
     [Fact]
     public async Task Thousands_of_mixed_deliveries_over_mailboxes_and_senders_end_with_nothing_reserved()
@@ -620,7 +621,7 @@ public sealed class DeliveredUnpackSlowSenderTests
             var batches = new List<(Task<IReadOnlyList<DeliveredOutcome>> Task, bool Cancelled)>();
             for (var d = 0; d < 6; d++)
             {
-                var count = random.Next(1, 13);
+                var count = random.Next(1, 3 * AtOnce + 1);
                 var messages = Enumerable.Range(0, count).Select(i =>
                 {
                     // Ids repeat across rounds, so remembered messages are held back too.

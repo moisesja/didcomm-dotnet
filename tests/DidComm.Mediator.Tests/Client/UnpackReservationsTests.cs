@@ -5,10 +5,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// <see cref="UnpackReservations"/> (#111, I-1, I-2): 4 host calls per named sender and 16 for the
-/// anonymous partition, per (mediator, mailbox); 64 per container; a refusal says which bound refused;
-/// each reservation is given back exactly once, whoever releases it; and the table keeps no partition
-/// whose count is zero.
+/// <see cref="UnpackReservations"/> (#111, I-1, I-2): 16 host calls per named sender (owner
+/// decision G) and 16 for the anonymous partition, per (mediator, mailbox); 256 per container (owner
+/// decision D); a refusal says which bound refused; each reservation is given back exactly once,
+/// whoever releases it; and the table keeps no partition whose count is zero.
 /// </summary>
 public sealed class UnpackReservationsTests
 {
@@ -53,8 +53,10 @@ public sealed class UnpackReservationsTests
     }
 
     [Fact]
-    public void A_named_sender_gets_four_per_mailbox_and_the_anonymous_partition_sixteen()
+    public void A_named_sender_gets_sixteen_per_mailbox_and_the_anonymous_partition_sixteen_of_its_own()
     {
+        UnpackReservations.MaxPerSender.Should().Be(16, "owner decision G");
+        UnpackReservations.MaxPerAnonymous.Should().Be(16);
         var reservations = new UnpackReservations();
         for (var i = 0; i < UnpackReservations.MaxPerSender; i++)
             reservations.TryTake(Bob, "did:example:alice", out _, out _).Should().BeTrue();
@@ -75,8 +77,9 @@ public sealed class UnpackReservationsTests
     }
 
     [Fact]
-    public void The_container_holds_sixty_four_and_refuses_the_next_for_the_container()
+    public void The_container_holds_two_hundred_and_fifty_six_and_refuses_the_next_for_the_container()
     {
+        UnpackReservations.MaxReserved.Should().Be(256, "owner decision D");
         var reservations = new UnpackReservations();
         var taken = new List<UnpackReservations.Reservation>();
         for (var sender = 0; sender < UnpackReservations.MaxReserved / UnpackReservations.MaxPerSender; sender++)

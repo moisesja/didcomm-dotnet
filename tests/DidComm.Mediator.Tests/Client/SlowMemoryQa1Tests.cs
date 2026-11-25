@@ -24,6 +24,11 @@ public sealed class SlowMemoryQa1Tests
     private const int Q = SlowMemory.EntriesPerPartition;
     private const int R = SlowMemory.MaxPartitions;
 
+    // As many messages of one delivery as are opened at the same time, and a named sender's bound
+    // (sixteen each: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+    private const int PerSender = UnpackReservations.MaxPerSender;
+
     // ---- eviction at the real bounds (I-11, R-4) ---------------------------------------------------
 
     /// <summary>
@@ -277,8 +282,10 @@ public sealed class SlowMemoryQa1Tests
     /// <summary>
     /// I-9: a message refused for its sender's partition, and a message that did not start because
     /// the budget ended before its turn, are never remembered; the messages that ran for the whole
-    /// budget are. (Without a time limit per message, #111 owner decision E, the four that start
-    /// keep the workers until the budget ends, so the thirteen behind them do not start.)
+    /// budget are. Mallory's sixteen lookups (her bound) ignore their token and still run; her
+    /// seventeenth message is refused. Behind it are thirteen more messages than are opened at
+    /// once: without a time limit per message (#111, owner decision E) the sixteen that start keep
+    /// the workers until the budget ends, so the thirteen behind them do not start.
     /// </summary>
     [Fact]
     public async Task A_refusal_and_a_message_not_started_are_never_remembered()
@@ -298,24 +305,29 @@ public sealed class SlowMemoryQa1Tests
         }, B, time);
         try
         {
-            var first = unpacker.UnpackAllAsync(Qa1.Bob, Enumerable.Range(0, 4).Select(i => Qa1.Message(Qa1.From(MalloryKid, "mallory-" + i), "mallory-" + i)).ToArray(), "request-1", default);
-            await calls.WaitForAsync(4, RealTime);
+            PerSender.Should().BeLessThanOrEqualTo(AtOnce, "Mallory's first delivery starts all of its messages at once");
+            var first = unpacker.UnpackAllAsync(Qa1.Bob, Enumerable.Range(0, PerSender).Select(i => Qa1.Message(Qa1.From(MalloryKid, "mallory-" + i), "mallory-" + i)).ToArray(), "request-1", default);
+            await calls.WaitForAsync(PerSender, RealTime);
             time.Advance(B);
             await first.WaitAsync(RealTime);
 
-            var messages = new[] { Qa1.Message(Qa1.From(MalloryKid, "mallory-4"), "mallory-4") }
-                .Concat(Enumerable.Range(0, 17).Select(i => Qa1.Message(Qa1.Anon("s-" + i), "s-" + i))).ToArray();
+            const string refused = "mallory-refused"; // her seventeenth
+            const int behind = 13; // how many wait behind the sixteen that start
+            var messages = new[] { Qa1.Message(Qa1.From(MalloryKid, refused), refused) }
+                .Concat(Enumerable.Range(0, AtOnce + behind).Select(i => Qa1.Message(Qa1.Anon("s-" + i), "s-" + i))).ToArray();
             var second = unpacker.UnpackAllAsync(Qa1.Bob, messages, "request-2", default);
-            await calls.WaitForAsync(8, RealTime);
+            await calls.WaitForAsync(PerSender + AtOnce, RealTime);
             time.Advance(B);
             var outcomes = await second.WaitAsync(RealTime);
 
             outcomes[0].Error!.Message.Should().Contain("capacity exhausted");
-            outcomes.Skip(5).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
-            calls.Count.Should().Be(8, "the four of the first delivery and the four that started in the second");
-            unpacker.Memory.HeldBack(Qa1.Bob, new[] { "mallory-4" }).Single().Should().BeFalse("a refusal is not remembered");
-            unpacker.Memory.HeldBack(Qa1.Bob, Enumerable.Range(4, 13).Select(i => (string?)("s-" + i)).ToArray()).Should().OnlyContain(h => !h, "a message that did not start is not remembered");
-            unpacker.Memory.HeldBack(Qa1.Bob, Enumerable.Range(0, 4).Select(i => (string?)("s-" + i)).ToArray()).Should().OnlyContain(h => h, "the four that ran for the whole budget are");
+            outcomes.Skip(1).Take(AtOnce).Should().OnlyContain(o => o.Error!.Message.Contains("ran out while it was being opened"));
+            outcomes.Skip(1 + AtOnce).Should().HaveCount(behind).And.OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
+            calls.Count.Should().Be(PerSender + AtOnce, "the {0} of the first delivery and the {1} that started in the second", PerSender, AtOnce);
+            calls.Labels.Should().NotContain(refused, "the refused message never started");
+            unpacker.Memory.HeldBack(Qa1.Bob, new[] { refused }).Single().Should().BeFalse("a refusal is not remembered");
+            unpacker.Memory.HeldBack(Qa1.Bob, Enumerable.Range(AtOnce, behind).Select(i => (string?)("s-" + i)).ToArray()).Should().OnlyContain(h => !h, "a message that did not start is not remembered");
+            unpacker.Memory.HeldBack(Qa1.Bob, Enumerable.Range(0, AtOnce).Select(i => (string?)("s-" + i)).ToArray()).Should().OnlyContain(h => h, "the {0} that ran for the whole budget are", AtOnce);
         }
         finally
         {
@@ -324,9 +336,11 @@ public sealed class SlowMemoryQa1Tests
     }
 
     /// <summary>
-    /// I-9 with four messages still running for 10 s, long past the slow threshold, and two that
-    /// failed after 3 s before: when the caller cancels, or the owner shuts down, the two that
-    /// failed slowly stay remembered (decided before) and none of the four running is.
+    /// I-9 with sixteen messages (as many as are opened at once) still running, fourteen of them
+    /// for 10 s and two for 7 s, and two that failed after 3 s before: when the caller cancels, or
+    /// the owner shuts down, the two that failed slowly stay remembered (decided before) and none of
+    /// the sixteen running is. Two more messages than are opened at once, so the last two start only
+    /// once the two that fail have their outcomes and their workers are free.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -350,12 +364,14 @@ public sealed class SlowMemoryQa1Tests
             using (calls.Enter(label, ct))
                 return await UnpackFakes.StallUntilCancelled(ct);
         }, B, time, shutdown ? stop.Token : default);
-        var messages = new[] { "quick-0", "quick-1", "run-0", "run-1", "run-2", "run-3" }.Select(l => Qa1.Message(Qa1.Anon(l), l)).ToArray();
+        var messages = new[] { "quick-0", "quick-1" }.Concat(Enumerable.Range(0, AtOnce).Select(i => "run-" + i)).Select(l => Qa1.Message(Qa1.Anon(l), l)).ToArray();
 
         var delivery = unpacker.UnpackAllAsync(Qa1.Bob, messages, "request", shutdown ? default : caller.Token);
-        await calls.WaitForAsync(4, RealTime);
+        // The two that fail and the first fourteen of the others hold the sixteen workers.
+        await calls.WaitForAsync(AtOnce, RealTime);
         time.Advance(TimeSpan.FromSeconds(3));
-        await calls.WaitForAsync(6, RealTime);
+        // The last two started: the workers that took them had recorded the two failures first.
+        await calls.WaitForAsync(AtOnce + 2, RealTime);
         time.Advance(TimeSpan.FromSeconds(7));
         if (shutdown)
             stop.Cancel();
@@ -364,7 +380,7 @@ public sealed class SlowMemoryQa1Tests
         var ended = await Record.ExceptionAsync(() => delivery.WaitAsync(RealTime));
 
         ended.Should().BeAssignableTo<OperationCanceledException>();
-        unpacker.Memory.HeldBack(Qa1.Bob, messages.Select(m => m.Id).ToArray()).Should().Equal(true, true, false, false, false, false);
+        unpacker.Memory.HeldBack(Qa1.Bob, messages.Select(m => m.Id).ToArray()).Should().Equal(new[] { true, true }.Concat(Enumerable.Repeat(false, AtOnce)));
     }
 
     // ---- D-13: an honest slow sender after messages naming its key ---------------------------------
@@ -373,9 +389,10 @@ public sealed class SlowMemoryQa1Tests
     /// QA1-5 restated (#111 owner decision E). It pinned a residual of the per-message time limit:
     /// messages naming Sam's key were cut at their share and still held Sam's partition when Sam's
     /// real message was taken, which was then refused once. Without that limit nothing is cut: the
-    /// four messages naming Sam's key (Sam's lookups take 5.5 s) fail on their own, their workers
-    /// give their reservations back before taking the next message, and Sam's real message, taken
-    /// after eleven that fail at once, is not refused and opens in the same delivery.
+    /// sixteen messages naming Sam's key (Sam's bound, and as many as are opened at once; Sam's
+    /// lookups take 5.5 s) fill Sam's partition and fail on their own, their workers give their
+    /// reservations back before taking the next message, and Sam's real message, taken after
+    /// eleven that fail at once, is not refused and opens in the same delivery.
     /// </summary>
     [Fact]
     public async Task A_slow_senders_real_message_after_messages_naming_its_key_is_not_refused_and_opens_in_the_same_delivery()
@@ -393,21 +410,24 @@ public sealed class SlowMemoryQa1Tests
                 await delay;
             return label == "sam" ? UnpackFakes.Opened(label) : throw new CryptoException("JWE could not be decrypted.");
         }, B, time);
-        var messages = Enumerable.Range(0, 4).Select(i => Qa1.Message(Qa1.From(SamKid, "named-" + i), "named-" + i))
+        PerSender.Should().Be(AtOnce, "the messages naming Sam's key fill Sam's partition and hold every worker");
+        var messages = Enumerable.Range(0, PerSender).Select(i => Qa1.Message(Qa1.From(SamKid, "named-" + i), "named-" + i))
             .Concat(Enumerable.Range(0, 11).Select(i => Qa1.Message(Qa1.Anon("fast-" + i), "fast-" + i)))
             .Append(Qa1.Message(Qa1.From(SamKid, "sam"), "sam"))
             .ToArray();
 
         var delivery = unpacker.UnpackAllAsync(Qa1.Bob, messages, "request", default);
-        await calls.WaitForAsync(4, RealTime);
-        time.Advance(lookup); // 5.5 s: the four naming Sam's key fail on their own
-        await calls.WaitForAsync(5, RealTime);
+        await calls.WaitForAsync(PerSender, RealTime);
+        unpacker.Reserved.Should().Be(PerSender, "Sam's partition is full");
+        calls.Labels.Should().NotContain("sam", "Sam's real message waits for a worker");
+        time.Advance(lookup); // 5.5 s: the sixteen naming Sam's key fail on their own
+        await calls.WaitForAsync(PerSender + 1, RealTime);
         time.Advance(lookup); // 11 s: Sam's own lookup ends
         var outcomes = await delivery.WaitAsync(RealTime);
 
-        outcomes.Take(15).Should().OnlyContain(o => o.Error is CryptoException, "nothing was cut or refused");
-        outcomes[15].Succeeded.Should().BeTrue("Sam's partition held none of the finished lookups when its real message was taken");
-        calls.Labels.Should().HaveCount(5).And.Contain("sam");
+        outcomes.Take(PerSender + 11).Should().OnlyContain(o => o.Error is CryptoException, "nothing was cut or refused");
+        outcomes[PerSender + 11].Succeeded.Should().BeTrue("Sam's partition held none of the finished lookups when its real message was taken");
+        calls.Labels.Should().HaveCount(PerSender + 1).And.Contain("sam");
         unpacker.Memory.HeldBack(Qa1.Bob, new[] { "sam" }).Single().Should().BeFalse("a message that opened is not remembered");
         unpacker.Reserved.Should().Be(0);
     }

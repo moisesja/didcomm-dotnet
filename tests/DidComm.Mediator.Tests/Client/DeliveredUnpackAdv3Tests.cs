@@ -234,7 +234,8 @@ public sealed class DeliveredUnpackAdv3Tests
     /// Held (passes): thousands of deliveries with every kind of message — opens at once, fails at
     /// once, throws synchronously, honours its token, ignores its token and ends later, plus callers
     /// that cancel mid-delivery — leave the reserved count at exactly zero once the late unpacks
-    /// end (it never drifts up or down), and no timer scheduled.
+    /// end (it never drifts up or down), and no timer scheduled. A delivery has up to three times as
+    /// many messages as are opened at once, so in the larger ones messages wait for a worker.
     /// </summary>
     [Fact]
     public async Task Thousands_of_mixed_deliveries_leave_no_reservation_and_no_timer()
@@ -262,7 +263,7 @@ public sealed class DeliveredUnpackAdv3Tests
             var batches = new List<(Task<IReadOnlyList<DeliveredOutcome>> Task, bool Cancelled)>();
             for (var d = 0; d < 6; d++)
             {
-                var count = random.Next(1, 13);
+                var count = random.Next(1, 3 * AtOnce + 1);
                 var payloads = Enumerable.Range(0, count).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(kinds[random.Next(kinds.Length)] + "-" + round + "-" + d + "-" + i)).ToArray();
                 var cancelled = d == 5;
                 batches.Add((unpacker.UnpackAllAsync(payloads, "request", cancelled ? cancel.Token : default), cancelled));

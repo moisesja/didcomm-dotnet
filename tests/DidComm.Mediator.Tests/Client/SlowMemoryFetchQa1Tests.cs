@@ -523,28 +523,34 @@ public sealed class SlowMemoryFetchQa1Tests
     /// A host clock that starts throwing while a delivery is being opened, at the moment a message's
     /// failure is read: the delivery still ends at its budget, every message has an outcome, nothing
     /// is remembered from a failed reading, and the next fetch with a working clock opens the
-    /// messages again.
+    /// messages again. Sixteen messages that fail after 1 s (as many as are opened at once) hold
+    /// every worker, and the honest message behind them waits for one: no worker comes back from a
+    /// failed reading, so it is out of time before its turn.
     /// </summary>
     [Fact]
     public async Task A_clock_that_throws_while_a_delivery_is_opened_ends_it_at_its_budget_and_strikes_nothing()
     {
+        const int slow = DeliveredMessageUnpacker.FetchConcurrency;
         var (exchange, mediator) = SlowSenderFetchQa1Tests.Setup(label => label.StartsWith("honest", StringComparison.Ordinal) ? Qa1Step.Open : Qa1Step.FailAfter(TimeSpan.FromSeconds(1)), lease: null);
-        for (var i = 0; i < 4; i++)
+        for (var i = 0; i < slow; i++)
             mediator.Enqueue("slow-" + i, Qa1.Anon("slow-" + i));
         mediator.Enqueue("honest", Qa1.From(AliceKid, "honest"));
         var client = exchange.Client();
 
-        var fetch = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 5);
-        await exchange.Host.Calls.WaitForAsync(4, Qa1Exchange.Guard);
+        var fetch = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: slow + 1);
+        await exchange.Host.Calls.WaitForAsync(slow, Qa1Exchange.Guard);
+        SpinWait.SpinUntil(() => exchange.Host.Waiting == slow, Qa1Exchange.Guard).Should().BeTrue("each of the {0} waits on the clock for its second", slow);
         exchange.Clock.Throws = true;
         exchange.Clock.Inner.Advance(TimeSpan.FromSeconds(1));
         exchange.Clock.Inner.Advance(B);
         var batch = await fetch.WaitAsync(Qa1Exchange.Guard);
         exchange.Clock.Throws = false;
 
-        batch.Items.Should().HaveCount(5).And.OnlyContain(i => i.Error != null);
+        batch.Items.Should().HaveCount(slow + 1).And.OnlyContain(i => i.Error != null);
+        batch.Items.Single(i => i.Id == "honest").Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("before its turn came");
+        exchange.Host.Calls.Labels.Should().NotContain("honest", "it waited for a worker, and none came back from a failed reading");
         exchange.Unpacker.Memory.Count.Should().Be(0);
-        var again = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 5));
+        var again = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: slow + 1));
         again.Items.Single(i => i.Id == "honest").Unpacked.Should().NotBeNull();
     }
 }
