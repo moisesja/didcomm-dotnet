@@ -1427,3 +1427,46 @@ Format per entry:
 - **How to apply:** When an option changes a rate or a bound, run the acceptance matrix on both sides
   first and put both columns in the option. Give the test's name and the line that prints the figure.
   Tune no constant to improve a figure; report the cell. See [[L-076]].
+
+## L-080 — Before comparing against a base, show that the base gives one number.
+
+- **Lesson:** A sentence of the form "never slower than before" compares two things that must each be
+  a number. Run the base several times first. If it varies from run to run, the comparison is a
+  distribution on that side, and the sentence says so or is not written.
+- **Why:** #111: the owner was told that opening sixteen messages at once was "never slower than
+  before the change in any of the 96 cases". That had been measured against one run of a base that
+  does not give one number: in fifteen runs of the base 35 of its 64 named-sender cases varied, and in
+  ten some run was faster than the new code. The cause was a race in the base (messages refused
+  inside a delivery, which cost no time). The coordinator had to correct the sentence with the owner.
+- **How to apply:** Measure both sides at least five times before a "never / always / in every case"
+  comparison leaves the session. Report the base's spread beside the new figure, name both runs, and
+  say what was checked about the cause and in how many cases. See [[L-079]].
+
+## L-081 — A flag handed to hosts for a decision is made from the same decision the library makes.
+
+- **Lesson:** When the library tells a host "leave this one, I am not done with it", that signal and
+  the library's own bookkeeping must come from one decision, made once. Two rules that draw their
+  lines in different places leave a gap, and a host that follows the documented advice falls into it.
+- **Why:** #111: the first form of the flag on a delivered item said "not attempted" (no host call was
+  created), while the client's memory said "not counted" (the message had not had the whole time).
+  A message that started late and was cut, or whose call never got a thread, was between the two:
+  the client would open it again, and a host that discarded "what was tried" deleted it first. An
+  independent review found both cases; the flag was renamed and now says exactly what the memory says.
+- **How to apply:** For every host-facing signal, write the invariant that ties it to the internal
+  state ("true if and only if nothing was counted against the message") and test that equivalence
+  over mixed inputs, reading the internal state itself and not the signal. See [[L-076]].
+
+## L-082 — A gate run while other work loads the machine is not a gate; and a merge of two test-harness changes is run before anyone builds on it.
+
+- **Lesson:** Runs that decide something (a gate, a 50-run loop, a real-clock measurement) are made
+  with nothing else running, and the load average is recorded with the result. After merging two
+  branches that both touch test harnesses, run the suite on the merged head before handing that head
+  to anyone else.
+- **Why:** #111: six agents' test loops ran at once and the load average reached 220 on 14 cores;
+  tests took minutes and tripped their real-time hang guards, the suite's results in that hour meant
+  nothing, and one failure showed as a null reference in a test's own print line. Twice a harness that
+  waits for "no reservation held" was merged with a test that holds reservations itself, each green on
+  its own branch and red together.
+- **How to apply:** One measuring run at a time; give each agent its turn for loops, and say in the
+  report what else was running. A real-time guard that trips under load is re-run on a quiet machine
+  before it is diagnosed; a wrong value is diagnosed at once. See [[L-065]].

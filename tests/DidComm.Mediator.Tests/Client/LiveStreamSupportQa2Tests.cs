@@ -13,7 +13,8 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// QA-2 (#111): a manual clock whose timers fire only when it is advanced, and whose readings can be
 /// stepped back and forth or made to go lower on every read, independently of its timers. It can
-/// advance to its next due timer, so a test drives simulated time from one event to the next.
+/// advance to its next due timer, one timer at a time, so a test drives simulated time from one
+/// event to the next.
 /// </summary>
 internal sealed class SimClock : TimeProvider
 {
@@ -27,6 +28,12 @@ internal sealed class SimClock : TimeProvider
 
     /// <summary>Whether every reading is lower than the one before (timers are not affected).</summary>
     public bool ReadingsKeepFalling { get; set; }
+
+    /// <summary>Runs on the advancing thread after each timer has fired (a test's seam: to let the other side react before the next timer fires).</summary>
+    public Action? AfterFire { get; set; }
+
+    /// <summary>Among timers due at the same instant, fire the one created last first (the one created first, when not set).</summary>
+    public bool NewestFirstAmongEqual { get; set; }
 
     /// <summary>Simulated time on the timers since the start.</summary>
     public TimeSpan Now
@@ -108,26 +115,37 @@ internal sealed class SimClock : TimeProvider
             }
             next.Fire();
             fired++;
+            AfterFire?.Invoke();
         }
     }
 
-    /// <summary>Advance to the next due timer and fire every timer due then; false when no timer is scheduled.</summary>
+    /// <summary>
+    /// Advance to the next due timer and fire that one timer; false when no timer is scheduled.
+    /// Timers due at the same instant fire one per call (the one created first, unless
+    /// <see cref="NewestFirstAmongEqual"/>), so whoever drives the clock sees the other side's
+    /// reaction to each firing before the next: a stream that wakes for one alarm, finds nothing to
+    /// do and publishes its next wait has left that wait again once the second alarm of the same
+    /// instant fires, and a driver that fired both in one step could take the wait in between for
+    /// the stream being parked.
+    /// </summary>
     public bool AdvanceToNextDue()
     {
-        long? next = null;
-        long now;
+        SimTimer? next = null;
         lock (_gate)
         {
-            now = _now;
             foreach (var timer in _timers)
             {
-                if (timer.DueAt is { } due && (next is null || due < next))
-                    next = due;
+                if (timer.DueAt is { } due && (next is null || due < next.DueAt || (due == next.DueAt && NewestFirstAmongEqual)))
+                    next = timer;
             }
+            if (next is null)
+                return false;
+            if (next.DueAt!.Value > _now)
+                _now = next.DueAt.Value;
+            next.DueAt = next.Period is { } period ? next.DueAt + period : null;
         }
-        if (next is null)
-            return false;
-        Advance(TimeSpan.FromTicks(Math.Max(0, next.Value - now)));
+        next.Fire();
+        AfterFire?.Invoke();
         return true;
     }
 
@@ -631,19 +649,25 @@ internal sealed class StreamDriver : IAsyncDisposable
         }
     }
 
-    /// <summary>The stream object behind the enumeration (for its test seams).</summary>
-    public LiveDeliveryStream Stream
+    /// <summary>
+    /// The stream object behind the enumeration (for its test seams), or <c>null</c> once the
+    /// enumeration has ended: its state machine then holds the stream no longer.
+    /// </summary>
+    public LiveDeliveryStream? Stream
     {
         get
         {
             var member = _stream.GetType().GetFields(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
                 .Single(f => f.FieldType == typeof(LiveDeliveryStream));
-            return (LiveDeliveryStream)member.GetValue(_stream)!;
+            return (LiveDeliveryStream?)member.GetValue(_stream);
         }
     }
 
-    /// <summary>How many ids the stream remembers for the current drain: yielded as failures, or taken (its test seam).</summary>
-    public int Reported => Stream.DoneThisDrainCount;
+    /// <summary>How many ids the stream remembers for the current drain: yielded as failures, or taken (its test seam); 0 once the stream has ended.</summary>
+    public int Reported => Stream?.DoneThisDrainCount ?? 0;
+
+    /// <summary>How many taken messages wait for an acknowledgement (the stream's test seam), as text for a printed line; "the stream has ended" once it has.</summary>
+    public string TakenText => Stream is { } stream ? stream.TakenCount.ToString(System.Globalization.CultureInfo.InvariantCulture) : "the stream has ended";
 
     /// <summary>Stop the stream: cancel, observe the pending move, dispose (which acknowledges and turns live mode off).</summary>
     public async ValueTask DisposeAsync()

@@ -151,7 +151,7 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
         var liveOns = log.Where(r => r.Type == LiveOn).Select(r => r.At).ToArray();
         var refused = Snapshot(refusals).Where(r => r.At <= TenMinutes).ToArray();
         var pushed = Snapshot(pushes).Where(p => p.At <= TenMinutes).ToArray();
-        output.WriteLine($"push every {pushEverySeconds} s: {liveOns.Length} live-on and {log.Count(r => r.Type == Drain)} drain rounds in 10 min; {pushed.Length} pushes; {log.Count(r => r.Type == Ack)} acknowledgements sent, {refused.Length} of them refused; {driver.Stream.TakenCount} waiting; ended at {driver.EndedAt?.ToString() ?? "never"}");
+        output.WriteLine($"push every {pushEverySeconds} s: {liveOns.Length} live-on and {log.Count(r => r.Type == Drain)} drain rounds in 10 min; {pushed.Length} pushes; {log.Count(r => r.Type == Ack)} acknowledgements sent, {refused.Length} of them refused; {driver.TakenText} waiting; ended at {driver.EndedAt?.ToString() ?? "never"}");
         output.WriteLine("the first requests: " + string.Join(", ", log.Take(24).Select(l => $"{l.At.TotalSeconds}:{l.Type}")));
         output.WriteLine("pushes: " + string.Join(", ", pushed.Take(8).Select(p => $"{p.At.TotalSeconds}:{p.Id}")) + ", ...");
         output.WriteLine("refused acknowledgements: " + string.Join(", ", refused.Take(8).Select(r => $"{r.At.TotalSeconds}:[{string.Join(" ", r.Ids)}]")) + ", ...");

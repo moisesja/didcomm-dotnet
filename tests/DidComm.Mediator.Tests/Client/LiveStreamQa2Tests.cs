@@ -254,6 +254,133 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// The driver's seams once the stream has ended: a failure thrown into the stream from the
+    /// exchange ends the enumeration, and its state machine lets go of the stream object. Reading
+    /// the driver's seams then throws nothing: the stream is reported as ended, with the exception
+    /// it ended with, so a test whose stream ended early shows that and not a null dereference in
+    /// its own print line.
+    /// </summary>
+    [Fact]
+    public async Task Reading_the_drivers_seams_after_the_stream_has_ended_says_so_and_throws_nothing()
+    {
+        var exchange = new SimExchange();
+        exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r => r.Live ? throw new InvalidOperationException("ended by the test") : Status(r, live: false));
+        await using var driver = new StreamDriver(exchange);
+        await driver.RunAsync(() => false, TimeSpan.FromMinutes(1));
+
+        driver.EndedWith.Should().BeOfType<InvalidOperationException>("the failure thrown into the stream ended it");
+        var read = () => driver.Reported;
+        read.Should().NotThrow("the stream has ended, and the driver says so");
+        output.WriteLine($"after the stream ended with {driver.EndedWith?.GetType().Name}: reported {driver.Reported}");
+    }
+
+    /// <summary>
+    /// The driver's model, forced (why the row of the test above that ends at 91 s once failed in
+    /// fifty runs): in that row the give-up alarm and the back-off alarm are due at the same instant.
+    /// Here the stream is made to react to the first of them (it wakes, finds nothing to do and
+    /// publishes its next wait) before the second fires, and its last cycle is made slow (300 ms of
+    /// real time on the stream's thread, a delay at the point of the race and nothing more). The
+    /// driver lets the stream react to each alarm before the next one fires, so it is still waiting
+    /// for the stream when that cycle fails, and records the end at 91 s. A driver that fires both
+    /// alarms in one step takes the wait published in between for "parked", finds no timer
+    /// scheduled, and returns while the stream is still in its last cycle.
+    /// </summary>
+    [Fact]
+    public async Task The_driver_lets_the_stream_react_to_each_alarm_before_the_next_one_due_at_the_same_instant_fires()
+    {
+        var exchange = new SimExchange();
+        var at91 = TimeSpan.FromSeconds(91);
+        exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r =>
+        {
+            if (!r.Live)
+                return Status(r, live: false);
+            if (exchange.Clock.Now == at91)
+                Thread.Sleep(300);
+            throw new TimeoutException("no answer (test)");
+        });
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => Status(r));
+        exchange.Inner.On(MessagePickup.MessagesReceivedType, r => exchange.Clock.Now < TimeSpan.FromSeconds(31) ? throw new TimeoutException("no answer (test)") : Status(r));
+        var driver = new StreamDriver(exchange);
+        var waitsWhenParked = 0;
+        var firedAt91 = 0;
+        var reactedBetween = false;
+        exchange.Clock.AfterFire = () =>
+        {
+            // After the first of the two alarms due at 91 s: the stream has woken and published its
+            // next wait before the second one fires.
+            if (exchange.Clock.Now == at91 && Interlocked.Increment(ref firedAt91) == 1)
+                reactedBetween = SpinWait.SpinUntil(() => driver.Waits > Volatile.Read(ref waitsWhenParked), TimeSpan.FromSeconds(20));
+        };
+        var pushed = false;
+        try
+        {
+            await driver.RunAsync(() => false, TimeSpan.FromHours(1), onWait: () =>
+            {
+                Volatile.Write(ref waitsWhenParked, driver.Waits);
+                if (pushed || exchange.Clock.Now != TimeSpan.FromSeconds(15))
+                    return false;
+                pushed = true;
+                return exchange.Inner.Registration!.TryPush(Push(("p1", "bad:p1")));
+            });
+
+            output.WriteLine($"two alarms due at 91 s, the stream reacting between them: alarms fired at 91 s {firedAt91}, reacted between them {reactedBetween}; ended at {(driver.EndedAt is { } at ? at.TotalSeconds + " s" : "not ended when the driver returned")} with {driver.EndedWith?.GetType().Name ?? "nothing"}: {Trace(exchange)}");
+            firedAt91.Should().Be(2, "the give-up alarm and the back-off alarm are both due at 91 s");
+            reactedBetween.Should().BeTrue("the stream published a wait after the first of them");
+            driver.EndedAt.Should().Be(at91, "the driver was still waiting for the stream when its last cycle failed");
+            driver.EndedWith.Should().BeOfType<TimeoutException>();
+        }
+        finally
+        {
+            try
+            {
+                await driver.DisposeAsync();
+            }
+            catch (TimeoutException)
+            {
+                // The stream's own end, when the driver returned before it.
+            }
+        }
+    }
+
+    /// <summary>
+    /// The product side of the same instant: the stream's give-up alarm and its back-off alarm fire
+    /// at the same instant (91 s in the row above), in either order, and each is acted on. The cycle
+    /// the back-off stands for is sent at 91 s in both orders. When the give-up alarm fires first,
+    /// that cycle's failure is a failure after it: the stream ends at 91 s. When the back-off fires
+    /// first and its cycle has failed before the give-up alarm fires, that failure backs off once
+    /// more, and the give-up is acted on at the next failure: the stream ends one back-off later, at
+    /// 121 s. In neither order is an alarm lost, and in neither does the stream go on past the first
+    /// failure that follows the give-up alarm.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 91)]
+    [InlineData(true, 121)]
+    public async Task The_give_up_alarm_and_the_back_off_alarm_due_at_the_same_instant_are_both_acted_on_in_either_order(bool backOffFiresFirst, int endsAtSeconds)
+    {
+        var exchange = new SimExchange();
+        exchange.Clock.NewestFirstAmongEqual = backOffFiresFirst; // the back-off alarm is the one armed last
+        exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r => r.Live ? throw new TimeoutException("no answer (test)") : Status(r, live: false));
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => Status(r));
+        exchange.Inner.On(MessagePickup.MessagesReceivedType, r => exchange.Clock.Now < TimeSpan.FromSeconds(31) ? throw new TimeoutException("no answer (test)") : Status(r));
+        await using var driver = new StreamDriver(exchange);
+        var pushed = false;
+        await driver.RunAsync(() => false, TimeSpan.FromHours(1), onWait: () =>
+        {
+            if (pushed || exchange.Clock.Now != TimeSpan.FromSeconds(15))
+                return false;
+            pushed = true;
+            return exchange.Inner.Registration!.TryPush(Push(("p1", "bad:p1")));
+        });
+
+        var liveOns = exchange.Log.Where(l => l.Type == LiveOn).Select(l => (int)l.At.TotalSeconds).ToArray();
+        output.WriteLine($"the back-off alarm fires {(backOffFiresFirst ? "before" : "after")} the give-up alarm at 91 s: ended at {driver.EndedAt?.TotalSeconds} s with {driver.EndedWith?.GetType().Name ?? "nothing"}; live-on requests at {string.Join(", ", liveOns)} s");
+        driver.EndedWith.Should().BeOfType<TimeoutException>("the give-up is acted on");
+        liveOns.Should().Contain(91, "the cycle the back-off alarm stands for is sent when it fires");
+        driver.EndedAt.Should().Be(TimeSpan.FromSeconds(endsAtSeconds));
+        liveOns[^1].Should().Be(endsAtSeconds, "the stream ends at the first failure after the give-up alarm fired, and sends nothing after it");
+    }
+
+    /// <summary>
     /// R-11 (owner decision B1), pinned and measured: every request fails, and a push brings a new
     /// message every P seconds. A push lets the give-up alarm go but keeps the back-off, so while
     /// pushes come at least once a minute the stream never gives up, and its requests follow the
@@ -295,8 +422,8 @@ public sealed class LiveStreamQa2Tests(ITestOutputHelper output)
         exchange.Log.Where(r => r.At <= TenMinutes).Select(r => r.At).Should().Equal(expected,
             "one request per back-off, and the back-off grows to 30 s however often pushes come (owner decision B1)");
         sent.Should().Be(24);
-        driver.Stream.TakenCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken);
-        driver.Stream.HeldCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken + LiveRegistration.PushCapacity + LiveDeliveryStream.MaxPerDelivery);
+        driver.Stream!.TakenCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken);
+        driver.Stream!.HeldCount.Should().BeLessThanOrEqualTo(LiveDeliveryStream.MaxTaken + LiveRegistration.PushCapacity + LiveDeliveryStream.MaxPerDelivery);
     }
 
     // ---- I-19: the drain's end --------------------------------------------------------------------
