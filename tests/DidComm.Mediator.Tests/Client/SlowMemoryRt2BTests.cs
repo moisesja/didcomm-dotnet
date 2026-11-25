@@ -10,7 +10,7 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// #111 red-team pass 2, RT2-B: what the memory remembers after fix round 1 (owner decision C,
-/// "every failure, fair to late starts"; the pause cap of Q budgets; RT1B-2's single strike per
+/// "Every failure, fair to late starts (Recommended)"; the pause cap of Q budgets; RT1B-2's single strike per
 /// pause). Every timing is driven by a manual clock; real time is only a hang guard.
 /// </summary>
 public sealed class SlowMemoryRt2BTests

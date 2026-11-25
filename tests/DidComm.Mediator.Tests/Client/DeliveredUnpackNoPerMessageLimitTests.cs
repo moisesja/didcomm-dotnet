@@ -9,11 +9,11 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// Owner decision E for #111, "remove per-message limits": a message of a delivery runs until it
+/// Owner decision E for #111, "Remove per-message limits (Recommended)": a message of a delivery runs until it
 /// opens, fails, or the delivery's budget ends. Nothing else ends it: not a time of its own, not
 /// another message waiting for a worker, not a take refused for its partition or for the container.
-/// It replaces the share of the budget each message had and owner decision A1 ("cut only if others
-/// wait"); the tests here are RT2-A's reproduction and A1's tests, restated to what holds now. Every
+/// It replaces the share of the budget each message had and owner decision A1 ("Cut only if others
+/// wait (Recommended)"); the tests here are RT2-A's reproduction and A1's tests, restated to what holds now. Every
 /// timing is driven by the injected <see cref="ManualTimeProvider"/> and rendezvous on host calls;
 /// real time is only a hang guard.
 /// </summary>
