@@ -124,8 +124,9 @@ that every grantee references its granter directly (pack pins direct references 
   `Qa1Support`, `Qa2Support` and `PickupClientEndToEndSupport`; the red team's forged answers at the
   host's own endpoint `MediatorClientHostEndpointAdv1Tests`; the decrypt budget against the
   mediator's lease `PickupClientBudgetLeaseTests`; #111's acceptance against the mediator — the
-  fetch loop past slow messages, one sender held to its reservations, an honest slow sender behind
-  junk naming its key — `PickupClientSlowSenderAcceptanceTests` with `PickupClientSlowSenderSupport`,
+  fetch loop past slow messages, one sender whose lookups ignore their token held to its
+  reservations beside the same sender when they honour it, an honest slow sender behind junk
+  naming its key — `PickupClientSlowSenderAcceptanceTests` with `PickupClientSlowSenderSupport`,
   which moves the client's clock one timer at a time, `PickupClientLiveAdv3Tests.ADV3_6_…`, and the
   red team's `PickupClientSlowSenderRt1CTests`),
   `DxCoverage` (public-API coverage of the nine shipped assemblies, and quickstart drift checks;
@@ -212,7 +213,27 @@ that every grantee references its granter directly (pack pins direct references 
   `SlowSenderFetchRt2BTests`, `LiveStreamRt2CTests`, `DeliveredUnpackEndingsRt3Tests`,
   `DeliveredUnpackNextDeliveryRt3Tests`, `DeliveredUnpackTokenStateRt3Tests`,
   `SlowSenderSpacedDeliveriesRt3Tests`, `LiveStreamBackoffRt3Tests`,
-  `MediatorClientChannelTokenStateRt3Tests` and `UnpackReservationsSixteenRt4Tests`;
+  `MediatorClientChannelTokenStateRt3Tests` and `UnpackReservationsSixteenRt4Tests`; the flag
+  `PickupItem.Inconclusive` — which outcomes carry it `DeliveredUnpackInconclusiveTests`, that it
+  says what the memory says `InconclusiveMatchesTheMemoryTests`, that a fetch and a live stream
+  pass it on `PickupItemInconclusiveTests`, a host that discards a failed item unless it is
+  inconclusive `SlowSenderDiscardingHostRt3Tests` and `LiveStreamDiscardingHostTests`, a late
+  start `InconclusiveLateStartRt4Tests`, and a thread pool that gives a delivery no thread
+  `InconclusiveBusyPoolRt4Tests`; and the measurements on the real clock, which run only with
+  `DIDCOMM_111_REALCLOCK=1`, each in a process of its own, print what they measure and assert
+  nothing (`RealClockBlockingLookups111Tests` and `RealClockNextDelivery111Tests` in
+  `RealClockMeasurements111Tests.cs`, and `BlockingLookupsRealClockRt4Tests`). Every loop harness
+  of these tests that asserts a bound or an exact time starts the next delivery only once the
+  lookups of the one before have ended (`Qa1Exchange.DriveAsync`, `Qa1Loop`, `SimExchange`, the
+  live driver, and the interop `SlowFetchLoop`), and a test forces that order for each
+  (`SlowSenderFetchMatrixTests.The_loop_that_asserts_the_bound_starts_a_fetch_only_once_the_lookups_of_the_fetch_before_have_ended`,
+  `…A_fetch_is_started_only_once_the_host_calls_of_the_fetch_before_have_ended`,
+  `LiveStreamQa2Tests.A_delivery_is_opened_only_once_the_host_calls_of_the_delivery_before_have_ended`,
+  `PickupClientLiveSlowSenderTests.A_round_is_answered_only_once_the_host_calls_of_the_round_before_have_ended`,
+  and in the interop project
+  `PickupClientSlowSenderAcceptanceTests.The_loop_starts_a_fetch_only_once_the_host_calls_of_the_fetch_before_have_ended`);
+  what a delivery does when it starts earlier is what the pins of R-13 show ("Documented limits"
+  of the recipient-side client);
   `Coordination/CoordinateMediation20CodecTests` and `CoordinateMediation20FixtureTests`) with
   `fixtures/coordinate-mediation-3.0`,
   `fixtures/coordinate-mediation-2.0` and `fixtures/messagepickup-3.0` (the didcomm.org page
@@ -3482,7 +3503,8 @@ asked about (as a DID subject). One present without a filter is refused too, as 
    than a quarter of the budget left is not started ("ran out before its turn came"), one with no
    outcome when the budget ends is out of time ("ran out while it was being opened"), and one whose
    sender, mailbox or container is at its bound is refused ("unpack capacity exhausted"): each is a
-   `TimeoutException` failure naming the request. The outcomes keep delivery order.
+   `TimeoutException` failure naming the request. A failed message this delivery did not count
+   against is inconclusive (`PickupItem.Inconclusive`, below). The outcomes keep delivery order.
 6. **The filter** (D-20, owner decision 1-A on the L-063 stop). With `recipientDid`, a message is
    that DID's only when its `RecipientKid`, the key that decrypted the innermost envelope, has the
    filter DID's subject; the kid is held to the FR-API-09 bound before it is parsed, and it is one
@@ -3508,7 +3530,11 @@ asked about (as a DID subject). One present without a filter is refused too, as 
     transport error) is logged by exception type name (rate-limited Warning), and the batch is still
     returned; those messages come back and are repeats then.
 11. Return `PickupBatch(Items, Drained: false, Status: null)`: the messages that unpacked
-    (acknowledged) and the failures (left queued), in delivery order.
+    (acknowledged) and the failures (left queued), in delivery order. A failed item carries
+    `Inconclusive` as the unpacker set it. The failures the fetch makes itself are never
+    inconclusive: an entry with no usable payload is not a message this client can open, and a
+    message the filter turned away opened
+    (`PickupItemInconclusiveTests.A_fetch_passes_on_what_the_unpacker_said_and_its_own_failed_items_are_never_inconclusive`).
 
 Once `FetchAsync` returns, the caller holds the only copy: the acknowledgement is inside the call
 (FR-PICK-11; no opt-out, R-6). A failed item stays leased for the mediator's lease (60 s at ours) and
@@ -3520,7 +3546,8 @@ limits). The memory lives in the process and its longest pause is 256 budgets (a
 a loop whose runs are further apart than that, or that runs in a new process each time, finds
 nothing remembered (R-5 under Documented limits). A caller
 that polls more slowly than the lease, with more failures than `limit` that are not remembered,
-sees only the failures until it discards them with `AckAsync` (L-058). That is why the
+sees only the failures until it discards them with `AckAsync` (L-058), which it does only for
+items that are not inconclusive (below). That is why the
 budget must end well inside the lease (owner decision 2-A; ADV2-1): the default, 20 s, is a third of
 our 60 s `LeaseTimeout`, leaving room for the request and the acknowledgement
 (`MediatorClientOptionsTests` pins the relation). When the lease runs out first, our mediator hands
@@ -3530,6 +3557,26 @@ still accepts the late acknowledgement, because the store deletes by id
 does not set fetched messages aside delivers a failing message first on every fetch, and only the
 host's `AckAsync` gets past more of them than one fetch holds; the budget does not, and the memory
 of messages that did not open only makes those fetches take no time (R-6).
+
+**What a host discards, and when it waits (#111; `PickupItem.Inconclusive`, the coordinator's
+call).** A failed item says whether this delivery counted against its message. When `Inconclusive`
+is true it did not: the message's turn did not come, it was refused for capacity, or it was
+started late and cut (the unpacker, below). The host leaves such an item queued; it is delivered
+again and started again then, once what was in its way is gone
+(`DeliveredUnpackInconclusiveTests.An_inconclusive_message_is_started_again_at_the_next_delivery_once_what_was_in_its_way_is_gone`).
+A host discards a failed item only when the flag is false, and false alone is not a reason to
+discard: a message a `recipientDid` filter turned away is not inconclusive, and a fetch without
+the filter returns it opened
+(`PickupItemInconclusiveTests.A_message_a_filter_turned_away_is_not_inconclusive_and_a_fetch_without_the_filter_returns_it_opened`).
+Why the flag exists: the failures for lack of time are all `TimeoutException` and differ only in
+their English text, and a host that discards every failed item also discards a message that was
+only inconclusive: it is handed over once, is then gone from the mediator, and is never opened
+(`SlowSenderDiscardingHostRt3Tests.A_host_that_discards_every_failure_also_discards_the_message_that_was_not_attempted`).
+When a fetch returns only inconclusive items, the host waits before it fetches again: for the
+lease at a mediator that sets delivered messages aside, for the lookups still running otherwise.
+A fetch that brings only refused items takes no time and is not drained, so a loop that fetched
+again at once would spin. The measured times of a host that discards a failed item unless it is
+inconclusive are under Documented limits.
 
 `AckAsync(ids)` takes 1 to 10 000 ids (the count first, then a copy; each non-empty, at most 2048
 characters and unreserved URI characters). It sends 100 per `messages-received` and returns
@@ -3714,7 +3761,18 @@ going lower (ADV4-4).
   `Error` set, is never taken or acknowledged, leaves the held set, and is reported again when it
   comes back in a delivery that is opened (one that brings back only messages of deliveries the
   current drain took is not: "The drain's end"); the stream never discards it (the host does, with
-  `AckAsync`). A repeat the duplicate
+  `AckAsync`, and only when the item is not inconclusive). A failed item carries `Inconclusive` as
+  the unpacker set it; an entry that never reached the unpacker (no usable payload) is never
+  inconclusive
+  (`PickupItemInconclusiveTests.A_live_stream_passes_on_what_the_unpacker_said_and_its_own_failed_items_are_never_inconclusive`).
+  The stream does not spin on inconclusive items, as a fetch loop that fetched again at once
+  would: a round that brings back only items of deliveries this drain took ends the drain, and the
+  next cycle is one `LivePollInterval` later. So messages refused for capacity are yielded once per
+  cycle while the bound is held, and are yielded opened in the first cycle after it is free: at
+  120 s in the pinned case, for the host that left them queued; the host that discards every
+  failure never receives them
+  (`LiveStreamDiscardingHostTests.On_a_live_stream_messages_refused_for_capacity_are_not_attempted_until_it_is_free_and_only_a_host_that_left_them_queued_receives_them`).
+  A repeat the duplicate
   filter remembers for this stream's mailbox (`from`) is taken (acknowledged) and not yielded. The
   filter is asked when the item's turn comes, not when the delivery was opened, so a copy that
   follows a message taken from the same delivery is recognised. A drain answered with a
@@ -3850,7 +3908,7 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
 - **`DeliveredMessageUnpacker`** opens the messages of one delivery (a fetch's answer, a live drain
   round's answer or a push) from its scope, the (mediator, mailbox) the host's call named
   (`DeliveryScope`), under one budget (owner decision 2-A on the L-063 stop; since #111, invariants
-  I-1..I-14, I-22 and I-23 of its plan). One unpacker per channel, so one per container. The
+  I-1..I-14 and I-22..I-24 of its plan). One unpacker per channel, so one per container. The
   budget is one `GuardedDeadline` at `UnpackTimeout` (B, 20 s by default) for all of the delivery's
   messages, every layer included, linked to the caller's token and to the channel's shutdown token.
 
@@ -3893,14 +3951,17 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
     (`DeliveredUnpackTokenStateTests`).
   - *Failed while the delivery is not being ended:* the message's own failure. The reservation is
     given back before the worker takes its next message (D-13), the failure is recorded, and the
-    message is remembered, provided its code ran (S1, below).
+    message is remembered, provided its code ran (S1, below). A work item that failed before its
+    code started is not struck, and its outcome is inconclusive.
 
   **The end of a delivery (I-5).** The first of "every message ended" and "the budget ended" closes
   the delivery, under one lock. The budget's own callback runs on each of its three endings (its
-  timer, the caller's cancellation, the shutdown): it fills in every message that has no outcome
-  yet as out of time ("ran out while it was being opened" when its host call had been created, "ran
-  out before its turn came" otherwise) and completes the result without waiting for host code;
-  whatever such code does afterwards is discarded. After the caller's cancellation or the shutdown
+  timer, the caller's cancellation, the shutdown): every message that has no outcome yet is out of
+  time, "ran out while it was being opened" when its code had started and "ran out before its turn
+  came" otherwise. Whether its code had started is read once, under the lock, as the delivery
+  closes; the text, the strike and the flag all follow from that one reading. The outcomes are
+  made after the lock and before the result is set, without waiting for host code; whatever such
+  code does afterwards is discarded. After the caller's cancellation or the shutdown
   the result is cancelled, and the channel reports the shutdown as `ObjectDisposedException` (fix
   round 3, ADV3-7). Host code still running sees its token cancelled and keeps its reservation
   until it ends. The failures name our request id when there is one, never a DID or a message. The
@@ -3926,8 +3987,9 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
     A host call needs a thread before its code runs, so its code starts a moment after the budget
     did; the allowance is how late that start may be for the message still to count as having had
     the whole budget (R-15). A message whose code started later (others were in front of it, or it
-    waited for a thread) is not struck: it is opened again at the next delivery, where the
-    messages that were in front of it are held back or gone, so it starts earlier
+    waited for a thread) is not struck, and its outcome is inconclusive: it is opened again at the
+    next delivery, where the messages that were in front of it are held back or gone, so it starts
+    earlier
     (`…A_message_that_started_late_behind_others_is_not_remembered_at_the_budgets_end_and_is_at_the_next_delivery_where_it_starts_first`).
 
   Nothing else is written: not for a refusal, a held-back message, a malformed message, a message
@@ -3937,9 +3999,43 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   (`…A_never_opening_message_whose_start_reading_is_below_the_budgets_start_is_not_remembered`);
   and an entry still inside its pause gets no further strike. A message that opens is forgotten.
 
+  **What an outcome says of that (`DeliveredOutcome.Inconclusive`, passed on as
+  `PickupItem.Inconclusive`; I-24; the coordinator's call).** A failed message that this delivery
+  did not count against says so: its outcome is inconclusive exactly when it is not malformed, was
+  not held back, and no strike was taken for it. The strike and the flag are one decision, made
+  once per message by whoever records its outcome, and the flag is false only once the strike has
+  been made. So these are inconclusive:
+  - a message whose turn did not come: no host call was created for it, the start rule turned it
+    away, or its call's code had not started when the budget ended ("before its turn came");
+  - a message refused for capacity ("unpack capacity exhausted");
+  - a message whose code started later than `StartAllowance` and that was still being opened when
+    the budget ended ("while it was being opened");
+  - for a host that passes a clock of its own, a message whose strike that clock made fail. When
+    the clock throws where the budget's end decides or makes a strike, nothing is recorded for that
+    message, it and those after it are inconclusive, nothing more is struck, and the result is
+    still set
+    (`DeliveredUnpackInconclusiveTests.A_host_clock_that_throws_while_the_budgets_end_is_deciding_leaves_that_message_and_those_after_it_inconclusive_and_the_result_is_still_set`).
+
+  A failure of the message's own (S1), a message that had the whole budget (S2), a held-back
+  message and a malformed one are not inconclusive. One test gives the flag for each of twenty
+  kinds of outcome
+  (`DeliveredUnpackInconclusiveTests.An_outcome_is_inconclusive_exactly_when_this_delivery_did_not_count_against_its_message`),
+  and one holds the flag against the memory for every failed item of two hundred mixed deliveries
+  (`InconclusiveMatchesTheMemoryTests.For_every_failed_item_of_two_hundred_mixed_deliveries_the_flag_says_what_the_memory_says`).
+  While the budget's end decides, every reading of the host's clock is made outside the delivery's
+  lock, and the result is not set before it has decided
+  (`…While_the_budgets_end_decides_the_outcomes_every_reading_of_the_hosts_clock_is_made_outside_the_deliverys_lock`,
+  `…The_deliverys_result_is_not_set_while_the_budgets_end_is_still_deciding_its_outcomes`). One
+  narrow window is pinned: a work item that passed its token check just before the budget ended,
+  and had not yet noted that it ran, reads as not started. Its message is "before its turn came",
+  inconclusive and not remembered, and its host code is then called once with its token already
+  cancelled
+  (`…A_work_item_past_its_token_check_that_had_not_started_when_the_budget_ended_is_inconclusive_and_not_remembered_and_its_host_code_is_then_called_once_with_its_token_cancelled`).
+  It errs towards not discarding a message.
+
   **What having no limit per message costs (R-3).** Sixteen messages that never open at the front
   of a delivery keep every worker for one whole budget, and the messages behind them in the same
-  delivery run out of time before their turn; the sixteen are remembered then, so the next
+  delivery run out of time before their turn (inconclusive); the sixteen are remembered then, so the next
   delivery holds them back and the others get their turn
   (`DeliveredUnpackSixteenAtOnceTests.Sixteen_never_opening_messages_of_one_sender_hold_every_worker_for_the_budget_and_the_message_behind_them_gets_its_turn_in_the_next_delivery`,
   `DeliveredUnpackSlowSenderTests.Forty_eight_stalling_first_are_learned_sixteen_per_delivery_and_then_the_honest_one_opens`).
@@ -3976,8 +4072,9 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   exists until it ends for any reason, whether its worker still waits for it or its delivery has
   ended and let it go. *When it is taken:* with its check, in one step under one leaf lock, before
   the work item is created (ADV3-2: before #111, a bound of 16 abandoned unpacks was checked, not
-  reserved, and deliveries opened together could leave more running). A refusal starts nothing and
-  changes nothing else: it is not counted, and it ends no call that is running
+  reserved, and deliveries opened together could leave more running). A refusal starts nothing (the
+  message is inconclusive) and changes nothing else: it is not counted, and it ends no call that is
+  running
   (`DeliveredUnpackNoPerMessageLimitTests.A_take_refused_for_a_running_messages_partition_does_not_end_it`,
   `…A_take_refused_for_the_container_does_not_end_a_running_message`). *When it is released:*
   exactly once: by the worker as soon as the call it awaited has ended, before it takes its next
@@ -4005,9 +4102,12 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
 
   **A lookup that has been cancelled keeps its place until it ends (R-13).** If the next delivery
   arrives before that, messages of the same sender (or, without a named sender, of that mailbox)
-  beyond the places still free are refused at once and come again; other senders' messages are
-  not affected
+  beyond the places still free are refused at once, are inconclusive, and come again; other
+  senders' messages are not affected
   (`DeliveredUnpackNextDeliveryRt3Tests.While_one_senders_lookups_of_the_delivery_before_are_still_ending_another_senders_message_opens_and_nothing_more_is_remembered`).
+  A host call that never got a thread keeps its place too, until the thread pool reaches its
+  cancelled work item
+  (`InconclusiveBusyPoolRt4Tests.A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after`).
   The pins, and what this costs a loop, are under Documented limits.
 - **`SenderPartition`** (#111, I-14, D-1): the partition is the DID subject of the outer envelope's
   `skid`, only when that envelope is authcrypt (`alg` `ECDH-1PU+A256KW`) and names one, read with
@@ -4283,14 +4383,17 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   "Raise to 256, document (Recommended)"; B1, "Push keeps the wait (Recommended)", as refined by F;
   E, "Remove per-message limits (Recommended)"; F, "Only cycle success resets (Recommended)"; G,
   "Open 16 at once (Recommended)". The coordinator's calls: the strike rule at the budget's end
-  (S2) and `StartAllowance` = F/2; the token-state rule (I-22); on the channel, the Debug line for
-  what a step reported and an answer that had won holding (I-25); the residuals as restated below.
-  What is marked "ours" is the orchestrator's or an engineer's choice.
+  (S2) and `StartAllowance` = F/2; the token-state rule (I-22); the flag `PickupItem.Inconclusive`,
+  which says what the memory says (I-24); on the channel, the Debug line for what a step reported
+  and an answer that had won holding (I-25); the residuals as restated below. What is marked "ours"
+  is the orchestrator's or an engineer's choice.
 
   A sender whose DID resolves slowly or never costs the first delivery that carries one of its
   messages up to that delivery's budget; the message is then remembered and held back for its
   pause at no cost, and it comes back once per lease period as a failed item until the application
-  discards it with `AckAsync` (the client does not). The reproductions #96 deferred here (ADV3-2,
+  discards it with `AckAsync` (the client does not). An application discards a failed item only
+  when it is not inconclusive, and false alone is not a reason to discard ("Status, fetch and
+  acknowledgement", "What a host discards, and when it waits"). The reproductions #96 deferred here (ADV3-2,
   ADV3-3, ADV3-6, ADV4-2, ADV4-3, ADV4-4, ADV5-3, ADV5-4) now pass and pin the fixes; ADV4-1 was
   resolved in #96.
 
@@ -4350,14 +4453,24 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     An honest slow sender's message behind junk naming its key reaches the application within the
     same bound (D-13;
     `PickupClientSlowSenderAcceptanceTests.An_honest_slow_senders_message_behind_junk_naming_its_key_reaches_the_application_within_the_bound`).
-  - **One sender whose lookups do not return**
-    (`PickupClientSlowSenderAcceptanceTests.One_sender_whose_lookups_ignore_their_token_is_held_to_its_bound_of_sixteen_and_another_senders_message_is_reached_in_the_time_sixteen_take`,
-    lines prefixed `A3 |`). With thirty messages of that sender in front, it is held to sixteen
-    host calls, its other fourteen are refused at once, and another sender's message behind them
-    is returned after 40 s at `limit` 10 and after 80 s at `limit` 4: ⌈16/limit⌉ budgets, which
-    at `limit` 4 is more than one 60 s lease. #111's acceptance line, "one sender's stalled lookups
-    do not refuse another sender's message", holds within a mailbox, and across the container's
-    mailboxes up to its 256 (owner decision D; R-1 below).
+  - **One sender, thirty messages in front of another sender's message**
+    (`PickupClientSlowSenderAcceptanceTests`, lines prefixed `A3 |`; one harness, a 60 s lease).
+    When the sender's lookups do not return and ignore their token, it is held to sixteen host
+    calls, its other fourteen messages are refused at once (inconclusive), and the other sender's
+    message is returned after ⌈16/limit⌉ budgets, which at `limit` 4 is more than one lease
+    (`…One_sender_whose_lookups_ignore_their_token_is_held_to_its_bound_of_sixteen_and_another_senders_message_is_reached_in_the_time_sixteen_take`).
+    When they honour their token, every one of the thirty is opened once and remembered, none is
+    refused, and the message is returned after ⌈30/limit⌉ budgets
+    (`…One_sender_whose_lookups_honour_their_token_has_every_message_opened_once_and_another_senders_message_is_reached_in_the_time_thirty_take`):
+
+    | `limit` | The sender's lookups ignore their token | They honour it |
+    | --- | --- | --- |
+    | 4 | 80 s; 16 host calls; 14 refused at once | 160 s; 30 host calls; none refused |
+    | 10 | 40 s; 16 host calls; 14 refused at once | 60 s; 30 host calls; none refused |
+
+    #111's acceptance line, "one sender's stalled lookups do not refuse another sender's message",
+    holds within a mailbox, and across the container's mailboxes up to its 256 (owner decision D;
+    R-1 below).
   - **The live stream**, at the default `LivePollInterval`
     (`PickupClientLiveSlowSenderTests.The_live_stream_reaches_the_message_behind_ones_that_never_open_within_the_live_bound`,
     lines prefixed `S7 |`). Time until the message behind N that never open is yielded, and the
@@ -4376,6 +4489,46 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     within 2C − 1 cycles where it outlasts it. That test asserts this bound: it is exact in seven
     of its eight cells and an upper bound in the eighth (cycle 18 against 19). Checked by
     measurement, not proven (R-10).
+  - **A host that discards a failed item unless it is inconclusive** (a 60 s lease, a simulated
+    mediator that honours the limit asked for). Time until the message behind N that never open
+    is returned to it opened; in brackets, how often that message was first handed over as
+    inconclusive
+    (`SlowSenderDiscardingHostRt3Tests.A_host_that_discards_a_failed_item_unless_it_is_inconclusive_receives_the_message_behind_N_that_never_open`):
+
+    | N in front | `limit` 10 | `limit` 16 | `limit` 100 |
+    | --- | --- | --- | --- |
+    | 4 | 20 s | 20 s | 20 s |
+    | 16 | 40 s | 20 s | 60 s (1) |
+    | 17 | 40 s | 40 s | 80 s (1) |
+    | 99 | 200 s | 140 s | 380 s (6) |
+    | 300 | 600 s | 380 s | 380 s (5) |
+
+    At limits up to sixteen a delivery starts all its messages with its budget, and no item is
+    handed over as inconclusive. Such a host's queue empties, each message reaches host code once,
+    and one message is handed over as inconclusive at most six times
+    (`…A_host_that_discards_a_failed_item_unless_it_is_inconclusive_empties_its_queue_and_every_inconclusive_message_is_counted_or_opened_later`:
+    99 in front, 200 s at `limit` 10, 140 s at 16 and 380 s at 100; 300 in front at `limit` 100,
+    420 s). With a new process for every fetch it still receives the message: behind 99 at `limit`
+    100 after 380 s, as in one process
+    (`…With_a_new_process_for_every_fetch_a_host_that_discards_a_failed_item_unless_it_is_inconclusive_still_receives_the_message`).
+    With fewer than sixteen in front in one fetch the message is returned in the first fetch, at
+    20 s, whatever the host discards
+    (`…Behind_fewer_than_sixteen_that_never_open_in_one_fetch_the_message_is_returned_opened_in_the_first_fetch_whatever_the_host_discards`).
+    A host that discards every failure loses the message behind sixteen or 99 in one fetch of 100:
+    it is handed over once as inconclusive, is then gone from the mediator, and is never opened
+    (`…A_host_that_discards_every_failure_also_discards_the_message_that_was_not_attempted`).
+    A late start: behind sixteen messages that fail on their own after 15 s, a message that takes
+    6 s to open is handed over once as inconclusive and opened at 66 s
+    (`InconclusiveLateStartRt4Tests.A_host_that_discards_a_failed_item_unless_it_is_inconclusive_receives_a_message_that_takes_six_seconds_queued_behind_sixteen_that_fail_after_fifteen`);
+    one that never opens is inconclusive once and a conclusive failure at the next delivery
+    (`…A_message_that_never_opens_and_was_started_late_is_inconclusive_once_and_a_conclusive_failure_at_the_next_delivery`).
+    A message for which no host code ran before the budget ended is inconclusive, and this host
+    keeps it and receives it
+    (`InconclusiveBusyPoolRt4Tests.A_message_for_which_no_host_code_ran_before_the_budget_ended_is_inconclusive_and_a_host_that_discards_a_failed_item_unless_it_is_inconclusive_keeps_it_and_receives_it`).
+    On a live stream, whose rounds of ten start all their messages, no item is yielded as
+    inconclusive in these cases: 20 s behind 4, 40 s behind 16 or 17, 200 s behind 99, 600 s behind
+    300
+    (`LiveStreamDiscardingHostTests.On_a_live_stream_a_host_that_discards_a_failed_item_unless_it_is_inconclusive_receives_the_message_behind_N_that_never_open`).
 
   What remains (documented, not fixed; the residuals of the #111 plan, under its numbers):
   - **R-1 (ADV2-2 narrowed, not closed).** Many sender DIDs whose lookups do not honour
@@ -4394,17 +4547,19 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     only in `apu`, re-wrapped by a mediator — share one partition of 16 per mailbox.
   - **R-3 (restated).** With no time limit per message, sixteen messages that never open at the
     front of a delivery hold every worker for one budget. Those behind them in the same delivery
-    run out of time before their turn, and get their turn in the next delivery, where the sixteen
-    are held back
+    run out of time before their turn (inconclusive), and get their turn in the next delivery,
+    where the sixteen are held back
     (`DeliveredUnpackSixteenAtOnceTests.Sixteen_never_opening_messages_of_one_sender_hold_every_worker_for_the_budget_and_the_message_behind_them_gets_its_turn_in_the_next_delivery`).
     Only a delivery of more than sixteen has messages behind: not one of this library's mediator,
     which delivers at most ten.
   - **R-4.** When more than 256 messages that never open are queued in front of a message — which
     takes a mediator whose quota is above this library's 100 — the memory, which keeps 256 per
     mailbox, does not hold them all paused at once, and the loop alone does not reach the message
-    behind: it is reached only once the host discards failures it is handed with `AckAsync`. More
-    than 256 (mediator, mailbox) pairs push the least recently used partition out, and what it had
-    learned is learned again.
+    behind: it is reached only once the host discards the failures it is handed with `AckAsync`,
+    never an inconclusive one
+    (`SlowSenderFetchQa1Tests.Residual_the_message_behind_more_never_opening_messages_than_the_memory_keeps_is_reached_once_the_host_discards_them`;
+    the times with 300 in front are in the table above). More than 256 (mediator, mailbox) pairs
+    push the least recently used partition out, and what it had learned is learned again.
   - **R-5 (restated).** The memory lives in the process, and its longest pause is 256 budgets
     (about 85 minutes). With sixteen or more messages that never open in front in one delivery, a
     loop run every two hours, a two-hour lease, or a new process for each loop does not return the
@@ -4417,16 +4572,24 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     (`…With_fewer_than_sixteen_in_front_in_its_own_delivery_the_message_behind_is_returned_by_the_first_loop_whatever_the_spacing`).
     This library's mediator delivers at most ten per fetch, so the residual takes another mediator.
   - **R-6.** A mediator that does not set delivered messages aside still needs the host to discard
-    what keeps failing with `AckAsync`: a fetch reaches only what is within `limit` of the head of
-    the queue. The memory makes the fetches over remembered messages take no time and run no host
-    code.
+    what keeps failing with `AckAsync` (never an inconclusive item): a fetch reaches only what is
+    within `limit` of the head of the queue. The memory makes the fetches over remembered messages
+    take no time and run no host code. An item refused for capacity comes again with the very next
+    fetch there, and that fetch takes no time either: when a fetch brings only inconclusive items,
+    the host waits for the lookups still running before it fetches again.
   - **R-7.** A message refused by the `recipientDid` filter is not remembered: it is opened again
-    each time it comes.
+    each time it comes. Its flag is false: it opened.
   - **R-8 (extended).** Up to 256 host calls per container may be held by host code that does not
     return. A resolver that blocks its thread holds a thread-pool thread per lookup, up to sixteen
     per delivery. With such a resolver: (a) messages can start later than the start allowance, and
-    are then not remembered at the budget's end; they are tried again; (b) the budget's own timer
-    can be delayed.
+    are then not remembered at the budget's end; they are inconclusive and tried again; (b) the
+    budget's own timer can be delayed. The figures behind this come from measurements on the real
+    clock that are not part of a normal run: they run only with `DIDCOMM_111_REALCLOCK=1`, each in
+    a process of its own, print what they measure and assert nothing
+    (`RealClockBlockingLookups111Tests.Measurement_A_blocking_lookups_under_a_small_pool_how_many_start_within_the_allowance_and_when_all_sixteen_are_held_back`,
+    `RealClockNextDelivery111Tests.Measurement_B_a_delivery_available_the_moment_the_one_before_ends_how_many_of_its_messages_are_refused`,
+    `…Measurement_where_a_wait_cancelled_through_its_token_resumes`, and the three measurements of
+    `BlockingLookupsRealClockRt4Tests`). This doc gives none of their figures.
   - **R-9 (withdrawn).** It was about a failure that had to last a minimum time to be remembered.
     No such minimum exists: a message that failed on its own is remembered whatever its duration
     (S1).
@@ -4448,8 +4611,8 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     unacknowledged messages stay queued.
   - **R-13 (restated; the coordinator's call).** A lookup that has been cancelled keeps its place
     until it ends. If the next delivery arrives before that, messages of the same sender (or,
-    without a named sender, of that mailbox) beyond the places still free are refused at once and
-    come again; other senders' messages are not affected. With a lookup that ends as soon as it is
+    without a named sender, of that mailbox) beyond the places still free are refused at once, are
+    inconclusive, and come again; other senders' messages are not affected. With a lookup that ends as soon as it is
     cancelled this is rare; with one that takes even a millisecond to end and a delivery that
     follows immediately it is the usual outcome. That is why every bound above is stated on the
     condition that the lookups of one delivery have ended when the next one starts: a delivery
@@ -4459,9 +4622,22 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     (sixteen still ending: all sixteen of the next are refused; ten: six start and four are
     refused; four: none is refused) and
     `SlowSenderFetchMatrixTests.A_fetch_that_arrives_while_the_lookups_of_the_fetch_before_are_still_ending_refuses_what_the_bound_does_not_leave_free_and_the_message_is_returned_a_lease_later`
-    (returned at 80 s instead of 40 s).
-  - **R-14.** See R-8 (a): with a host resolver that blocks its thread, messages can start later
-    than the start allowance, and are then not remembered at the budget's end.
+    (returned at 80 s instead of 40 s). A host call that never got a thread keeps its place as
+    well, until the thread pool reaches its cancelled work item: that sender's next message is
+    refused for capacity meanwhile (inconclusive) and is started after
+    (`InconclusiveBusyPoolRt4Tests.A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after`;
+    its neighbour: with no pool thread free a delivery of sixteen ends at its budget, runs no host
+    code, and its reservations come back once the pool is free,
+    `…With_no_pool_thread_free_a_delivery_of_sixteen_ends_at_its_budget_runs_no_host_code_and_its_reservations_come_back_once_the_pool_is_free`).
+  - **R-14 (the coordinator's call).** A message that never opens and whose code starts later than
+    the start allowance in every delivery is inconclusive every time and is never remembered
+    (`DeliveredUnpackInconclusiveTests.A_message_that_never_opens_and_whose_code_starts_late_in_every_delivery_is_inconclusive_every_time_and_never_remembered`,
+    over ten deliveries). That test makes the late starts by moving the clock. No way for a remote
+    party to cause them was found. On a real clock they happen with a resolver that blocks its
+    thread on a small thread pool (R-8 (a)). That nothing else keeps a message inconclusive rests
+    on one assumption: the mediator delivers oldest first. Then whatever was in front of a late
+    start has opened, been remembered or been discarded by the next delivery, and the message
+    starts first there.
   - **R-15 (the coordinator's call: `StartAllowance` = F/2).** An honest message whose code
     started within the start allowance (2.5 s by default) and has not opened when the budget ends
     is remembered, and held back for its pause, also when a busy thread pool cost it part of that
@@ -4478,7 +4654,8 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   up to sixteen thread-pool threads per delivery, and at most 256 per container (R-8, which also
   says what such a resolver does to the start allowance and to the budget's timer). `FetchAsync`,
   `UnpackTimeout` and the unpacker's XML say so.
-- **Junk that never opens stays queued** until the host discards it with `AckAsync` or it ages out
+- **Junk that never opens stays queued** until the host discards it with `AckAsync` (which it does
+  for an item only when it is not inconclusive) or it ages out
   at the mediator (`MessagePickupOptions.MaxMessageAge`, 30 days by default), and it counts against
   the recipient's mailbox quota there (this library's mediator: `MaxQueueMessages`, 100 by
   default, beyond which a message is not accepted). The client never discards a failure on its own
@@ -4539,7 +4716,8 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   `AckAsync(item.Id)` for the last item.
 - Cookbook CC (enrolment, the wrong peer, the wire table), DD (fetch and the wire table) and EE.3
   (live pickup) carry the plain-language rules: at-least-once delivery with repeats filtered per
-  mailbox, acknowledgement on the next item, `AckAsync` for a message that keeps failing, polling in
+  mailbox, acknowledgement on the next item, `AckAsync` for a message the host has given up on and
+  never for an item whose `Inconclusive` is true (cookbook DD leaves such an item queued), polling in
   live mode as the permanent design (a delayed message that becomes due is not pushed), clocks within
   a minute by default.
 
