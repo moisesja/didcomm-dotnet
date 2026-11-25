@@ -181,6 +181,92 @@ public sealed class MediatorClientChannelTokenStateTests : IAsyncLifetime
         await channel.DisposeAsync();
     }
 
+    // ---- a failure observed before the deadline's token is cancelled --------------------------------
+
+    /// <summary>
+    /// The host code watches the caller's own token, not the one it was handed, and reports its
+    /// cancellation as a failure of its own from its callback there. That callback was registered
+    /// after the call's, so it runs first: the caller has cancelled, and the token the host code was
+    /// handed is not cancelled yet. The call ends cancelled, with the caller's token.
+    /// </summary>
+    [Theory]
+    [InlineData(Step.EndpointLookup)]
+    [InlineData(Step.Send)]
+    [InlineData(Step.SendAllowingNoAnswer)]
+    [InlineData(Step.OneWaySend)]
+    public async Task A_call_whose_host_code_reports_from_a_callback_on_the_callers_own_token_ends_cancelled(Step step)
+    {
+        var time = new ManualTimeProvider();
+        using var caller = new CancellationTokenSource();
+        var handedWasCancelled = true;
+        var host = new HeldHostCode
+        {
+            ReportsWhenCancelled = () => FailureOf(step),
+            Watches = _ => caller.Token,
+            BeforeItReports = handed => handedWasCancelled = handed.IsCancellationRequested,
+        };
+        var (channel, _) = ChannelOver(time, host);
+
+        var (call, request) = Start(channel, step, caller.Token);
+        await host.ParkAsync();
+        await Task.Run(caller.Cancel).WaitAsync(PickupTest.Timeout);
+
+        var ended = await EndOf(call);
+        host.Reported.Should().Be(1, "the host code reported the caller's cancellation as a failure of its own");
+        handedWasCancelled.Should().BeFalse("the set-up: the token the host code was handed was not cancelled yet when it reported");
+        ShouldHaveEndedAs(ended, Ending.CallerCancels, step, caller.Token, request);
+        channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        await channel.DisposeAsync();
+    }
+
+    /// <summary>
+    /// Two calls of one caller are in flight when the caller cancels, or the container is disposed.
+    /// The call started second is reached first; its host code, from its cancellation callback,
+    /// fails the first call's host code too (one connection carries both), before the token that
+    /// first call's host code was handed is cancelled. Both calls end as the cancellation, or the
+    /// disposal, does.
+    /// </summary>
+    [Theory]
+    [InlineData(Step.EndpointLookup, Ending.CallerCancels)]
+    [InlineData(Step.EndpointLookup, Ending.ContainerDisposed)]
+    [InlineData(Step.Send, Ending.CallerCancels)]
+    [InlineData(Step.Send, Ending.ContainerDisposed)]
+    [InlineData(Step.SendAllowingNoAnswer, Ending.CallerCancels)]
+    [InlineData(Step.SendAllowingNoAnswer, Ending.ContainerDisposed)]
+    [InlineData(Step.OneWaySend, Ending.CallerCancels)]
+    [InlineData(Step.OneWaySend, Ending.ContainerDisposed)]
+    public async Task A_call_failed_by_another_calls_host_code_as_both_are_ended_ends_as_what_ended_them(Step step, Ending ending)
+    {
+        var time = new ManualTimeProvider();
+        using var caller = new CancellationTokenSource();
+        var firstHandedWasCancelled = true;
+        var first = new HeldHostCode();
+        var second = new HeldHostCode { ReportsWhenCancelled = () => FailureOf(step) };
+        second.BeforeItReports = _ =>
+        {
+            firstHandedWasCancelled = first.Handed.IsCancellationRequested;
+            first.EndWith(FailureOf(step));
+        };
+        var (channel, _) = ChannelOver(time, first, second);
+
+        var (firstCall, firstRequest) = Start(channel, step, caller.Token);
+        var (secondCall, secondRequest) = Start(channel, step, caller.Token);
+        await first.ParkAsync();
+        await second.ParkAsync();
+        await Task.Run(() => End(ending, caller, time, channel)).WaitAsync(PickupTest.Timeout);
+
+        var firstEnded = await EndOf(firstCall);
+        var secondEnded = await EndOf(secondCall);
+        second.Reported.Should().Be(1, "the second call's host code reported the cancellation of its token as a failure of its own");
+        firstHandedWasCancelled.Should().BeFalse("the set-up: the token the first call's host code was handed was not cancelled yet when that host code was failed");
+        ShouldHaveEndedAs(firstEnded, ending, step, caller.Token, firstRequest);
+        ShouldHaveEndedAs(secondEnded, ending, step, caller.Token, secondRequest);
+        channel.PendingCount.Should().Be(0);
+        time.ScheduledTimers.Should().Be(0, "both deadlines were released");
+        await channel.DisposeAsync();
+    }
+
     // ---- a failure of the call's own ---------------------------------------------------------------
 
     /// <summary>

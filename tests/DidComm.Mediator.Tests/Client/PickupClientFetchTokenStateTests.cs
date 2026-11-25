@@ -105,7 +105,7 @@ public sealed class PickupClientFetchTokenStateTests : IAsyncLifetime
     /// passes or the container is disposed; the transport reports the cancellation of its token as a
     /// transport failure, from inside its cancellation callback (registered once the fetch waits on
     /// the send). The fetch ends as the cancellation, the deadline or the disposal does: the channel
-    /// decides by the state of the request's token when it observes the failure, not by the
+    /// decides by whether the request is being ended when it observes the failure, not by the
     /// exception's type (<c>MediatorClientChannelTokenStateTests</c> has the channel's own calls).
     /// </summary>
     [Theory]
