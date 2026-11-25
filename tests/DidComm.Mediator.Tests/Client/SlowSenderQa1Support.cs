@@ -206,6 +206,7 @@ internal sealed class Qa1Host
     private readonly Func<string, Qa1Step> _step;
     private readonly Func<string, string> _recipientOf;
     private TaskCompletionSource<DeliveredUnpack> _never = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _neverEnding;
 
     public Qa1Host(Qa1Clock clock, Func<string, Qa1Step> step, Func<string, string>? recipientOf = null)
     {
@@ -229,6 +230,21 @@ internal sealed class Qa1Host
             }
         }
     }
+
+    /// <summary>
+    /// How many calls are inside a lookup that never ends on its own and ignores its token
+    /// (<see cref="Qa1Kind.IgnoresToken"/>): each keeps its reservation until the test releases it
+    /// (<see cref="ReleaseIgnored"/>), whatever its delivery does.
+    /// </summary>
+    public int NeverEnding => Volatile.Read(ref _neverEnding);
+
+    /// <summary>
+    /// When set and it returns a task for a call's label, that call, if it stalls
+    /// (<see cref="Qa1Kind.Stalls"/>), ends only once the task has completed after its token was
+    /// cancelled: a lookup that honours its token and takes a moment more to end. Until then it
+    /// holds its reservation.
+    /// </summary>
+    public Func<string, Task?>? EndGate { get; set; }
 
     /// <summary>End every call that ignores its token.</summary>
     public void ReleaseIgnored()
@@ -260,14 +276,30 @@ internal sealed class Qa1Host
                         await Wait(Task.Delay(step.After, _clock, ct), ct);
                     throw new CryptoException("JWE could not be decrypted.");
                 case Qa1Kind.Stalls:
-                    await Wait(Task.Delay(Timeout.InfiniteTimeSpan, ct), ct);
+                    try
+                    {
+                        await Wait(Task.Delay(Timeout.InfiniteTimeSpan, ct), ct);
+                    }
+                    catch (OperationCanceledException) when (EndGate?.Invoke(label) is { } held)
+                    {
+                        await held.ConfigureAwait(false);
+                        throw;
+                    }
                     throw new InvalidOperationException("unreachable");
                 default:
                     Task<DeliveredUnpack> never;
                     lock (_gate)
                         never = _never.Task;
-                    await Wait(never, ct);
-                    return await never;
+                    Interlocked.Increment(ref _neverEnding);
+                    try
+                    {
+                        await Wait(never, ct);
+                        return await never;
+                    }
+                    finally
+                    {
+                        Interlocked.Decrement(ref _neverEnding);
+                    }
             }
         }
     }
@@ -455,12 +487,26 @@ internal sealed record Qa1Delivery(DeliveryScope Scope, IReadOnlyList<string?> I
 /// <see cref="DriveAsync{T}"/> runs a call to its end, moving the clock to the next due timer each
 /// time every worker of the delivery being opened is parked on the clock.
 /// </summary>
+/// <remarks>
+/// <strong>The host's lookups, as modelled.</strong> A lookup that honours its token has ended
+/// before the next call is driven. A host call keeps its reservation until it ends, and one whose
+/// token was cancelled can end after its delivery's result is set (nothing makes its continuation
+/// run inside the cancellation). So <see cref="DriveAsync{T}"/> first waits until the only
+/// reservations held are those of lookups that never end (<see cref="Qa1Host.NeverEnding"/>): the
+/// event "every other host call has ended", not a neighbour of it. Every loop over this exchange
+/// that asserts a bound or an exact time gets that order from here
+/// (<see cref="SlowSenderFetchQa1Tests.ReachAsync"/>, <see cref="Qa1Loop"/>). A test of what a
+/// delivery does when it arrives before such lookups have ended drives it with
+/// <c>unwaited: true</c>. Not modelled: a new unpacker (<see cref="Restart"/>) while lookups that
+/// never end are still held.
+/// </remarks>
 internal sealed class Qa1Exchange : IMediatorExchange
 {
     public static readonly TimeSpan Guard = TimeSpan.FromSeconds(20);
 
     private readonly object _gate = new();
     private readonly List<Qa1Delivery> _deliveries = new();
+    private int _mostReserved;
 
     public Qa1Exchange(Qa1Clock clock, Qa1Host host, Action<MediatorClientOptions>? configure = null)
     {
@@ -549,8 +595,12 @@ internal sealed class Qa1Exchange : IMediatorExchange
     /// opened is parked on the clock (or the delivery has not started), the clock moves exactly to
     /// the next due timer. Real time is only a hang guard.
     /// </summary>
-    public async Task<T> DriveAsync<T>(Func<Task<T>> start)
+    /// <param name="start">Starts the call.</param>
+    /// <param name="unwaited">True only for a test of a delivery that arrives while lookups of the one before are still ending: the call then starts at once.</param>
+    public async Task<T> DriveAsync<T>(Func<Task<T>> start, bool unwaited = false)
     {
+        if (!unwaited)
+            LookupsEnded();
         int before;
         lock (_gate)
             before = _deliveries.Count;
@@ -564,6 +614,31 @@ internal sealed class Qa1Exchange : IMediatorExchange
             var next = Clock.NextDueIn() ?? throw new InvalidOperationException($"Every worker is parked and no timer is due: waiting {Host.Waiting}, settled {Unpacker.Settled}, open {Deliveries[^1].Open}, from {Deliveries[^1].SettledAtStart}, tracked {Clock.Scheduled}, inner {Clock.Inner.ScheduledTimers}, done {operation.IsCompleted}.");
             Clock.Inner.Advance(next);
         }
+    }
+
+    /// <summary>The most reservations seen still held by lookups that honour their token, while a call was kept from starting for them.</summary>
+    public int MostReservedBeforeACall => Volatile.Read(ref _mostReserved);
+
+    /// <summary>Whether a call was kept from starting while a lookup that honours its token still held its reservation.</summary>
+    public bool SawLookupsStillEnding => Volatile.Read(ref _mostReserved) > 0;
+
+    /// <summary>
+    /// Wait (bounded, in real time) until every host call that honours its token has ended and
+    /// given its reservation back: the only reservations left are those of lookups that never end.
+    /// </summary>
+    public void LookupsEnded()
+    {
+        var ended = SpinWait.SpinUntil(() =>
+        {
+            var stillEnding = Unpacker.Reserved - Host.NeverEnding;
+            if (stillEnding == 0)
+                return true;
+            if (stillEnding > Volatile.Read(ref _mostReserved))
+                Volatile.Write(ref _mostReserved, stillEnding);
+            return false;
+        }, Guard);
+        if (!ended)
+            throw new TimeoutException($"The host calls of the deliveries before did not end: {Unpacker.Reserved} reserved, {Host.NeverEnding} of them by lookups that never end.");
     }
 
     // Every worker of the latest delivery (handed over after `before`) waits on the clock, and some

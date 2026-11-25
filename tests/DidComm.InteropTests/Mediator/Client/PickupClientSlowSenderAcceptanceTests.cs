@@ -142,6 +142,57 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
     }
 
     /// <summary>
+    /// The loop's model of the host's lookups, forced (<see cref="SlowFetchLoop"/> starts a fetch
+    /// only once the lookups of the fetch before have ended): the cell limit 10, 31 in front, a 60 s
+    /// lease (80 s). The ten host calls of the first fetch stay held at a gate after their
+    /// cancellation, each holding its reservation, until the loop has been seen keeping the second
+    /// fetch from starting for them. The cell's figure holds: nothing refused, 80 s. Started at
+    /// once instead, the second fetch finds ten of the anonymous partition's sixteen reservations
+    /// held and refuses four of its ten.
+    /// </summary>
+    [Fact]
+    public async Task The_loop_starts_a_fetch_only_once_the_host_calls_of_the_fetch_before_have_ended()
+    {
+        var (mediator, store) = await StartMediatorAsync(DefaultLease);
+        await using var _ = mediator;
+        var time = new QaManualTimeProvider();
+        var seam = new SlowSenderSeam(time);
+        await using var harness = await SlowFetchLoop.HarnessAsync(mediator, time, seam);
+        var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
+        var mallory = await harness.NewAliceAsync();
+        var alice = await harness.NewAliceAsync();
+        for (var i = 0; i < 31; i++)
+            await SendAnoncryptedAsync(mediator, mallory, recipient, "slow");
+        var honest = await PickupE2E.SendAsync(mediator, alice, recipient, "honest");
+        var loop = new SlowFetchLoop(mediator, harness, time, store, seam, bob.Did);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        seam.EndGate = gate.Task;
+        // Opened only once the loop has been seen waiting with reservations still held (and, as a
+        // hang guard only, after the timeout).
+        var opener = Task.Run(() =>
+        {
+            SpinWait.SpinUntil(() => loop.SawLookupsStillEnding, MediatorTestServer.Timeout);
+            gate.TrySetResult();
+        });
+        try
+        {
+            var reached = await loop.RunAsync(honest.Id, limit: 10, Horizon);
+
+            var refused = loop.Items.Count(i => i.Error != null && i.Error.Message.Contains("unpack capacity exhausted", StringComparison.Ordinal));
+            output.WriteLine(FormattableString.Invariant($"limit 10, 31 in front, lease 60 s, the first fetch's lookups ending late: reached {(reached ? "yes" : "no")} after {loop.Elapsed.TotalSeconds} s; {refused} refused; most reserved before a fetch {loop.MostReservedBeforeAFetch}"));
+            loop.MostReservedBeforeAFetch.Should().Be(10, "the ten host calls of the first fetch still held their reservations when the second fetch was due");
+            refused.Should().Be(0, "the second fetch was started once they had ended");
+            reached.Should().BeTrue();
+            loop.Elapsed.Should().Be(TimeSpan.FromSeconds(80), "the cell's figure");
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+        await opener.WaitAsync(MediatorTestServer.Timeout + MediatorTestServer.Timeout);
+    }
+
+    /// <summary>
     /// A3: Mallory sends thirty messages whose sender lookups never end and ignore their token, then
     /// Alice (another sender) sends hers. Mallory's bound is sixteen host calls
     /// (<see cref="UnpackReservations.MaxPerSender"/>): they are the only ones of hers that ever run.
@@ -219,6 +270,55 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
             seam.End();
         }
         SpinWait.SpinUntil(() => harness.Channel.Unpacker.Reserved == 0, MediatorTestServer.Timeout).Should().BeTrue("each reservation is given back when its lookup ends");
+    }
+
+    /// <summary>
+    /// A3, the other side of the comparison, on the same harness and queue: thirty messages from one
+    /// sender, then another sender's message, when that sender's lookups honour their token (its
+    /// messages never open: each is opened once, runs until its delivery's budget ends, and is
+    /// remembered). None of its messages is refused: its bound of sixteen is never reached, since a
+    /// delivery here has at most ten and the calls of the fetch before have ended. The other
+    /// sender's message is reached after <c>ceil(30 / limit)</c> budgets: 160 s at limit 4, 60 s at
+    /// limit 10. With lookups that ignore their token
+    /// (<see cref="One_sender_whose_lookups_ignore_their_token_is_held_to_its_bound_of_sixteen_and_another_senders_message_is_reached_in_the_time_sixteen_take"/>)
+    /// the sender is held to sixteen host calls, the rest of its messages are refused at once, and
+    /// the same message is reached after 80 s and 40 s.
+    /// </summary>
+    [Theory]
+    [InlineData(4, 160, 8, 15)]
+    [InlineData(10, 60, 3, 5)]
+    public async Task One_sender_whose_lookups_honour_their_token_has_every_message_opened_once_and_another_senders_message_is_reached_in_the_time_thirty_take(int limit, int seconds, int learningFetches, int fetches)
+    {
+        var (mediator, store) = await StartMediatorAsync(DefaultLease);
+        await using var _ = mediator;
+        var time = new QaManualTimeProvider();
+        var seam = new SlowSenderSeam(time);
+        await using var harness = await SlowFetchLoop.HarnessAsync(mediator, time, seam);
+        var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
+        var mallory = await harness.NewAliceAsync();
+        var alice = await harness.NewAliceAsync();
+        const int fromMallory = 30;
+        for (var i = 0; i < fromMallory; i++)
+            await PickupE2E.SendAsync(mediator, mallory, recipient, "slow");
+        var honest = await PickupE2E.SendAsync(mediator, alice, recipient, "honest");
+        var budget = harness.Channel.Options.UnpackTimeout;
+        var bound = Bound(fromMallory, limit);
+        var loop = new SlowFetchLoop(mediator, harness, time, store, seam, bob.Did);
+
+        var reached = await loop.RunAsync(honest.Id, limit, Horizon);
+
+        var refused = loop.Items.Count(i => i.Error?.Message.Contains("unpack capacity exhausted", StringComparison.Ordinal) == true);
+        var notStarted = loop.Items.Count(i => i.Error?.Message.Contains("before its turn came", StringComparison.Ordinal) == true);
+        var heldBack = loop.Items.Count(i => i.Error?.Message.Contains("did not open when it was delivered before", StringComparison.Ordinal) == true);
+        output.WriteLine(FormattableString.Invariant($"A3 | limit {limit} | {fromMallory} from one sender whose lookups honour their token | lease {DefaultLease.TotalSeconds} s | reached {(reached ? "yes" : "no")}, {loop.Elapsed.TotalSeconds} s = opening {loop.Opening.TotalSeconds} s + waiting for leases {loop.WaitingForLeases.TotalSeconds} s; {loop.LearningFetches} fetches took a budget, of {loop.Fetches}; {seam.Calls.Count(sender => sender == mallory.Did)} host calls for the sender; {refused} refused for its bound; {notStarted} out of time before their turn; {heldBack} held back; {harness.Channel.Unpacker.Reserved} reserved; bound for thirty {bound} learning fetches, {(budget * bound).TotalSeconds} s"));
+        reached.Should().BeTrue();
+        seam.Calls.Count(sender => sender == mallory.Did).Should().Be(fromMallory, "each of the sender's messages is opened once, then held back while its pause lasts");
+        refused.Should().Be(0, "the sender's bound of sixteen is never reached");
+        notStarted.Should().Be(0);
+        loop.LearningFetches.Should().Be(learningFetches).And.BeLessThanOrEqualTo(bound);
+        loop.Elapsed.Should().Be(TimeSpan.FromSeconds(seconds), "the measured time to the other sender's message").And.BeLessThanOrEqualTo(budget * bound);
+        if (fetches > 0)
+            loop.Fetches.Should().Be(fetches);
     }
 
     /// <summary>
