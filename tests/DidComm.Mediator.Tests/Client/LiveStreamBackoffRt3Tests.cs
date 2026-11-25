@@ -115,7 +115,7 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     /// What drives them, as the log of requests shows and the test asserts: after the stream's
     /// first, every live-on is sent exactly one second (the first back-off) after an
     /// acknowledgement that was refused, one for one; and every refused acknowledgement was sent at
-    /// the instant of a push, for the message that push brought. A refused acknowledgement is a
+    /// the instant of a push and names the message that push brought. A refused acknowledgement is a
     /// failed step: the stream backs off, and a cycle follows a failed step once its back-off has
     /// passed. The back-off stays at one second because the drain of each of these cycles ends,
     /// which starts the back-off again. So the mediator's pushes set the rate:
@@ -140,7 +140,7 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     public async Task With_cycles_answered_and_acknowledgements_refused_and_accepted_in_turn_one_cycle_follows_each_refused_acknowledgement(int pushEverySeconds, int measuredLiveOns, int measuredAcknowledgements)
     {
         var exchange = new SimExchange();
-        var (refusedAt, pushedAt, timer) = RefuseEverySecondAcknowledgement(exchange, TimeSpan.FromSeconds(pushEverySeconds), pushes: int.MaxValue);
+        var (refusals, pushes, timer) = RefuseEverySecondAcknowledgement(exchange, TimeSpan.FromSeconds(pushEverySeconds), pushes: int.MaxValue);
         using var pusher = timer;
         await using var driver = new StreamDriver(exchange);
 
@@ -148,11 +148,12 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
 
         var log = exchange.Log.Where(r => r.At <= TenMinutes).ToArray();
         var liveOns = log.Where(r => r.Type == LiveOn).Select(r => r.At).ToArray();
-        var refused = Snapshot(refusedAt).Where(t => t <= TenMinutes).ToArray();
-        var pushed = Snapshot(pushedAt).Where(t => t <= TenMinutes).ToArray();
+        var refused = Snapshot(refusals).Where(r => r.At <= TenMinutes).ToArray();
+        var pushed = Snapshot(pushes).Where(p => p.At <= TenMinutes).ToArray();
         output.WriteLine($"push every {pushEverySeconds} s: {liveOns.Length} live-on and {log.Count(r => r.Type == Drain)} drain rounds in 10 min; {pushed.Length} pushes; {log.Count(r => r.Type == Ack)} acknowledgements sent, {refused.Length} of them refused; {driver.Stream.TakenCount} waiting; ended at {driver.EndedAt?.ToString() ?? "never"}");
         output.WriteLine("the first requests: " + string.Join(", ", log.Take(24).Select(l => $"{l.At.TotalSeconds}:{l.Type}")));
-        output.WriteLine("refused acknowledgements at: " + string.Join(", ", refused.Take(8).Select(t => t.TotalSeconds)) + ", ...");
+        output.WriteLine("pushes: " + string.Join(", ", pushed.Take(8).Select(p => $"{p.At.TotalSeconds}:{p.Id}")) + ", ...");
+        output.WriteLine("refused acknowledgements: " + string.Join(", ", refused.Take(8).Select(r => $"{r.At.TotalSeconds}:[{string.Join(" ", r.Ids)}]")) + ", ...");
         output.WriteLine("live-on at: " + string.Join(", ", liveOns.Take(8).Select(t => t.TotalSeconds)) + ", ...");
 
         driver.EndedAt.Should().BeNull("each push with a new message and each accepted acknowledgement lets the give-up alarm go");
@@ -160,8 +161,9 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
         log.Count(r => r.Type == Drain).Should().Be(measuredLiveOns, "the drain of each cycle is one round, answered with nothing queued");
         log.Count(r => r.Type == Ack).Should().Be(measuredAcknowledgements, "as measured");
         liveOns[0].Should().Be(TimeSpan.Zero, "the stream's first cycle");
-        refused.Should().BeSubsetOf(pushed, "every refused acknowledgement was sent at the instant of a push, for the message it brought");
-        liveOns.Skip(1).Should().Equal(refused.Select(t => t + LiveDeliveryStream.FirstBackoff).Where(t => t <= TenMinutes),
+        refused.Should().OnlyContain(r => pushed.Any(p => p.At == r.At && r.Ids.Contains(p.Id)),
+            "every refused acknowledgement was sent at the instant of a push and names the message that push brought");
+        liveOns.Skip(1).Should().Equal(refused.Select(r => r.At + LiveDeliveryStream.FirstBackoff).Where(t => t <= TenMinutes),
             "every other cycle follows a refused acknowledgement, one for one, by the first back-off");
     }
 
@@ -179,7 +181,7 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     public async Task With_cycles_answered_and_no_push_after_the_first_one_cycle_per_poll_interval_is_left(int pushAfterSeconds)
     {
         var exchange = new SimExchange();
-        var (refusedAt, pushedAt, timer) = RefuseEverySecondAcknowledgement(exchange, TimeSpan.FromSeconds(pushAfterSeconds), pushes: 1);
+        var (refusals, pushes, timer) = RefuseEverySecondAcknowledgement(exchange, TimeSpan.FromSeconds(pushAfterSeconds), pushes: 1);
         using var pusher = timer;
         await using var driver = new StreamDriver(exchange);
 
@@ -187,12 +189,12 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
 
         var log = exchange.Log.Where(r => r.At <= TenMinutes).ToArray();
         var liveOns = log.Where(r => r.Type == LiveOn).Select(r => r.At).ToArray();
-        var pushed = Snapshot(pushedAt).Should().ContainSingle("one push, none after it").Subject;
+        var pushed = Snapshot(pushes).Should().ContainSingle("one push, none after it").Subject.At;
         output.WriteLine($"one push at {pushed.TotalSeconds} s: {liveOns.Length} live-on in 10 min; {log.Count(r => r.Type == Ack)} acknowledgements sent; ended at {driver.EndedAt?.ToString() ?? "never"}");
         output.WriteLine(string.Join(", ", log.Select(l => $"{l.At.TotalSeconds}:{l.Type}")));
 
         driver.EndedAt.Should().BeNull();
-        Snapshot(refusedAt).Should().Equal(new[] { pushed }, "the push's acknowledgement was refused when first sent");
+        Snapshot(refusals).Select(r => r.At).Should().Equal(new[] { pushed }, "the push's acknowledgement was refused when first sent");
         var afterTheRefusal = pushed + LiveDeliveryStream.FirstBackoff;
         log.Where(r => r.Type == Ack).Select(r => r.At).Should().Equal(new[] { pushed, afterTheRefusal }, "and accepted one back-off later; nothing is acknowledged after that");
         var interval = exchange.Options.LivePollInterval;
@@ -227,9 +229,9 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     /// </item>
     /// <item>
     /// Refused after <see cref="MediatorClientOptions.RequestTimeout"/> (30 s without an answer):
-    /// sent at 0 s and refused at 30 s (the alarm is armed for 90 s), sent at 31 s and refused at
-    /// 61 s, sent at 63 s and refused at 93 s, where the stream ends; its last acknowledgement
-    /// takes another 30 s, so the enumeration returns at 123 s.
+    /// sent at 0 s and refused at 30 s (the alarm is armed then, and fires at 90 s), sent at 31 s
+    /// and refused at 61 s, sent at 63 s and refused at 93 s, where the stream ends; its last
+    /// acknowledgement takes another 30 s, so the enumeration returns at 123 s.
     /// </item>
     /// </list>
     /// A host that enumerates the stream again starts a new one; that is the host's loop, and not
@@ -301,9 +303,9 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
     /// <summary>
     /// The same under Message Pickup 4.0, where an acknowledgement is sent one way: nothing answers
     /// it, so a mediator cannot refuse it, and the stream counts it as acknowledged once it is
-    /// sent. What can fail is the send itself (the connection, the request timeout, the bound of
-    /// waiting requests). One push brings three messages the consumer takes; nothing is pushed
-    /// after it; every cycle request is answered.
+    /// sent. What can fail is the send itself; here it fails with a transport failure. One push
+    /// brings three messages the consumer takes; nothing is pushed after it; every cycle request is
+    /// answered.
     /// <list type="bullet">
     /// <item>
     /// Every send of the acknowledgement fails at once: measured as under 3.0. One live-on in ten
@@ -363,19 +365,20 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
 
     // The mediator of the two tests above it: it answers every cycle request, refuses every second
     // acknowledgement (the first, the third, ...) and accepts the others, and pushes a new message
-    // every `every`, the first one half a second after that, `pushes` times. The lists record when,
-    // on the simulated clock, an acknowledgement was refused and when a push was made.
-    private static (List<TimeSpan> RefusedAt, List<TimeSpan> PushedAt, ITimer Pusher) RefuseEverySecondAcknowledgement(SimExchange exchange, TimeSpan every, int pushes)
+    // every `every`, the first one half a second after that, `pushes` times. The lists record, with
+    // the simulated time of each, the acknowledgements that were refused (and the ids they named)
+    // and the pushes made (and the id of the message each brought).
+    private static (List<(TimeSpan At, string[] Ids)> Refusals, List<(TimeSpan At, string Id)> Pushes, ITimer Pusher) RefuseEverySecondAcknowledgement(SimExchange exchange, TimeSpan every, int pushes)
     {
-        var refusedAt = new List<TimeSpan>();
-        var pushedAt = new List<TimeSpan>();
+        var refusals = new List<(TimeSpan At, string[] Ids)>();
+        var pushed = new List<(TimeSpan At, string Id)>();
         var acks = 0;
         exchange.Inner.On(MessagePickup.MessagesReceivedType, r =>
         {
             if (Interlocked.Increment(ref acks) % 2 == 0)
                 return Status(r);
-            lock (refusedAt)
-                refusedAt.Add(exchange.Clock.Now);
+            lock (refusals)
+                refusals.Add((exchange.Clock.Now, r.Ids.ToArray()));
             throw new TimeoutException("no answer (test)");
         });
         var made = 0;
@@ -383,21 +386,21 @@ public sealed class LiveStreamBackoffRt3Tests(ITestOutputHelper output)
         pusher = exchange.Clock.CreateTimer(_ =>
         {
             var n = Interlocked.Increment(ref made);
-            lock (pushedAt)
-                pushedAt.Add(exchange.Clock.Now);
+            lock (pushed)
+                pushed.Add((exchange.Clock.Now, $"p{n}"));
             exchange.Inner.Registration!.TryPush(Push(($"p{n}", $"ok:p{n}")));
             // After the last push the timer is stopped: the driver moves the clock from one timer
             // to the next and expects each to wake the stream.
             if (n >= pushes)
                 pusher!.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
         }, null, every + TimeSpan.FromMilliseconds(500), every);
-        return (refusedAt, pushedAt, pusher);
+        return (refusals, pushed, pusher);
     }
 
-    private static TimeSpan[] Snapshot(List<TimeSpan> times)
+    private static T[] Snapshot<T>(List<T> recorded)
     {
-        lock (times)
-            return times.ToArray();
+        lock (recorded)
+            return recorded.ToArray();
     }
 
     // Every request of a 4.0 stream, with its time: SimExchange records the times (and, for a 4.0
