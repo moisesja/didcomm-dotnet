@@ -47,8 +47,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// 2026-11-14), so this polling is the permanent design, not a stopgap. Only a failure a retry can
 /// fix is retried (<see cref="Retryable"/>); any other failure (a
 /// <see cref="MediationProtocolException"/> such as live mode not supported, a pack-stage error such
-/// as <see cref="SecretNotFoundException"/>) ends the stream at once. While a back-off lasts nothing
-/// is sent, acknowledgements included.
+/// as <see cref="SecretNotFoundException"/>) ends the stream at once. A request that fails once the
+/// caller's token is cancelled is neither: whatever it reports, the enumeration ends with the
+/// cancellation (decided by the token's state, not by the exception's type). While a back-off lasts
+/// nothing is sent, acknowledgements included.
 /// </para>
 /// <para>
 /// <strong>The run of failures (ADV5-2, ADV5-3, I-18).</strong> A failed step adds to two things:
@@ -502,8 +504,9 @@ internal sealed class LiveDeliveryStream
         {
             answer = await _exchange.ExchangeAsync(_route, request, spec, _mediatorDid, _localDid, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (Retryable(ex, ct))
+        catch (Exception ex) when (ct.IsCancellationRequested || Retryable(ex))
         {
+            ct.ThrowIfCancellationRequested(); // the caller's cancellation, whatever the step reported
             Failed(request.Id, spec, ex);
             return;
         }
@@ -529,8 +532,9 @@ internal sealed class LiveDeliveryStream
         {
             answer = await _exchange.ExchangeAsync(_route, request, spec, _mediatorDid, _localDid, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (Retryable(ex, ct))
+        catch (Exception ex) when (ct.IsCancellationRequested || Retryable(ex))
         {
+            ct.ThrowIfCancellationRequested(); // the caller's cancellation, whatever the step reported
             Failed(request.Id, spec, ex);
             return;
         }
@@ -626,7 +630,10 @@ internal sealed class LiveDeliveryStream
     /// Whether a failed step is retried after a back-off: only a failure a retry can fix (Q2-2).
     /// Everything else ends the stream at once, as it ends a fetch: a problem report or a malformed
     /// answer, a pack-stage refusal such as <see cref="SecretNotFoundException"/>, the container's
-    /// disposal, the caller's cancellation.
+    /// disposal. Asked only while the caller's token is not cancelled: once it is, a step's failure
+    /// is the caller's cancellation whatever its type (a step may report its cancellation as a
+    /// timeout or a failed connection), decided by the token's state where the failure is caught,
+    /// and the enumeration ends with an <see cref="OperationCanceledException"/>.
     /// </summary>
     /// <remarks>
     /// <list type="bullet">
@@ -642,20 +649,20 @@ internal sealed class LiveDeliveryStream
     /// <see cref="ObjectDisposedException"/> (the container is gone) — is thrown at once.
     /// </item>
     /// <item>
-    /// <see cref="OperationCanceledException"/> the caller did not cause: a transport giving up on
-    /// a wait of its own, a timeout by another name. The caller's cancellation is never retried.
+    /// <see cref="OperationCanceledException"/>: the caller did not cause it (its token is not
+    /// cancelled when this is asked), so it is a transport giving up on a wait of its own, a timeout
+    /// by another name.
     /// </item>
     /// </list>
     /// </remarks>
-    /// <param name="error">The step's exception.</param>
-    /// <param name="ct">The caller's token.</param>
-    private bool Retryable(Exception error, CancellationToken ct)
+    /// <param name="error">The step's exception, observed while the caller's token is not cancelled.</param>
+    private static bool Retryable(Exception error)
         => error switch
         {
             TimeoutException or TransportException => true,
             ObjectDisposedException => false,
             MediatorBusyException => true,
-            OperationCanceledException => !ct.IsCancellationRequested,
+            OperationCanceledException => true,
             _ => false,
         };
 
@@ -845,8 +852,9 @@ internal sealed class LiveDeliveryStream
         {
             await AcknowledgeAsync(request, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (Retryable(ex, ct))
+        catch (Exception ex) when (ct.IsCancellationRequested || Retryable(ex))
         {
+            ct.ThrowIfCancellationRequested(); // the caller's cancellation, whatever the step reported
             // Kept for the next attempt, after the back-off.
             _log.AckFailed(request.Id, ids.Length, ex);
             Failed(request.Id, spec, ex);
