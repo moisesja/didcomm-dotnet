@@ -47,8 +47,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// <para>
 /// A worker takes no further message once the delivery is being ended. The cost of having no limit
 /// per message (R-3): messages at the front that never open keep all <see cref="FetchConcurrency"/>
-/// workers for one whole budget, and the messages behind them fail as out of time before their turn;
-/// those at the front are remembered then, so the next delivery holds them back
+/// workers for one whole budget, and the messages behind them fail as out of time before their turn
+/// (inconclusive); those at the front are remembered then, so the next delivery holds them back
 /// (<c>DeliveredUnpackSixteenAtOnceTests.Sixteen_never_opening_messages_of_one_sender_hold_every_worker_for_the_budget_and_the_message_behind_them_gets_its_turn_in_the_next_delivery</c>).
 /// Only a delivery of more than <see cref="FetchConcurrency"/> messages has messages behind that
 /// many.
@@ -74,13 +74,16 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>The delivery after one whose budget ended (R-13).</strong> A lookup that has been
-/// cancelled keeps its reservation until it ends. If the next delivery arrives before that, messages
-/// of the same partition (the same sender's or, without a named sender, the mailbox's) beyond the
-/// reservations still free are refused at once, are not remembered, and come again; other
-/// partitions' messages are not affected. With a lookup that ends as soon as it is cancelled this is
-/// rare; with one that takes even a millisecond to end and a delivery that follows immediately it
-/// is the usual outcome. Pinned: with sixteen lookups still ending, all sixteen messages of the next
-/// delivery are refused; with ten, six start and four are refused; with four, none is refused
+/// cancelled keeps its reservation until it ends, and a host call that never got a thread keeps its
+/// reservation until the thread pool reaches its cancelled work item
+/// (<c>InconclusiveBusyPoolRt4Tests.A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after</c>).
+/// If the next delivery arrives before that, messages of the same partition (the same sender's or,
+/// without a named sender, the mailbox's) beyond the reservations still free are refused at once,
+/// are inconclusive, and come again; other partitions' messages are not affected. With a lookup that
+/// ends as soon as it is cancelled this is rare; with one that takes even a millisecond to end and a
+/// delivery that follows immediately it is the usual outcome. Pinned: with sixteen lookups still
+/// ending, all sixteen messages of the next delivery are refused; with ten, six start and four are
+/// refused; with four, none is refused
 /// (<c>DeliveredUnpackNextDeliveryRt3Tests.While_the_lookups_of_the_delivery_before_are_still_ending_the_next_delivery_starts_what_the_bound_of_sixteen_leaves_free_and_refuses_the_rest</c>);
 /// through a fetch loop, the message behind is returned at 80 s instead of 40 s
 /// (<c>SlowSenderFetchMatrixTests.A_fetch_that_arrives_while_the_lookups_of_the_fetch_before_are_still_ending_refuses_what_the_bound_does_not_leave_free_and_the_message_is_returned_a_lease_later</c>).
@@ -107,7 +110,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// and every write is made before the delivery's result is set.
 /// </para>
 /// <para>
-/// <strong>What an outcome says of that (<see cref="DeliveredOutcome.Inconclusive"/>; the
+/// <strong>What an outcome says of that (<see cref="DeliveredOutcome.Inconclusive"/>; I-24, the
 /// coordinator's call).</strong> A failed message that this delivery did not count against says so:
 /// its outcome is inconclusive exactly when it is not malformed, was not held back, and no strike
 /// was taken for it. The strike and the flag are one decision, made once per message by whoever
@@ -117,7 +120,25 @@ namespace DidComm.Mediator.Client.Internal;
 /// clock made fail are all inconclusive; a failure of its own (S1) and a message that had the whole
 /// budget (S2) are not. An outcome is created with its flag and never changed, and the outcomes of
 /// the messages the budget's end records are created after the delivery's lock and before its
-/// result is set.
+/// result is set. Pinned kind by kind
+/// (<c>DeliveredUnpackInconclusiveTests.An_outcome_is_inconclusive_exactly_when_this_delivery_did_not_count_against_its_message</c>)
+/// and over two hundred mixed deliveries
+/// (<c>InconclusiveMatchesTheMemoryTests.For_every_failed_item_of_two_hundred_mixed_deliveries_the_flag_says_what_the_memory_says</c>);
+/// an inconclusive message is started again at the next delivery once what was in its way is gone
+/// (<c>DeliveredUnpackInconclusiveTests.An_inconclusive_message_is_started_again_at_the_next_delivery_once_what_was_in_its_way_is_gone</c>).
+/// </para>
+/// <para>
+/// <strong>What stays inconclusive (R-14, the coordinator's call).</strong> A message that never
+/// opens and whose code starts later than <see cref="StartAllowance"/> in every delivery is
+/// inconclusive every time and is never remembered
+/// (<c>DeliveredUnpackInconclusiveTests.A_message_that_never_opens_and_whose_code_starts_late_in_every_delivery_is_inconclusive_every_time_and_never_remembered</c>,
+/// ten deliveries). That test makes the late starts by moving the clock; no way for a remote party to
+/// cause them was found. On a real clock they happen with a resolver that blocks its thread on a
+/// small thread pool (R-8 (a); the opt-in measurement
+/// <c>RealClockBlockingLookups111Tests.Measurement_A_blocking_lookups_under_a_small_pool_how_many_start_within_the_allowance_and_when_all_sixteen_are_held_back</c>
+/// prints when). That nothing else keeps a message inconclusive rests on one assumption: the mediator
+/// delivers oldest first. Whatever was in front of a late start has then opened, been remembered or
+/// been discarded by the next delivery, so the message starts first.
 /// </para>
 /// <para>
 /// <strong>Host code never runs on the caller's stack (ADV3-4).</strong> Every host unpack call (the
@@ -130,7 +151,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// calls run per container (R-8). A resolver that blocks its thread holds a thread-pool thread for
 /// each lookup, up to <see cref="FetchConcurrency"/> per delivery. With such a resolver a message's
 /// code can start later than <see cref="StartAllowance"/>, and the message is then not remembered at
-/// the budget's end (S2); and the budget's own timer can be delayed.
+/// the budget's end (S2) and is inconclusive (R-8 (a)); and the budget's own timer can be delayed
+/// (R-8 (b)).
 /// </para>
 /// <para>
 /// <strong>What host code can reach (I-4).</strong> Host code holds the budget's token. While the

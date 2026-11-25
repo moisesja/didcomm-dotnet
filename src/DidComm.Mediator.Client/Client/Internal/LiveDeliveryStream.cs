@@ -146,9 +146,12 @@ namespace DidComm.Mediator.Client.Internal;
 /// acknowledged) is skipped and not opened again; one the duplicate filter remembers is
 /// acknowledged and not yielded; a failure is yielded, never acknowledged, and reported again when
 /// it comes back in a delivery that is opened (one that brings back only messages of deliveries the
-/// current drain took brings nothing new and is not: see "The drain's end"). A drain answered with a
-/// delivery in which no message has a usable id ends the stream (nothing in it could be
-/// acknowledged, so the drain would ask again for ever); such a push is ignored.
+/// current drain took brings nothing new and is not: see "The drain's end"). That is also why the
+/// stream does not spin on inconclusive items: messages refused for capacity are yielded once per
+/// cycle, and opened in the first cycle after the capacity is free
+/// (<c>LiveStreamDiscardingHostTests.On_a_live_stream_messages_refused_for_capacity_are_not_attempted_until_it_is_free_and_only_a_host_that_left_them_queued_receives_them</c>).
+/// A drain answered with a delivery in which no message has a usable id ends the stream (nothing in
+/// it could be acknowledged, so the drain would ask again for ever); such a push is ignored.
 /// </para>
 /// <para>
 /// <strong>Acknowledgement (R-2).</strong> A yielded message is taken — added to the duplicate filter

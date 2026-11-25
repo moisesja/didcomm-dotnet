@@ -158,7 +158,9 @@ internal interface IMediatorExchange
     /// (<see cref="SlowMemory"/>). A message held back, refused for a bound, out of time before its
     /// turn, or still being opened when the budget ends is a <see cref="TimeoutException"/> failure
     /// naming <paramref name="requestId"/> (a push answers no request, so its failures name none).
-    /// Outcomes are in the order of <paramref name="messages"/>.
+    /// Each failure says whether this delivery counted against its message
+    /// (<see cref="DeliveredOutcome.Inconclusive"/>, I-24). Outcomes are in the order of
+    /// <paramref name="messages"/>.
     /// </summary>
     /// <param name="scope">The mediator and the mailbox the delivery came from, as the host's call named them (#111).</param>
     /// <param name="messages">The delivered messages (attachment id and bytes), in delivery order.</param>

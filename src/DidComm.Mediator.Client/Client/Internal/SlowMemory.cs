@@ -32,7 +32,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// entry keeps its strikes and is stamped with the lower reading, so the message is held back for
 /// the same pause again, counted from that failure, not for the next, doubled one
 /// (<c>SlowMemoryClockStepTests.A_repeat_failure_read_below_the_last_strike_keeps_the_strikes</c>,
-/// <c>…is_stamped_with_the_lower_reading</c>;
+/// <c>…A_repeat_failure_read_below_the_last_strike_is_stamped_with_the_lower_reading</c>;
 /// <c>SlowMemoryRt2BTests.After_a_clock_step_back_a_message_that_fails_again_is_held_back_for_the_same_pause_again_and_not_for_the_doubled_one</c>).
 /// So a step back can make a message due later than without it: in the measured case half a minute
 /// later, at minute 30.5 instead of minute 30
@@ -53,7 +53,8 @@ namespace DidComm.Mediator.Client.Internal;
 /// costs: one more opening of that message when it is delivered again, as after a restart (the
 /// memory is in-process only). With more than <c>q</c> messages that never open queued in one
 /// mailbox, each new entry evicts one, so they are not all held back at once and a fetch loop alone
-/// does not reach the message behind them; a host that discards them with <c>AckAsync</c> does
+/// does not reach the message behind them; a host that discards the failed items it has given up
+/// on with <c>AckAsync</c>, never an inconclusive one, does
 /// (R-4:
 /// <c>SlowSenderFetchQa1Tests.Residual_the_message_behind_more_never_opening_messages_than_the_memory_keeps_is_reached_once_the_host_discards_them</c>).
 /// A partition whose last entry is forgotten is removed.

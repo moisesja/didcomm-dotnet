@@ -28,10 +28,12 @@ namespace DidComm.Mediator.Client.Internal;
 /// </para>
 /// <para>
 /// <strong>What a reservation still held does to the next delivery (R-13):</strong> a call whose
-/// token was cancelled keeps its reservation until it ends. A delivery that arrives before that
-/// finds the partition's count where the delivery before left it, and <see cref="TryTake"/> refuses
-/// its messages of that partition beyond the reservations still free; other partitions are not
-/// affected
+/// token was cancelled keeps its reservation until it ends, and a call that never got a thread keeps
+/// it until the thread pool reaches its cancelled work item
+/// (<c>InconclusiveBusyPoolRt4Tests.A_host_call_that_never_got_a_thread_keeps_its_reservation_until_the_pool_reaches_it_and_its_senders_next_message_is_refused_meanwhile_and_started_after</c>).
+/// A delivery that arrives before that finds the partition's count where the delivery before left
+/// it, and <see cref="TryTake"/> refuses its messages of that partition beyond the reservations
+/// still free (they are inconclusive); other partitions are not affected
 /// (<c>DeliveredUnpackNextDeliveryRt3Tests.While_the_lookups_of_the_delivery_before_are_still_ending_the_next_delivery_starts_what_the_bound_of_sixteen_leaves_free_and_refuses_the_rest</c>,
 /// <c>…While_one_senders_lookups_of_the_delivery_before_are_still_ending_another_senders_message_opens_and_nothing_more_is_remembered</c>).
 /// </para>
