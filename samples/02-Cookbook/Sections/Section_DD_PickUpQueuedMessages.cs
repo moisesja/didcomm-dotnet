@@ -32,9 +32,9 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// acknowledges what it opened before it returns. A message that keeps failing to open is never
 /// discarded for you: give up on it with <c>AckAsync</c>. One exception: an item whose
 /// <c>NotAttempted</c> is true is a message the client did not get to in this fetch, not one that
-/// failed. Leave it alone; it comes again and is tried then. And the mediator keeps a message for a
-/// limited time only (30 days by default): a wallet that stays offline longer loses those messages,
-/// and nobody is told.
+/// failed. Leave it alone: it comes again, and is tried when the client gets to it. And the
+/// mediator keeps a message for a limited time only (30 days by default): a wallet that stays
+/// offline longer loses those messages, and nobody is told.
 /// </para>
 /// <para>
 /// <strong>Which version.</strong> Message Pickup has two versions in use, 3.0 and 4.0. The client
@@ -108,8 +108,9 @@ public static class Section_DD_PickUpQueuedMessages
             {
                 // Nothing is known to be wrong with this message: the client did not get to it in
                 // this fetch (the time for the fetch ran out on the messages in front of it, or too
-                // many messages were still being opened). Leave it queued. It comes again and is
-                // tried then. Discarding it would delete a message nobody has tried to open.
+                // many messages were still being opened). Leave it queued: it comes again, and is
+                // tried when the client gets to it. Discarding it would delete a message nobody has
+                // tried to open.
                 ctx.Narrator.Value("[bob] not tried in this fetch, left queued", item.Error?.GetType().Name);
             }
             else

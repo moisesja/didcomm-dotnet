@@ -72,8 +72,8 @@ namespace DidComm.Mediator.Client;
 /// <strong>Failed items that were not tried.</strong> Do not discard an item whose
 /// <see cref="PickupItem.NotAttempted"/> is <c>true</c>: the client did not try to open it in this
 /// delivery (the time ran out before its turn came, or it was refused for capacity), so nothing is
-/// known about it. It is delivered again and tried then. A host that discards every failed item
-/// also deletes messages nobody has tried to open.
+/// known about it. It is delivered again, and tried then or once what was in its way is gone. A
+/// host that discards every failed item also deletes messages nobody has tried to open.
 /// </para>
 /// <para>
 /// <strong>No replay check.</strong> Messages these clients return have not been through the
@@ -257,7 +257,7 @@ public sealed class PickupClient
     /// that polls more slowly than the lease, with more failures than <paramref name="limit"/> that
     /// are not remembered, keeps seeing only the failures until it discards them with
     /// <see cref="AckAsync"/> (never one whose <see cref="PickupItem.NotAttempted"/> is <c>true</c>:
-    /// that one has not been tried, and is tried when it comes again).
+    /// that one has not been tried yet).
     /// </para>
     /// <para>
     /// <strong>Time to open the messages.</strong> All the messages of one fetch share one budget,
@@ -358,8 +358,8 @@ public sealed class PickupClient
     /// <strong>A message that keeps failing.</strong> Discard it with <see cref="AckAsync"/> once you
     /// have given up on it: the client never does. Do not discard an item whose
     /// <see cref="PickupItem.NotAttempted"/> is <c>true</c>: the client did not try to open that
-    /// message in this delivery; it is delivered again and tried then. Until a message is discarded,
-    /// or ages out at the mediator
+    /// message in this delivery; it is delivered again, and tried then or once what was in its way is
+    /// gone. Until a message is discarded, or ages out at the mediator
     /// (after 30 days by default), it stays queued and counts against your mailbox's quota there (at
     /// this library's mediator, <c>MessagePickupOptions.MaxQueueMessages</c>, 100 by default).
     /// Messages that never open — junk anyone who can address you can send — can fill that quota, and
@@ -576,7 +576,7 @@ public sealed class PickupClient
     /// Tell the mediator it may delete these messages (<c>messages-received</c>): usually items that
     /// failed and that you have given up on, or a live item you want gone before you stop a stream.
     /// Not an item whose <see cref="PickupItem.NotAttempted"/> is <c>true</c>: the client has not
-    /// tried to open that message yet, and tries it when it is delivered again.
+    /// tried to open that message yet, so leave it queued.
     /// Sent 100 ids per message.
     /// </summary>
     /// <remarks>
@@ -800,8 +800,9 @@ public sealed class PickupClient
     /// <see cref="FetchAsync"/>, "Messages that did not open"). Discard it with
     /// <c>AckAsync(mediatorDid, from, new[] { item.Id })</c> once you have given up on it: the stream
     /// never does. Do not discard an item whose <see cref="PickupItem.NotAttempted"/> is <c>true</c>:
-    /// the stream did not try to open that message in this delivery; it is delivered again and tried
-    /// then. Until a message is discarded or ages out it counts against your mailbox's quota at the
+    /// the stream did not try to open that message in this delivery; it is delivered again, and tried
+    /// then or once what was in its way is gone. Until a message is discarded or ages out it counts
+    /// against your mailbox's quota at the
     /// mediator (see <see cref="FetchAsync"/>). The error's text can quote DIDs and key ids (see
     /// <see cref="PickupItem.Error"/>), and the messages are not replay-checked (see the class
     /// remarks).

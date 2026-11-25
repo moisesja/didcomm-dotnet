@@ -17,9 +17,9 @@ namespace DidComm.Mediator.Client;
 /// <para>
 /// <strong>Not every failed item has been tried.</strong> When <see cref="NotAttempted"/> is
 /// <c>true</c>, the client did not try to open the message in this delivery and knows nothing about
-/// it. Do not discard such an item: it is delivered again and tried then (<see cref="NotAttempted"/>
-/// says when it can come back not attempted once more). A host that discards every failed item it is
-/// handed also deletes messages that nobody has tried to open.
+/// it. Do not discard such an item: it is delivered again, and tried then or once what was in its
+/// way is gone (<see cref="NotAttempted"/> says what that is). A host that discards every failed
+/// item it is handed also deletes messages that nobody has tried to open.
 /// </para>
 /// <para>
 /// <strong>Who sent it.</strong> The message in <see cref="Unpacked"/> was delivered encrypted, but
