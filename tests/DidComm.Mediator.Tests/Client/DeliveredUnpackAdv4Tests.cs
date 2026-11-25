@@ -25,6 +25,9 @@ public sealed class DeliveredUnpackAdv4Tests
     private static readonly TimeSpan Unreachable = TimeSpan.FromSeconds(3);
     private static readonly AsyncLocal<string?> Ambient = new();
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     // ---- ADV3-4 -------------------------------------------------------------------------------
 
     /// <summary>
@@ -96,7 +99,9 @@ public sealed class DeliveredUnpackAdv4Tests
     /// <summary>
     /// ADV3-4 held (regression), and the ExecutionContext question (L-059): host code sees the
     /// caller's ambient values (as it did on the caller's stack), and what host code sets on its
-    /// thread reaches neither the caller nor the next message the same worker opens.
+    /// thread reaches neither the caller nor the next message the same worker opens. More than twice
+    /// as many messages as are opened at once (thirty-three), so every worker opens another message
+    /// after its first.
     /// </summary>
     [Fact]
     public async Task Host_code_sees_the_callers_ambient_values_and_what_it_sets_reaches_neither_the_caller_nor_the_next_message()
@@ -110,23 +115,25 @@ public sealed class DeliveredUnpackAdv4Tests
             return Task.FromResult(Opened(text));
         }, Budget, time);
 
+        const int count = 2 * AtOnce + 1;
         Ambient.Value = "caller";
-        var outcomes = await unpacker.UnpackAllAsync(Payloads(9, "m-"), "request-1", default).WaitAsync(RealTime);
+        var outcomes = await unpacker.UnpackAllAsync(Payloads(count, "m-"), "request-1", default).WaitAsync(RealTime);
 
         outcomes.Should().OnlyContain(o => o.Succeeded);
-        outcomes.Select(o => o.Unpacked!.Message.Id).Should().Equal(Enumerable.Range(0, 9).Select(i => $"m-{i}"), "outcomes stay in delivery order");
+        outcomes.Select(o => o.Unpacked!.Message.Id).Should().Equal(Enumerable.Range(0, count).Select(i => $"m-{i}"), "outcomes stay in delivery order");
         Ambient.Value.Should().Be("caller");
-        seen.Should().HaveCount(9).And.OnlyContain(s => s.Value == "caller", "each message's host code starts from the caller's context, whichever worker opens it");
+        seen.Should().HaveCount(count).And.OnlyContain(s => s.Value == "caller", "each message's host code starts from the caller's context, whichever worker opens it");
     }
 
     // ---- ADV3-7 -------------------------------------------------------------------------------
 
     /// <summary>
     /// ADV4-3 (fixed by #111, I-3). A host call is created only under the delivery's lock while the
-    /// delivery is open, with the budget's token. The shutdown lands while the fifth message's worker
-    /// is starting it, between taking it and creating its host call (the worker's reading of the
-    /// clock for the start rule is the rendezvous): the delivery ends cancelled, and the fifth
-    /// message's host code never starts.
+    /// delivery is open, with the budget's token. One more message than are opened at once: the
+    /// seventeenth waits for a worker. The shutdown lands while its worker is starting it, between
+    /// taking it and creating its host call (the worker's reading of the clock for the start rule
+    /// is the rendezvous): the delivery ends cancelled, and the seventeenth message's host code
+    /// never starts.
     /// </summary>
     [Fact]
     public async Task ADV4_3_a_message_whose_worker_was_starting_it_when_the_shutdown_came_never_has_its_host_code_started()
@@ -138,28 +145,29 @@ public sealed class DeliveredUnpackAdv4Tests
         var armed = 0;
         var late = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var othersStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var waiting = "m-" + AtOnce; // the seventeenth: the one message that waits for a worker
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
-            if (text == "m-4")
+            if (text == waiting)
             {
                 late.TrySetResult(Volatile.Read(ref ended) == 1);
                 return Opened(text);
             }
             if (text == "m-0")
             {
-                // Opens once the three others have started (their host calls have read the clock),
-                // so the next reading of the clock is its worker's, taking the fifth message.
+                // Opens once the fifteen others have started (their host calls have read the clock),
+                // so the next reading of the clock is its worker's, taking the seventeenth message.
                 await othersStarted.Task;
                 Volatile.Write(ref armed, 1);
                 return Opened(text);
             }
-            if (Interlocked.Increment(ref others) == 3)
+            if (Interlocked.Increment(ref others) == AtOnce - 1)
                 othersStarted.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a lookup that honours its token
             throw new InvalidOperationException("unreachable");
         }, Budget, clock, shutdown.Token);
-        // The first reading of the clock after m-0 opened is made by the worker that takes the fifth
-        // message (m-4), for the start rule, before it reserves and creates the host call: the
+        // The first reading of the clock after m-0 opened is made by the worker that takes the
+        // seventeenth message, for the start rule, before it reserves and creates the host call: the
         // container goes away right there.
         clock.OnRead = () =>
         {
@@ -169,9 +177,9 @@ public sealed class DeliveredUnpackAdv4Tests
             Volatile.Write(ref ended, 1);
         };
 
-        var batch = unpacker.UnpackAllAsync(Payloads(5, "m-"), "request-1", default);
+        var batch = unpacker.UnpackAllAsync(Payloads(AtOnce + 1, "m-"), "request-1", default);
         await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>("the shutdown ended the delivery");
-        Volatile.Read(ref armed).Should().Be(2, "the shutdown came while the fifth message's worker was starting it");
+        Volatile.Read(ref armed).Should().Be(2, "the shutdown came while the seventeenth message's worker was starting it");
 
         bool? startedAfterTheEnd;
         try
@@ -184,7 +192,7 @@ public sealed class DeliveredUnpackAdv4Tests
         }
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && clock.LiveTimers == 0, RealTime).Should().BeTrue("nothing is left behind either way");
 
-        startedAfterTheEnd.Should().NotBe(true, "a delivery the shutdown ended starts no host code; m-4's was started after it ended");
+        startedAfterTheEnd.Should().NotBe(true, "a delivery the shutdown ended starts no host code; the seventeenth message's was started after it ended");
     }
 
     /// <summary>
