@@ -148,7 +148,8 @@ public sealed class DeliveredUnpackTokenStateTests
     /// more than are opened at once) whose first sixteen messages have been opening since its
     /// start: the result is cancelled with that token, nothing is remembered, and the seventeenth
     /// message never starts; whatever the lookups do when their token is cancelled. A lookup still
-    /// running keeps its reservation until it ends.
+    /// running keeps its reservation until it ends. (Each message names a sender of its own, so no
+    /// partition's bound stands between the seventeenth and a worker: it waits for a worker only.)
     /// </summary>
     [Theory]
     [InlineData(false, WhenCancelled.Ends)]
@@ -170,7 +171,7 @@ public sealed class DeliveredUnpackTokenStateTests
         var ids = Enumerable.Range(1, AtOnce + 1).Select(i => "alice-" + i).ToArray();
         try
         {
-            var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Message).ToArray(), "request-1", caller.Token);
+            var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(FromItsOwnSender).ToArray(), "request-1", caller.Token);
             await register.OpenAsync(whenCancelled == WhenCancelled.ReportsAFailure ? AtOnce : 0, RealTime);
             await calls.WaitForAsync(AtOnce, RealTime);
             time.Advance(TimeSpan.FromSeconds(10));
@@ -300,6 +301,9 @@ public sealed class DeliveredUnpackTokenStateTests
     // ---- helpers ----------------------------------------------------------------------------------
 
     private static DeliveredInput Message(string id) => new(id, TestJwe.Bytes(TestJwe.Anoncrypt(id)));
+
+    // A message naming a sender no other message names: it has a partition to itself.
+    private static DeliveredInput FromItsOwnSender(string id) => new(id, TestJwe.Bytes(TestJwe.Authcrypt($"did:example:sender-of-{id}#key-1", id)));
 
     // What a delivery that did not end cancelled ended with, for a failing assertion's text.
     private static string Describe(Task<IReadOnlyList<DeliveredOutcome>> delivery, DeliveredMessageUnpacker unpacker)

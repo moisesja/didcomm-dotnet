@@ -192,7 +192,9 @@ public sealed class DeliveredUnpackAdv3Tests
     /// inside the budget's own <c>Cancel()</c>. Whichever comes first, that result or the delivery's
     /// end, each message has exactly one outcome; the message that waited for a worker (the
     /// seventeenth: one more than are opened at once) is not started; and no reservation or timer
-    /// is left behind (the budget may be disposed inside its own <c>Cancel()</c>).
+    /// is left behind (the budget may be disposed inside its own <c>Cancel()</c>). Each message
+    /// names a sender of its own, so no partition's bound stands between the seventeenth and a
+    /// worker: it waits for a worker only.
     /// </summary>
     [Fact]
     public async Task An_unpack_that_completes_inside_the_budgets_cancel_is_recorded_once_and_leaves_nothing_behind()
@@ -200,9 +202,10 @@ public sealed class DeliveredUnpackAdv3Tests
         var time = new ManualTimeProvider();
         using var registered = new SemaphoreSlim(0);
         var started = 0;
-        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
+        var unpacker = new DeliveredMessageUnpacker((packed, ct) =>
         {
             Interlocked.Increment(ref started);
+            var text = TestJwe.LabelOf(packed);
             var done = new TaskCompletionSource<DeliveredUnpack>();
             // Completes synchronously, on the budget's timer thread, when the budget runs out.
             _ = Task.Run(async () =>
@@ -213,7 +216,10 @@ public sealed class DeliveredUnpackAdv3Tests
             });
             return done.Task;
         }, Budget, time);
-        var payloads = Payloads(AtOnce + 1, "m-"); // sixteen at once; the seventeenth waits for a worker
+        // Sixteen at once; the seventeenth waits for a worker.
+        var payloads = Enumerable.Range(0, AtOnce + 1)
+            .Select(i => TestJwe.Bytes(TestJwe.Authcrypt($"did:example:sender-{i}#key-1", "m-" + i)))
+            .ToArray();
         var batch = unpacker.UnpackAllAsync(payloads, "request-1", default);
 
         for (var i = 0; i < AtOnce; i++)

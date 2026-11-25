@@ -347,8 +347,7 @@ public sealed class SlowSenderFetchQa1Tests
     /// 50 take four rounds, 8 s). With 50 honest whose lookups take 6 s, three rounds of sixteen
     /// start while the floor is left (at 0, 6 and 12 s): 48 open, and the two that do not open
     /// fail only before their turn (out of budget), never while being opened. No honest message is
-    /// remembered either way; the failures are. (When four were opened at once, the second case was
-    /// the one in which some did not get their turn.)
+    /// remembered either way; the failures are.
     /// </summary>
     [Theory]
     [InlineData(25, 2, 25)]
