@@ -118,9 +118,16 @@ public static class Section_DD_PickUpQueuedMessages
             else
             {
                 // The message had its chance and did not open (this one is encrypted for someone
-                // else), and Bob gives up on it. That is his decision, not the client's: an item
-                // that is not inconclusive is not thereby one to discard. A message that a
-                // recipientDid filter turned away, for instance, opens in a fetch without the filter.
+                // else). This fetch counts against it: the client holds it back for a pause and
+                // tries it again after that. Giving up on it earlier is Bob's decision, not the
+                // client's, and he gives up at once.
+                //
+                // One kind of failed item is different, and this fetch cannot produce it because it
+                // uses no recipientDid filter: a message such a filter turned away. That message did
+                // open, for another of your DIDs, and it is yours to settle: take it with a fetch
+                // without the filter, or discard it. Do not leave it queued: while it is, it is
+                // opened again at every fetch under the filter and stays in front of what came
+                // after it.
                 ctx.Narrator.Value("[bob] could not open", item.Error?.GetType().Name);
                 unopened.Add(item.Id);
             }
