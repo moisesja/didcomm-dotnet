@@ -504,9 +504,11 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
 
     /// <summary>
     /// The answer arrives on one thread while the send fails on its own on another, fifty times per
-    /// kind of request, in whatever order the two land. The request has one outcome: the call
-    /// returns the answer exactly when the channel took it, and ends with the send's failure exactly
-    /// when it did not. No request is left counted, and no deadline is left scheduled.
+    /// kind of request, in whatever order the two land (one of the two threads spins a little
+    /// first, a different one and for a different length each round, so that the order varies; no
+    /// order is required). The request has one outcome: the call returns the answer exactly when
+    /// the channel took it, and ends with the send's failure exactly when it did not. No request is
+    /// left counted, and no deadline is left scheduled.
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -526,14 +528,19 @@ public sealed class MediatorClientChannelTokenStateRt3Tests : IAsyncLifetime
             var answer = await _w.SnapshotAsync(_w.Status(request!.Id));
             await host.ParkAsync();
             using var go = new ManualResetEventSlim();
+            var spins = round / 2 * 200;
+            var answerSpins = round % 2 == 0 ? spins : 0;
+            var failureSpins = round % 2 == 0 ? 0 : spins;
             var taking = Task.Run(() =>
             {
                 go.Wait();
+                Thread.SpinWait(answerSpins);
                 return channel.AsCorrelator().OnInbound(answer);
             });
             var failing = Task.Run(() =>
             {
                 go.Wait();
+                Thread.SpinWait(failureSpins);
                 host.EndWith(failure);
             });
             go.Set();
