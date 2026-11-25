@@ -106,9 +106,14 @@ public sealed class DirectPushAdv110Pass3Tests
     // outside the D-4 count, and since each worker starts at most one push per PushTimeout, at most about
     // PushConcurrency × ceil(resolver timeout ÷ PushTimeout) run at once. This pins that bound, on the
     // manual clock: six recipients whose lookups each end 2.5 × PushTimeout after they start, one worker;
-    // at most ceil(2.5) = 3 run at once (six were abandoned in all), while at most one operation is ever
-    // unsettled. Each lookup ends in a timer callback that runs inside the clock's Advance, so the count
-    // drops before the next deadline fires (deterministic).
+    // at most ceil(2.5) = 3 run at once (six were abandoned in all), while at each deadline the push
+    // about to reach it is the only operation unsettled: the earlier ones have settled with their
+    // lookups still running. Each lookup ends in a timer callback that runs inside the clock's Advance,
+    // so the count drops before the next deadline fires (deterministic). An abandoned operation settles
+    // once its own work has stopped waiting (on the pool, in real time, possibly after the next push
+    // has started), so before each deadline the test waits for that, with the clock still (L-065): no
+    // lookup can end meanwhile. Moving on sooner would let the worker find two abandoned operations
+    // unsettled and skip the next push as saturated, which the bound allows.
     [Fact]
     public async Task ADV_110_3a_2_Lookups_abandoned_at_the_push_deadline_are_outside_the_unsettled_count_and_at_most_PushConcurrency_times_ceil_resolver_timeout_over_PushTimeout_run_at_once()
     {
@@ -160,12 +165,13 @@ public sealed class DirectPushAdv110Pass3Tests
         var mark = fixture.Time.Mark();
         foreach (var grant in grants)
             fixture.Dispatcher.Wake(grant.Peer).Should().BeTrue();
-        var maxUnsettled = 0;
+        var bound = 1 * (int)Math.Ceiling(resolverTimeout / PushTimeout);
         for (var push = 0; push < Recipients; push++)
         {
             (await started.WaitAsync(Wait)).Should().BeTrue("push {0}: the check looks the name up", push);
             await fixture.Time.WaitForTimerAsync(PushTimeout, mark, Wait); // this push's deadline
-            maxUnsettled = Math.Max(maxUnsettled, fixture.Dispatcher.Unsettled);
+            await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 1, $"push {push}: the operations abandoned at the earlier deadlines settle while their lookups run on");
+            Volatile.Read(ref outstanding).Should().Be(Math.Min(push + 1, bound), "push {0}: the lookups abandoned at the earlier deadlines still run, outside the unsettled count", push);
             mark = fixture.Time.Mark();
             fixture.Time.Advance(PushTimeout); // the deadline (and any lookup that gives up before it)
             await fixture.WaitForPushOutcomesAsync(push + 1, Wait);
@@ -174,9 +180,7 @@ public sealed class DirectPushAdv110Pass3Tests
         await MessagePickupLive.UntilAsync(() => fixture.Dispatcher.Unsettled == 0, "every push settled at its deadline");
 
         fixture.PushOutcomeLog.Should().HaveCount(Recipients).And.OnlyContain(o => o == PushOutcomes.Failed, "precondition: each lookup reached the deadline");
-        var bound = 1 * (int)Math.Ceiling(resolverTimeout / PushTimeout);
         Volatile.Read(ref maxOutstanding).Should().Be(bound, "at most PushConcurrency × ceil(resolver timeout ÷ PushTimeout) abandoned lookups run at once ({0} were abandoned in all)", Recipients);
-        maxUnsettled.Should().BeLessThanOrEqualTo(1, "the operations settle at their deadlines: the lookups they abandoned are outside the D-4 count");
 
         // Once the resolver has given up on every one, none is left.
         fixture.Time.Advance(resolverTimeout);
