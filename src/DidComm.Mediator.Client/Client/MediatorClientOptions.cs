@@ -98,9 +98,11 @@ public sealed class MediatorClientOptions
     /// asked for up to sixteen lookups at once per delivery. A message has no time limit of its own:
     /// it runs until it opens, fails, or this value has passed for the delivery. A message starts
     /// only while at least a quarter of this value is left; one whose turn comes later fails as out
-    /// of time without being opened. A message still being opened when the time is up — its sender's
-    /// DID resolves slowly, or never — is reported as a failed item with a
-    /// <see cref="TimeoutException"/> (naming the request, never a message) and is not acknowledged.
+    /// of time without being opened (an item whose <see cref="PickupItem.Inconclusive"/> is
+    /// <c>true</c>: it gets its turn when it is delivered again). A message still being opened when
+    /// the time is up — its sender's DID resolves slowly, or never — is reported as a failed item
+    /// with a <see cref="TimeoutException"/> (naming the request, never a message) and is not
+    /// acknowledged.
     /// The rest of the delivery is returned and acknowledged as usual. A message that fails at once
     /// gives its place to the next one; messages that never open keep theirs until the time is up.
     /// Sixteen of them at the front of a delivery keep every place, and the messages behind them in
@@ -130,9 +132,10 @@ public sealed class MediatorClientOptions
     /// resolver's until it returns, and the opening keeps its reservation meanwhile (below). A
     /// resolver that blocks its thread holds a thread-pool thread for every lookup, up to sixteen per
     /// delivery. While threads are held that way, other messages can start late (one whose code
-    /// starts later than an eighth of this value is not remembered when the time is up, and is opened
-    /// again when it is delivered again), and the timer that ends the delivery can itself fire late.
-    /// Use resolvers that are asynchronous and honour their cancellation token.
+    /// starts later than an eighth of this value and is still being opened when the time is up is
+    /// inconclusive: not remembered, and started again when it is delivered again), and the timer
+    /// that ends the delivery can itself fire late. Use resolvers that are asynchronous and honour
+    /// their cancellation token.
     /// </para>
     /// <para>
     /// <strong>Keep it well below the mediator's lease.</strong> A mediator sets aside what it
@@ -150,9 +153,12 @@ public sealed class MediatorClientOptions
     /// </para>
     /// <para>
     /// <strong>A message that keeps failing.</strong> Discard it with
-    /// <see cref="PickupClient.AckAsync"/>. A mediator that does not set fetched messages aside
-    /// delivers it first on every fetch, and neither this limit nor the memory of messages that did
-    /// not open gets you past more of them than one fetch holds.
+    /// <see cref="PickupClient.AckAsync"/> once you have given up on it, and never while its item's
+    /// <see cref="PickupItem.Inconclusive"/> is <c>true</c>: then this delivery was not counted
+    /// against the message (its turn did not come, it was refused for capacity, or it was started
+    /// late and cut), and it is delivered again and started again. A mediator that does not set
+    /// fetched messages aside delivers it first on every fetch, and neither this limit nor the
+    /// memory of messages that did not open gets you past more of them than one fetch holds.
     /// </para>
     /// <para>
     /// <strong>A DID resolver that ignores cancellation.</strong> The library hands every lookup the
@@ -166,10 +172,13 @@ public sealed class MediatorClientOptions
     /// per mailbox. Measured at this library's mediator with thirty messages from such a sender in
     /// front: sixteen were opened, fourteen were refused at once, and another sender's message behind
     /// them was returned after 40 seconds at a fetch limit of 10 and after 80 seconds at a limit of
-    /// 4. Many senders whose lookups ignore cancellation (sixteen in one mailbox, or one in sixteen
-    /// mailboxes) can still hold all 256, and until those lookups end every delivered message fails
-    /// at once, for every DID and tenant of the container; a resolver that blocks its thread can hold
-    /// up to 256 threads. Use a resolver that honours its cancellation token.
+    /// 4. With the same thirty and lookups that honour their token, all thirty were opened once,
+    /// none was refused, and the other sender's message was returned after 60 seconds at a limit of
+    /// 10 and after 160 seconds at a limit of 4. Many senders whose lookups ignore cancellation
+    /// (sixteen in one mailbox, or one in sixteen mailboxes) can still hold all 256, and until those
+    /// lookups end every delivered message fails at once, for every DID and tenant of the container;
+    /// a resolver that blocks its thread can hold up to 256 threads. Use a resolver that honours its
+    /// cancellation token.
     /// </para>
     /// </remarks>
     public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(20);

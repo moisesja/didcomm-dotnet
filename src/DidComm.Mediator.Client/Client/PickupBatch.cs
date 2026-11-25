@@ -34,7 +34,10 @@ public sealed class PickupBatch
     /// <summary>
     /// <c>true</c> when the mediator had nothing deliverable for this request: it answered with a
     /// <c>status</c>, or with a delivery that carried no message. Call
-    /// <see cref="PickupClient.FetchAsync"/> until it is <c>true</c> to take everything queued.
+    /// <see cref="PickupClient.FetchAsync"/> until it is <c>true</c> to take everything queued. When
+    /// a fetch returns only items whose <see cref="PickupItem.Inconclusive"/> is <c>true</c>, wait
+    /// before you fetch again (<see cref="PickupClient.FetchAsync"/> says for what): such a batch is
+    /// not drained, and nothing in it was settled.
     /// </summary>
     public bool Drained { get; }
 

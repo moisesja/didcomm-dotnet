@@ -59,14 +59,14 @@ namespace DidComm.Mediator.Client;
 /// them again after its lease (60 seconds at this library's mediator). So is a delivered message
 /// that is not a DIDComm message in encrypted form (a JWE, as delivered): Message Pickup allows no
 /// other kind of attachment, so it is never unpacked. The clients never discard
-/// one on their own: discard one you have given up on with <see cref="AckAsync"/>. That includes a
-/// message that ran out of time while it was being opened (all the messages of one delivery share
-/// one <see cref="MediatorClientOptions.UnpackTimeout"/>), and one the client remembers because it
-/// did not open when it was delivered before: such a message is not opened again while its pause
-/// lasts, and is returned at once as a failed item with a <see cref="TimeoutException"/> (see
-/// <see cref="FetchAsync"/>, "Messages that did not open"). The error is the unpack's own
-/// exception, and its text can quote DIDs and key ids: log its type, not its message, wherever
-/// identifiers must not go.
+/// one on their own: discard one you have given up on with <see cref="AckAsync"/>, and never one
+/// whose <see cref="PickupItem.Inconclusive"/> is <c>true</c> (the next paragraph). A message that
+/// failed on its own, or that was given the whole time and did not open (all the messages of one
+/// delivery share one <see cref="MediatorClientOptions.UnpackTimeout"/>), is remembered: it is not
+/// opened again while its pause lasts, and is returned at once as a failed item with a
+/// <see cref="TimeoutException"/> (see <see cref="FetchAsync"/>, "Messages that did not open"). The
+/// error is the unpack's own exception, and its text can quote DIDs and key ids: log its type, not
+/// its message, wherever identifiers must not go.
 /// </para>
 /// <para>
 /// <strong>Failed items that do not count against their message.</strong> Do not discard an item
@@ -143,6 +143,11 @@ namespace DidComm.Mediator.Client;
 ///         if (item.Unpacked is { } message)
 ///             Handle(message);
 ///     }
+///
+///     // A fetch that brought only inconclusive items settled nothing: wait before fetching again
+///     // (FetchAsync says for what). A minute covers the 60-second lease of this library's mediator.
+///     if (batch.Items.Count &gt; 0 &amp;&amp; batch.Items.All(item =&gt; item.Inconclusive))
+///         await Task.Delay(TimeSpan.FromMinutes(1));
 /// }
 /// while (!batch.Drained);
 /// </code>
@@ -233,7 +238,9 @@ public sealed class PickupClient
     /// <summary>
     /// Ask for up to <paramref name="limit"/> messages (<c>delivery-request</c>), unpack each, and
     /// acknowledge the ones that unpacked (<c>messages-received</c>) before returning. Call it until
-    /// <see cref="PickupBatch.Drained"/> is <c>true</c> to take everything queued.
+    /// <see cref="PickupBatch.Drained"/> is <c>true</c> to take everything queued; when a fetch
+    /// returns only items whose <see cref="PickupItem.Inconclusive"/> is <c>true</c>, wait before
+    /// the next call (see "A message that keeps failing" in the remarks).
     /// </summary>
     /// <remarks>
     /// <para>
@@ -275,7 +282,8 @@ public sealed class PickupClient
     /// for senders whose DIDs resolve slowly or never: the budget ends it. A message that fails at
     /// once gives its place to the next one. The cost: messages that never open keep their places
     /// until the budget ends. Sixteen of them at the front of a fetch keep every place for the whole
-    /// budget, and the messages behind them in that fetch run out of time before their turn; those
+    /// budget, and the messages behind them in that fetch run out of time before their turn: they
+    /// are returned as failed items whose <see cref="PickupItem.Inconclusive"/> is <c>true</c>, and
     /// get their turn in the next fetch that brings them, where the sixteen are remembered and not
     /// opened again (below). Only a fetch of more than sixteen messages has messages behind
     /// sixteen: this library's mediator delivers at most ten per fetch at its defaults, so there
@@ -294,7 +302,10 @@ public sealed class PickupClient
     /// again. Nor is a message remembered when it was refused for capacity, when it did not start,
     /// when it is not a message this client opens, when it was held back, or when it was still being
     /// opened as you cancelled or the container was disposed. A message that opens is forgotten.
-    /// Nothing in the message decides any of this. When the mediator delivers a remembered message
+    /// Nothing in the message decides any of this. A failed item tells you which it was:
+    /// <see cref="PickupItem.Inconclusive"/> is <c>true</c> exactly when the message did not open
+    /// and nothing was counted against it in this fetch (it was not remembered, was not held back,
+    /// and is a message this client opens). When the mediator delivers a remembered message
     /// again, it is not opened: it is returned at once as a failed item (a
     /// <see cref="TimeoutException"/>: "it did not open when it was delivered before"), runs none of
     /// your code, costs none of the budget and is not acknowledged. Its pause is 10 minutes (30 times
@@ -335,9 +346,10 @@ public sealed class PickupClient
     /// work stay the resolver's until it returns, and the opening keeps its reservation meanwhile
     /// (below). A resolver that blocks its thread holds a thread-pool thread for every lookup, up to
     /// sixteen per fetch. While threads are held that way, other messages can get their thread late:
-    /// one whose code starts later than an eighth of the budget is not remembered when the budget
-    /// ends and is opened again when it is delivered again, and the timer that ends the budget can
-    /// itself fire late. Use resolvers that are asynchronous and honour their cancellation token.
+    /// one whose code starts later than an eighth of the budget and is still being opened when the
+    /// budget ends is inconclusive (not remembered, and started again when it is delivered again),
+    /// and the timer that ends the budget can itself fire late. Use resolvers that are asynchronous
+    /// and honour their cancellation token.
     /// </para>
     /// <para>
     /// <strong>A DID resolver that ignores cancellation.</strong> The library hands every lookup one
@@ -358,7 +370,10 @@ public sealed class PickupClient
     /// from such a sender in front: sixteen were opened, fourteen were refused at once, and another
     /// sender's message behind them was returned after 40 seconds with <paramref name="limit"/> 10
     /// and after 80 seconds with <paramref name="limit"/> 4, the time sixteen messages that never
-    /// open take. The sender the outer envelope names is not authenticated at that point: it decides
+    /// open take. With the same thirty and lookups that honour their token, every one of the thirty
+    /// was opened once, none was refused, and the other sender's message was returned after 60
+    /// seconds with <paramref name="limit"/> 10 and after 160 seconds with <paramref name="limit"/>
+    /// 4. The sender the outer envelope names is not authenticated at that point: it decides
     /// only which bound a message counts against, never what is opened or how. The bounds do not cap
     /// the lookups of one sender's DID: per mailbox, up to 16 messages naming it and up to 16 that
     /// name no sender can be resolving it at once, and spellings of the DID that differ count as
@@ -371,7 +386,11 @@ public sealed class PickupClient
     /// have given up on it: the client never does. Do not discard an item whose
     /// <see cref="PickupItem.Inconclusive"/> is <c>true</c>: the client has not counted this delivery
     /// against that message; it is delivered again and started again then, once what was in its way
-    /// is gone. Until a message is discarded, or ages out at the mediator
+    /// is gone. When a fetch returns only inconclusive items, wait before you fetch again: for the
+    /// mediator's lease where the mediator sets delivered messages aside (60 seconds at this
+    /// library's), and otherwise until the openings that were in their way have ended. A fetch of
+    /// nothing but items refused for capacity takes no time and is not drained, so a loop that
+    /// fetches again at once would spin. Until a message is discarded, or ages out at the mediator
     /// (after 30 days by default), it stays queued and counts against your mailbox's quota there (at
     /// this library's mediator, <c>MessagePickupOptions.MaxQueueMessages</c>, 100 by default).
     /// Messages that never open — junk anyone who can address you can send — can fill that quota, and
@@ -395,9 +414,9 @@ public sealed class PickupClient
     /// mailbox.</description></item>
     /// <item><description>Sixteen messages that never open at the front of one fetch keep every
     /// place for one budget. The messages behind them in that fetch run out of time before their
-    /// turn, and get it in the next fetch that brings them, where the sixteen are held back. Only a
-    /// fetch of more than sixteen messages has messages behind sixteen; this library's mediator
-    /// delivers at most ten.</description></item>
+    /// turn (inconclusive), and get it in the next fetch that brings them, where the sixteen are held
+    /// back. Only a fetch of more than sixteen messages has messages behind sixteen; this library's
+    /// mediator delivers at most ten.</description></item>
     /// <item><description>The memory lives in this process, and its longest pause is 256 budgets
     /// (about 85 minutes). So when sixteen or more messages that never open are in front of yours in
     /// one fetch, a loop that is run only every two hours, a mediator whose lease is two hours, or a
@@ -407,35 +426,44 @@ public sealed class PickupClient
     /// mediator that delivers more than sixteen per fetch.</description></item>
     /// <item><description>More than 256 messages that never open queued in front of yours (which needs
     /// a mediator whose quota is above this library's 100): the memory cannot keep them all, and the
-    /// loop reaches your message only once you discard the failures it hands you with
-    /// <see cref="AckAsync"/> (those whose <see cref="PickupItem.Inconclusive"/> is <c>false</c>). More
-    /// than 256 mediator and mailbox pairs push the least recently used
-    /// out of the memory, and a restart forgets everything: those messages are opened and learned
-    /// again.</description></item>
+    /// loop reaches your message only once you discard the failed items you have given up on with
+    /// <see cref="AckAsync"/> (never one whose <see cref="PickupItem.Inconclusive"/> is <c>true</c>).
+    /// More than 256 mediator and mailbox pairs push the least recently used out of the memory, and
+    /// a restart forgets everything: those messages are opened and learned again.</description></item>
     /// <item><description>A mediator that does not set delivered messages aside delivers the head of
     /// your queue on every fetch: a loop then reaches only what is within <paramref name="limit"/> of
-    /// it. Discard what keeps failing with <see cref="AckAsync"/> (not an item whose
+    /// it. Discard the failed items you have given up on with <see cref="AckAsync"/> (never one whose
     /// <see cref="PickupItem.Inconclusive"/> is <c>true</c>); meanwhile, fetches that meet only
-    /// remembered messages take no time and run none of your code. An item that was refused for
-    /// capacity comes again with the very next fetch there, and that fetch takes no time either: when
-    /// a fetch brings nothing but such items, wait before you fetch again.</description></item>
+    /// remembered messages take no time and run none of your code. An inconclusive item comes again
+    /// with the very next fetch there, and a fetch of nothing but items refused for capacity takes
+    /// no time either: when a fetch brings only inconclusive items, wait before you fetch again,
+    /// until the openings that were in their way have ended.</description></item>
     /// <item><description>A message refused under a <paramref name="recipientDid"/> filter ("for
     /// another of your DIDs") is not remembered: it is opened again each time it comes.</description></item>
     /// <item><description>Up to 256 openings per container can be held by host code that does not
     /// return. A resolver that blocks its thread holds a thread-pool thread for each of its lookups,
     /// up to sixteen per fetch. While threads are held that way, a message can get its thread late:
-    /// one whose code starts later than an eighth of the budget is not remembered when the budget
-    /// ends (it is opened again when it is delivered again), and the timer that ends the budget can
-    /// fire late.</description></item>
-    /// <item><description>A lookup that has been cancelled keeps its place until it ends. When the
-    /// next fetch starts before that, messages of the same sender (or, for messages that name no
-    /// sender, of the same mailbox) beyond the places still free are refused at once ("unpack
-    /// capacity exhausted"): the fetch takes no time for them, they are not remembered, and they come
-    /// again with their next delivery, at most one of the mediator's leases later. Other senders'
-    /// messages are not affected. With a lookup that ends as soon as it is cancelled this is rare;
-    /// with one that takes even a millisecond to end and a fetch that follows immediately it is the
-    /// usual outcome. Every time given above for reaching a message assumes that the lookups of one
-    /// fetch have ended when the next one starts.</description></item>
+    /// one whose code starts later than an eighth of the budget and is still being opened when the
+    /// budget ends is inconclusive (not remembered, and started again when it is delivered again),
+    /// and the timer that ends the budget can fire late.</description></item>
+    /// <item><description>A message that never opens and whose code starts later than an eighth of
+    /// the budget in every delivery is inconclusive every time and is never remembered. Under test
+    /// this was produced by moving the clock; no way for a remote party to cause it was found. On a
+    /// real clock such late starts come from a resolver that blocks its thread while the thread pool
+    /// is small (the item above). Nothing else keeps a message inconclusive from one delivery to the
+    /// next, on one assumption: the mediator delivers oldest first. Whatever was in front of a late
+    /// start has then opened, been remembered or been discarded by the next delivery, so the message
+    /// starts first.</description></item>
+    /// <item><description>A lookup that has been cancelled keeps its place until it ends; one that
+    /// never got a thread keeps its place until the thread pool reaches its cancelled work item.
+    /// When the next fetch starts before that, messages of the same sender (or, for messages that
+    /// name no sender, of the same mailbox) beyond the places still free are refused at once
+    /// ("unpack capacity exhausted"): the fetch takes no time for them, they are inconclusive, and
+    /// they come again with their next delivery, at most one of the mediator's leases later. Other
+    /// senders' messages are not affected. With a lookup that ends as soon as it is cancelled this
+    /// is rare; with one that takes even a millisecond to end and a fetch that follows immediately
+    /// it is the usual outcome. Every time given above for reaching a message assumes that the
+    /// lookups of one fetch have ended when the next one starts.</description></item>
     /// <item><description>A resolver or transport that watches another token than the one it is
     /// handed, and reports that token's cancellation as a failure, has that failure taken as the
     /// message's (or the request's) own. The client is handed one token; a token that one was
@@ -448,8 +476,8 @@ public sealed class PickupClient
     /// case half a minute later: at minute 30.5 instead of minute 30), and each further step back
     /// costs one more opening. The moment a message's code starts is read from the same clock: a
     /// reading below the one taken when the fetch began to open its messages, or more than an eighth
-    /// of the budget after it, means the message is not remembered when the budget
-    /// ends.</description></item>
+    /// of the budget after it, means the message is not remembered when the budget ends (it is
+    /// inconclusive).</description></item>
     /// </list>
     /// <para>
     /// <strong>Repeats.</strong> A message the clients already returned from this mailbox (this
@@ -848,8 +876,11 @@ public sealed class PickupClient
     /// <c>AckAsync(mediatorDid, from, new[] { item.Id })</c> once you have given up on it: the stream
     /// never does. Do not discard an item whose <see cref="PickupItem.Inconclusive"/> is <c>true</c>:
     /// the stream has not counted this delivery against that message; it is delivered again and
-    /// started again then, once what was in its way is gone. Until a message is discarded or ages out
-    /// it counts against your mailbox's quota at the
+    /// started again then, once what was in its way is gone. The stream needs no waiting on your side
+    /// for such items: a drain round that brings back only what the drain was already handed ends
+    /// the drain, so an inconclusive item is yielded at most once per drain, and the next cycle
+    /// starts one <see cref="MediatorClientOptions.LivePollInterval"/> after the drain ended. Until a
+    /// message is discarded or ages out it counts against your mailbox's quota at the
     /// mediator (see <see cref="FetchAsync"/>). The error's text can quote DIDs and key ids (see
     /// <see cref="PickupItem.Error"/>), and the messages are not replay-checked (see the class
     /// remarks).
