@@ -180,7 +180,8 @@ internal sealed class SimClock : TimeProvider
 /// in simulated time: once every message the workers hold is waiting on the clock, the clock moves
 /// to its next timer (the budget, an alarm), until the batch ends. A batch is opened only once every
 /// host call of the batches before has ended and given its reservation back: the host's lookups, as
-/// modelled here, honour their token and have ended before the next delivery is opened.
+/// modelled here, honour their token and have ended before the next delivery is opened. Reservations
+/// a test holds itself, on purpose, are not waited for.
 /// </summary>
 /// <remarks>
 /// Payload texts: <c>ok:{id}</c> opens, <c>bad:{text}</c> fails at once, <c>stall:{text}</c> waits on
@@ -196,6 +197,7 @@ internal sealed class SimExchange : IMediatorExchange
     private readonly System.Collections.Concurrent.ConcurrentDictionary<long, CancellationToken> _stalls = new();
     private int _hostCalls;
     private int _mostReserved;
+    private int _heldByTheTest = -1; // read by the stream's thread only, one batch at a time
     private long _stallIds;
     private volatile bool _disposed;
 
@@ -311,7 +313,7 @@ internal sealed class SimExchange : IMediatorExchange
         // still held reservations could have messages refused for their partition's bound (ten
         // still ending and ten new against the anonymous partition's sixteen).
         if (!SpinWait.SpinUntil(HostCallsEnded, RealTime))
-            throw new TimeoutException("the previous batch's host calls did not end");
+            throw new TimeoutException($"the previous batch's host calls did not end: {Unpacker.Reserved} reserved, {_heldByTheTest} of them held by the test itself");
         var n = Unpacker.Memory.HeldBack(scope, messages.Select(m => m.Id).ToArray()).Count(held => !held);
         var entered = HostCalls;
         var settled = Unpacker.Settled;
@@ -345,13 +347,24 @@ internal sealed class SimExchange : IMediatorExchange
     private int Waiting => _stalls.Values.Count(token => !token.IsCancellationRequested);
 
     // Every host call of the batches before has ended and given its reservation back.
+    //
+    // A test may hold reservations itself, on purpose (it takes them through the unpacker's
+    // reservations before the stream starts, to keep a bound held): those belong to no host call of
+    // a batch, and are not waited for. What the test holds is read where no batch of this exchange
+    // can have a host call still ending: when the first batch arrives, and again whenever nothing
+    // at all is reserved (the test gave its own back). So the wait ends exactly when the only
+    // reservations held are the test's own, or none. A test that takes or gives back reservations
+    // of its own while host calls of a batch are still ending is outside what this can tell apart.
     private bool HostCallsEnded()
     {
         var reserved = Unpacker.Reserved;
-        if (reserved == 0)
+        if (_heldByTheTest < 0 || reserved == 0)
+            _heldByTheTest = reserved;
+        if (reserved == _heldByTheTest)
             return true;
-        if (reserved > Volatile.Read(ref _mostReserved))
-            Volatile.Write(ref _mostReserved, reserved);
+        var ofBatches = reserved - _heldByTheTest;
+        if (ofBatches > Volatile.Read(ref _mostReserved))
+            Volatile.Write(ref _mostReserved, ofBatches);
         return false;
     }
 

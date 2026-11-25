@@ -30,11 +30,13 @@ namespace DidComm.Samples.Cookbook.Sections;
 /// arrive twice (a lost acknowledgement, a dropped connection), and the client filters repeats per
 /// mailbox, so each one reaches you once while the client remembers it. <c>FetchAsync</c>
 /// acknowledges what it opened before it returns. A message that keeps failing to open is never
-/// discarded for you: give up on it with <c>AckAsync</c>. One exception: an item whose
-/// <c>NotAttempted</c> is true is a message the client did not get to in this fetch, not one that
-/// failed. Leave it alone: it comes again, and is tried when the client gets to it. And the
-/// mediator keeps a message for a limited time only (30 days by default): a wallet that stays
-/// offline longer loses those messages, and nobody is told.
+/// discarded for you: give up on it with <c>AckAsync</c>. Never give up on an item whose
+/// <c>Inconclusive</c> is true: that fetch did not give the message a fair chance (the client did
+/// not get to it in time, or started it late and cut it short), and the client does not hold it
+/// against the message. Leave it alone: it comes again and is started again then. An item that is
+/// not inconclusive is not thereby one to discard; that stays your decision. And the mediator keeps
+/// a message for a limited time only (30 days by default): a wallet that stays offline longer loses
+/// those messages, and nobody is told.
 /// </para>
 /// <para>
 /// <strong>Which version.</strong> Message Pickup has two versions in use, 3.0 and 4.0. The client
@@ -104,17 +106,21 @@ public static class Section_DD_PickUpQueuedMessages
         {
             if (item.Unpacked is { } opened)
                 ctx.Narrator.Value("[bob] opened", $"\"{opened.Message.Body?["content"]?.GetValue<string>()}\" (authenticated sender: {opened.Authenticated})");
-            else if (item.NotAttempted)
+            else if (item.Inconclusive)
             {
-                // Nothing is known to be wrong with this message: the client did not get to it in
-                // this fetch (the time for the fetch ran out on the messages in front of it, or too
-                // many messages were still being opened). Leave it queued: it comes again, and is
-                // tried when the client gets to it. Discarding it would delete a message nobody has
-                // tried to open.
-                ctx.Narrator.Value("[bob] not tried in this fetch, left queued", item.Error?.GetType().Name);
+                // This fetch did not give the message a fair chance: the client did not get to it
+                // in time, was too busy to start it, or started it late and ran out of time. The
+                // client does not hold that against the message. Leave it queued: it comes again
+                // and is started again then. Discarding it would delete a message that may well
+                // open next time.
+                ctx.Narrator.Value("[bob] not given its chance in this fetch, left queued", item.Error?.GetType().Name);
             }
             else
             {
+                // The message had its chance and did not open (this one is encrypted for someone
+                // else), and Bob gives up on it. That is his decision, not the client's: an item
+                // that is not inconclusive is not thereby one to discard. A message that a
+                // recipientDid filter turned away, for instance, opens in a fetch without the filter.
                 ctx.Narrator.Value("[bob] could not open", item.Error?.GetType().Name);
                 unopened.Add(item.Id);
             }
@@ -122,8 +128,9 @@ public static class Section_DD_PickUpQueuedMessages
         ctx.Narrator.Note("Delivery is at-least-once: a message can come twice, and the client filters the repeats per mailbox. FetchAsync has already acknowledged the message it opened.");
 
         // A failed item stays queued (it comes back after its lease, 60 s at this mediator). When you
-        // have given up on it, discard it yourself: nothing does it for you. Bob discards only what
-        // was tried and did not open; an item whose NotAttempted is true is never in this list.
+        // have given up on it, discard it yourself: nothing does it for you. Bob discards only
+        // items that are not inconclusive, and only because he has given up on them; an item whose
+        // Inconclusive is true is never in this list.
         // AckAsync returns the mediator's status only when the mediator answers the acknowledgement
         // with one, and null otherwise. Message Pickup 3.0 says a mediator should answer; 4.0, which
         // this wallet uses, never does. AckAsync does not ask for a status in its place: a status
