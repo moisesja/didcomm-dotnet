@@ -3893,7 +3893,7 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
     (`DeliveredUnpackTokenStateTests`).
   - *Failed while the delivery is not being ended:* the message's own failure. The reservation is
     given back before the worker takes its next message (D-13), the failure is recorded, and the
-    message is remembered (S1, below).
+    message is remembered, provided its code ran (S1, below).
 
   **The end of a delivery (I-5).** The first of "every message ended" and "the budget ended" closes
   the delivery, under one lock. The budget's own callback runs on each of its three endings (its
@@ -4283,7 +4283,8 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   "Raise to 256, document (Recommended)"; B1, "Push keeps the wait (Recommended)", as refined by F;
   E, "Remove per-message limits (Recommended)"; F, "Only cycle success resets (Recommended)"; G,
   "Open 16 at once (Recommended)". The coordinator's calls: the strike rule at the budget's end
-  (S2) and `StartAllowance` = F/2; the token-state rule (I-22); the residuals as restated below.
+  (S2) and `StartAllowance` = F/2; the token-state rule (I-22); on the channel, the Debug line for
+  what a step reported and an answer that had won holding (I-25); the residuals as restated below.
   What is marked "ours" is the orchestrator's or an engineer's choice.
 
   A sender whose DID resolves slowly or never costs the first delivery that carries one of its
