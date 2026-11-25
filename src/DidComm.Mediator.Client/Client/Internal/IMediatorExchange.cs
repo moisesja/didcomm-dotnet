@@ -61,7 +61,7 @@ internal interface IMediatorExchange
     /// <exception cref="InvalidOperationException"><see cref="MediatorClientOptions.MaxPendingRequests"/> requests are already waiting (refused before sending), or the request id is already pending.</exception>
     /// <exception cref="TimeoutException">No answer within <see cref="MediatorClientOptions.RequestTimeout"/>, or (HTTP) the response carried no answer to this request; the text names the request id and <see cref="MediatorExchangeSpec.Name"/>, never a DID.</exception>
     /// <exception cref="MediationProtocolException">The mediator answered with a problem report (<see cref="MediationProtocolException.ProblemCode"/> sanitized).</exception>
-    /// <exception cref="Exceptions.TransportException">Propagated from the send as it is.</exception>
+    /// <exception cref="Exceptions.TransportException">Propagated from the send as it is, when the send fails while the call is not being ended and no answer had already won (I-22, I-25). When the answer had already won, it is returned; when the call is being ended (its deadline passed, the caller cancelled, the channel was disposed), the call ends as that, whatever the send reported.</exception>
     /// <exception cref="ObjectDisposedException">The channel was disposed.</exception>
     Task<InboundMessageSnapshot> ExchangeAsync(MediatorRoute route, Message request, MediatorExchangeSpec spec, string mediatorDid, string localDid, CancellationToken ct);
 
@@ -131,7 +131,7 @@ internal interface IMediatorExchange
     /// <param name="ct">The caller's cancellation.</param>
     /// <exception cref="InvalidOperationException"><see cref="MediatorClientOptions.MaxPendingRequests"/> requests are already waiting (refused before sending).</exception>
     /// <exception cref="TimeoutException">The send did not complete within <see cref="MediatorClientOptions.RequestTimeout"/>; the text names the request id and <paramref name="name"/>, never a DID. The mediator may still have received it.</exception>
-    /// <exception cref="Exceptions.TransportException">Propagated from the send as it is.</exception>
+    /// <exception cref="Exceptions.TransportException">Propagated from the send as it is, when the send fails while the call is not being ended (I-22). When the call is being ended (its deadline passed, the caller cancelled, the channel was disposed), it ends as that, whatever the send reported.</exception>
     /// <exception cref="ObjectDisposedException">The channel was disposed.</exception>
     Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct);
 
@@ -150,15 +150,15 @@ internal interface IMediatorExchange
     /// <summary>
     /// Open the messages of one delivery — a fetch's answer, a live drain round's answer, or a live
     /// push — under one budget (<see cref="MediatorClientOptions.UnpackTimeout"/>, owner decision 2-A),
-    /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> at a time (design D-19), each
-    /// with a share of the time left, cut at its share only while another message waits (owner
-    /// decision A1), and every host unpack call reserved before it starts
-    /// (<see cref="DeliveredMessageUnpacker"/>, #111). A message remembered in
+    /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> (sixteen) at a time (design
+    /// D-19; #111, owner decision G; I-23), each until it opens, fails or the budget ends, with no
+    /// time limit of its own (#111, owner decision E), and every host unpack call reserved before it
+    /// starts (<see cref="DeliveredMessageUnpacker"/>, #111). A message remembered in
     /// <paramref name="scope"/> because it did not open before fails at once without being opened
-    /// (<see cref="SlowMemory"/>). A
-    /// message held back, refused for a bound, cut, or still being opened when the budget ends is a
-    /// <see cref="TimeoutException"/> failure naming <paramref name="requestId"/>. Outcomes are in the
-    /// order of <paramref name="messages"/>.
+    /// (<see cref="SlowMemory"/>). A message held back, refused for a bound, out of time before its
+    /// turn, or still being opened when the budget ends is a <see cref="TimeoutException"/> failure
+    /// naming <paramref name="requestId"/> (a push answers no request, so its failures name none).
+    /// Outcomes are in the order of <paramref name="messages"/>.
     /// </summary>
     /// <param name="scope">The mediator and the mailbox the delivery came from, as the host's call named them (#111).</param>
     /// <param name="messages">The delivered messages (attachment id and bytes), in delivery order.</param>
