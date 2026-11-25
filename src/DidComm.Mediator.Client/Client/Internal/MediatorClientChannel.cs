@@ -79,7 +79,9 @@ namespace DidComm.Mediator.Client.Internal;
 /// order, whatever was thrown: host code may report a cancellation as a failure of its own (a
 /// transport that reports a closed connection, a resolver that maps every error to "not found"),
 /// and may do so from a callback that runs before the channel's. What was thrown is then named in
-/// one Debug line, by its type only and never its text. An answer that had already won still holds.
+/// one Debug line, by its type only and never its text. An answer that had already won still holds;
+/// otherwise the request is given up there, through its terminal compare-and-swap, so an answer
+/// that arrives once the call's end is decided is not taken.
 /// What is thrown while the call is not being ended is the call's own failure and is passed on as
 /// it is, with one exception: when the answer to a request had already won before its send failed,
 /// the answer is returned (and the failure is named in a Debug line, by its type only). The same
@@ -424,10 +426,14 @@ internal sealed class MediatorClientChannel : IInboundCorrelator, IMediatorExcha
                 pending.Id, pending.Spec.Name, ex.GetType().Name);
             if (sending is not null)
                 GuardedDeadline.ObserveAbandoned(sending);
-            // An answer that already won (over a WebSocket, before the send returned) holds. So does
-            // a send that completed before the deadline but was resumed after it (OD6-ADV-2): it was
-            // sent, and the window below decides.
-            if (!pending.IsCompleted && !(optionalAfterSend && sending is { IsCompletedSuccessfully: true }))
+            // A send that completed before the deadline but was resumed after it (OD6-ADV-2) was
+            // sent: the window below decides, and the request is left as it is. Otherwise the call
+            // ends here as what ended it, unless an answer had already won (over a WebSocket, before
+            // the send returned), which holds. The terminal CAS decides between the two, here: the
+            // request is given up before the end leaves this method, so an answer that arrives
+            // afterwards finds the request decided and is not taken.
+            if (!(optionalAfterSend && sending is { IsCompletedSuccessfully: true })
+                && (pending.TryAbandon() || !pending.IsCompleted))
                 throw Unanswered(pending, deadline, ct);
         }
         catch (Exception ex)

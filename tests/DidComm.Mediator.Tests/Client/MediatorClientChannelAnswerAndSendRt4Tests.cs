@@ -22,10 +22,11 @@ namespace DidComm.Mediator.Tests.Client;
 /// one outcome; the call returns an answer only when the channel took that answer for that
 /// request, and never another request's; otherwise it ends with its send's own failure or with what
 /// ended it; no request is left counted and no deadline scheduled; and no log line carries the text
-/// of the send's failure, an identifier of a party or a value from the answer. Also checked, with
-/// a reproduction: whether an answer the channel took is always the call's outcome. The sends here
-/// never end on their own token (the test ends them); the deadline is on the manual clock, and real
-/// time is only a hang guard.
+/// of the send's failure, an identifier of a party or a value from the answer. Also checked: an
+/// answer the channel took is always the call's outcome, whatever ends the call (the reproduction
+/// of the independent pass, fixed in the round that followed). The sends here never end on their
+/// own token (the test ends them); the deadline is on the manual clock, and real time is only a
+/// hang guard.
 /// </summary>
 public sealed class MediatorClientChannelAnswerAndSendRt4Tests(ITestOutputHelper output) : IAsyncLifetime
 {
@@ -73,25 +74,26 @@ public sealed class MediatorClientChannelAnswerAndSendRt4Tests(ITestOutputHelper
     /// from round to round: an answer naming the request arrives, the send fails on its own, and the
     /// row's ending ends the call. Every call ends. It returns the answer only when the channel took
     /// it (never for a one-way message, which nothing can answer); otherwise it ends with the send's
-    /// own failure or as its ending, and never as "no answer". When nothing ends the call from
-    /// outside, a call whose answer the channel took always returns it. Afterwards no request is
-    /// counted and no deadline is scheduled, and no log line carries the failure's text, a party's
-    /// identifier, or the answer's id.
+    /// own failure or as its ending, and never as "no answer". A call whose answer the channel took
+    /// always returns it, whatever ends the call. Afterwards no request is counted and no deadline
+    /// is scheduled, and no log line carries the failure's text, a party's identifier, or the
+    /// answer's id.
     /// </summary>
     /// <remarks>
-    /// In the rows where something ends the call from outside, a round can end as that ending
-    /// although the channel took the answer; such rounds are counted and printed, not asserted here
-    /// (<see cref="An_answer_that_arrives_while_the_end_of_a_call_is_on_its_way_to_its_caller_is_not_taken"/>
-    /// is that case on its own for the caller's cancellation and the deadline; for the disposal it
-    /// was seen in one round of the row over HTTP, in one of twenty runs of this class, when the
-    /// send failed on its own as the disposal began).
+    /// Before the channel decided a request where it decides how its call ends, a round could end as
+    /// its ending although the channel had taken the answer, and such rounds were counted and
+    /// printed here, not asserted. They are asserted now: none may occur.
+    /// <see cref="An_answer_that_arrives_while_the_end_of_a_call_is_on_its_way_to_its_caller_is_not_taken"/>
+    /// is that case on its own for the caller's cancellation and the deadline, and
+    /// <see cref="MediatorClientChannelEndDecidedTests"/> has it for a send that fails on its own as
+    /// the disposal begins.
     /// </remarks>
     [Theory]
     [MemberData(nameof(EveryKindAndEnding))]
     public async Task An_answer_a_send_failing_on_its_own_and_an_ending_landing_together_leave_one_outcome_and_nothing_counted(Kind kind, Ending ending)
     {
         const int rounds = 40;
-        int returned = 0, failedOnItsOwn = 0, endedFromOutside = 0, takenAndEndedFromOutside = 0;
+        int returned = 0, failedOnItsOwn = 0, endedFromOutside = 0;
         for (var round = 0; round < rounds; round++)
         {
             var time = new ManualTimeProvider();
@@ -146,22 +148,13 @@ public sealed class MediatorClientChannelAnswerAndSendRt4Tests(ITestOutputHelper
             call.IsCompleted.Should().BeTrue("the call ended (round {0})", round);
             if (kind == Kind.OneWay)
                 taken.Should().BeFalse("nothing is registered for a one-way message (round {0})", round);
+            if (thrown is not null)
+                taken.Should().BeFalse("a call whose answer the channel took returns it, whatever ends the call (round {0}; it ended with {1})", round, thrown.GetType().Name);
             if (thrown is null)
             {
                 returned++;
                 taken.Should().BeTrue("a call returns an answer only when the channel took it (round {0})", round);
                 (await (Task<InboundMessageSnapshot?>)call).Should().BeSameAs(answer, "round {0}", round);
-            }
-            else if (taken)
-            {
-                takenAndEndedFromOutside++;
-                ending.Should().NotBe(Ending.Nothing, "when nothing ends the call from outside, a call whose answer the channel took returns it (round {0}; it ended with {1})", round, thrown.GetType().Name);
-                if (ending == Ending.CallerCancels)
-                    thrown.Should().BeAssignableTo<OperationCanceledException>("round {0}", round);
-                else if (ending == Ending.RequestTimesOut)
-                    thrown.Should().BeOfType<TimeoutException>("round {0}", round);
-                else
-                    thrown.Should().BeOfType<ObjectDisposedException>("round {0}", round);
             }
             else if (ReferenceEquals(thrown, failure))
             {
@@ -192,8 +185,8 @@ public sealed class MediatorClientChannelAnswerAndSendRt4Tests(ITestOutputHelper
             SpinWait.SpinUntil(() => time.ScheduledTimers == 0, Guard).Should().BeTrue("no deadline is left scheduled (round {0})", round);
             LogsShouldCarryNoTextAndNoWireValue(logs, failure, status, round);
         }
-        output.WriteLine($"{kind}, {ending}: {rounds} rounds; returned the answer: {returned}; ended with the send's own failure: {failedOnItsOwn}; ended as {ending}: {endedFromOutside}; ended as {ending} although the channel had taken the answer: {takenAndEndedFromOutside}");
-        (returned + failedOnItsOwn + endedFromOutside + takenAndEndedFromOutside).Should().Be(rounds);
+        output.WriteLine($"{kind}, {ending}: {rounds} rounds; returned the answer: {returned}; ended with the send's own failure: {failedOnItsOwn}; ended as {ending}: {endedFromOutside}");
+        (returned + failedOnItsOwn + endedFromOutside).Should().Be(rounds);
     }
 
     /// <summary>Every kind of call with every ending.</summary>
@@ -346,16 +339,17 @@ public sealed class MediatorClientChannelAnswerAndSendRt4Tests(ITestOutputHelper
     }
 
     /// <summary>
-    /// Reproduction (fails on ae71081): a call is ended by its caller's cancellation or by its
-    /// deadline while its send still runs, and the answer naming it arrives while that ending is on
-    /// its way to the caller: after the channel has decided how the call ends, before it has taken
-    /// the request out of its table (the test delivers the answer from inside the logger, as the
-    /// line that reports the request's end is written). Expected, as for a send that failed on its
-    /// own (<see cref="MediatorClientChannelTokenStateRt3Tests"/>): the answer is not taken, because
-    /// the request was decided. Observed: the channel takes the answer, and the call still ends as
-    /// cancelled or timed out.
+    /// A call is ended by its caller's cancellation or by its deadline while its send still runs,
+    /// and the answer naming it arrives while that ending is on its way to the caller: after the
+    /// channel has decided how the call ends, before it has taken the request out of its table (the
+    /// test delivers the answer from inside the logger, as the line that reports the request's end
+    /// is written). As for a send that failed on its own
+    /// (<see cref="MediatorClientChannelTokenStateRt3Tests"/>), the answer is not taken: the request
+    /// was decided where the call's end was. (Written as a reproduction by the independent pass: on
+    /// the code before the fix the channel took the answer and the call still ended as cancelled or
+    /// timed out.)
     /// </summary>
-    [Theory(Skip = "RT4: whether an answer that arrives while the end of a call (its caller's cancellation or its deadline) is on its way to the caller is taken; observed: the channel takes it and the call still ends as cancelled or timed out")]
+    [Theory]
     [InlineData(Kind.Request, Ending.CallerCancels)]
     [InlineData(Kind.Request, Ending.RequestTimesOut)]
     [InlineData(Kind.RequestOverHttp, Ending.CallerCancels)]
