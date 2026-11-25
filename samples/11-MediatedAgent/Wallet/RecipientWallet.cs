@@ -34,6 +34,13 @@ public sealed class RecipientWallet : IAsyncDisposable
     /// <summary>The largest invitation the wallet reads; an invitation is a few kilobytes.</summary>
     private const int MaxInvitationBytes = 64 * 1024;
 
+    /// <summary>
+    /// How long the wallet waits before it fetches again after a fetch that brought only
+    /// inconclusive items: the time this library's mediator sets delivered messages aside (its
+    /// lease, 60 seconds by default), after which it delivers them again.
+    /// </summary>
+    private static readonly TimeSpan WaitAfterOnlyInconclusiveItems = TimeSpan.FromSeconds(60);
+
     private readonly string _name;
     private readonly Narrator _narrator;
     private readonly InMemorySecretsResolver _secrets;
@@ -283,10 +290,16 @@ public sealed class RecipientWallet : IAsyncDisposable
             {
                 if (item.Error is { } error)
                 {
-                    // A message that did not open stays queued; discard it with AckAsync once you
-                    // give up on it. Log the error's type, not its text: the text can quote DIDs
-                    // and key ids.
-                    _narrator.Note($"[{_name}] a message did not open ({error.GetType().Name}); it stays queued.");
+                    // A message that did not open stays queued. When the item's Inconclusive is
+                    // true, this fetch did not give the message a fair chance (the client did not
+                    // get to it in time, had no room for it, or started it late): leave it alone,
+                    // it comes again and is started again then. Otherwise it had its chance:
+                    // discard it with AckAsync once you have given up on it. That an item is not
+                    // inconclusive is not by itself a reason to discard it. Log the error's type,
+                    // not its text: the text can quote DIDs and key ids.
+                    _narrator.Note(item.Inconclusive
+                        ? $"[{_name}] a message was not given its chance in this fetch ({error.GetType().Name}); it stays queued and comes again."
+                        : $"[{_name}] a message did not open ({error.GetType().Name}); it stays queued.");
                     continue;
                 }
 
@@ -298,6 +311,12 @@ public sealed class RecipientWallet : IAsyncDisposable
                 _narrator.Value($"[{_name}] sender authenticated", unpacked.Authenticated);
                 _narrator.Value($"[{_name}] mediator's id for it", Display.Trunc(item.Id, 16));
             }
+
+            // A fetch that brought only inconclusive items settled nothing: wait before fetching
+            // again. Without the wait, a mediator that does not set delivered messages aside hands
+            // the same items back at once, and this loop would spin.
+            if (batch.Items.Count > 0 && batch.Items.All(item => item.Inconclusive))
+                await Task.Delay(WaitAfterOnlyInconclusiveItems, ct).ConfigureAwait(false);
         }
         while (!batch.Drained);
 
