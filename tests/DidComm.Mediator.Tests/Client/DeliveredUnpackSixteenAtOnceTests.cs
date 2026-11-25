@@ -95,8 +95,8 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
         var refused = outcomes.Count(IsRefusal);
         output.WriteLine($"{count} messages {(named ? "from one named sender" : "without a named sender")} in one delivery, {AtOnce} opened at once, " +
             $"{(named ? PerSender : UnpackReservations.MaxPerAnonymous)} per partition: started at once {startedAtOnce}, opened {opened}, refused {refused}");
-        (opened, refused).Should().Be((count, 0), "all {0} open after their one second and none is refused (measured: {1} opened, {2} refused, {3} started at once)", count, opened, refused, startedAtOnce);
-        startedAtOnce.Should().Be(count, "all of them were being opened at once");
+        $"opened {opened}, refused {refused}, started at once {startedAtOnce}".Should().Be($"opened {count}, refused 0, started at once {count}",
+            "all {0} are being opened at once, open after their one second, and none is refused", count);
         unpacker.Memory.Count.Should().Be(0, "a message that opened is not remembered");
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Reservations.Partitions == 0, RealTime).Should().BeTrue();
     }
