@@ -281,22 +281,7 @@ public sealed class MediationClientNegotiationTests
     [Fact]
     public async Task Disclosed_protocols_are_cleaned_distinct_and_capped_at_32()
     {
-        var entries = new JsonArray();
-        entries.Add(Raw("https://didcomm.org/a/1.0"));
-        entries.Add(Raw("https://didcomm.org/a/1.0")); // duplicate
-        entries.Add(Raw("https://didcomm.org/b\u0007/1.0")); // control character
-        entries.Add(Raw("https://didcomm.org/c /1.0")); // space
-        entries.Add(Raw("https://didcomm.org/d\u00e9/1.0")); // non-ASCII
-        entries.Add(Raw("https://didcomm.org/" + new string('e', 65_536) + "/1.0")); // 64 KiB id
-        entries.Add(Raw("https://didcomm.org/" + new string('f', 230) + "/1.0")); // 254 characters: kept
-        entries.Add(Raw("https://didcomm.org/" + new string('g', 234) + "/1.0")); // 258 characters: dropped
-        entries.Add(Raw("not a piuri"));
-        entries.Add(Raw("https://didcomm.org/h/1"));
-        entries.Add(new JsonObject { ["feature-type"] = "protocol", ["id"] = 42 });
-        entries.Add(new JsonObject { ["feature-type"] = "protocol" });
-        for (var i = 0; i < 100; i++)
-            entries.Add(Raw($"https://didcomm.org/p{i}/1.0"));
-        var exchange = DisclosingRaw(entries);
+        var exchange = DisclosingRaw(UncleanDisclosures());
 
         var thrown = (await FluentActions.Awaiting(() => exchange.Client().RequestMediationAsync(Mediator, Me)).Should().ThrowAsync<MediationNotSupportedException>()).Which;
 
@@ -309,7 +294,33 @@ public sealed class MediationClientNegotiationTests
             id.Should().MatchRegex("^[\\x21-\\x7E]+$");
             DidComm.Protocols.ProtocolIdentifier.TryParse(id, out _).Should().BeTrue();
         });
-        thrown.Message.Should().NotContain("eeee").And.NotContain("didcomm.org");
+        // The text names our own request id and nothing the mediator sent. The id is a random
+        // UUID, whose hex digits can spell a run of 'e' as the disclosed 64 KiB id does, so the
+        // text is searched with our id taken out.
+        thrown.RequestId.Should().Be(exchange.Queries.Single().Message.Id);
+        WithoutOurRequestId(thrown).Should().NotContain("eeee").And.NotContain("didcomm.org");
+    }
+
+    /// <summary>
+    /// The same refusal for a request id that itself spells a run of 'e' (a random UUID can: one
+    /// ending <c>9eeeee47fc6f</c> was seen): the whole text then holds "eeee", from our own id,
+    /// and still nothing of what the mediator disclosed. The client mints its request ids and
+    /// takes none from the host, so this hands the answer to the step the client hands it to
+    /// (<see cref="FeatureNegotiation.Choose"/>) with an id of that shape.
+    /// </summary>
+    [Fact]
+    public void The_refusals_text_holds_nothing_disclosed_also_when_our_request_id_spells_what_a_disclosed_id_does()
+    {
+        const string requestId = "5b0c4e0e-7d1a-4c53-9a3e-9eeeee47fc6f";
+        MediationClientTests.IsUuidV4(requestId).Should().BeTrue("precondition: an id of the shape the client mints");
+        var disclose = ScriptedMediator.Raw(DiscoverFeatures.DiscloseType, Mediator, Me, requestId, new JsonObject { ["disclosures"] = UncleanDisclosures() });
+
+        var thrown = FluentActions.Invoking(() => FeatureNegotiation.Choose(disclose, requestId)).Should().Throw<MediationNotSupportedException>().Which;
+
+        thrown.RequestId.Should().Be(requestId);
+        thrown.DisclosedProtocols.Should().HaveCount(32).And.NotContain(id => id.Contains("eeee", StringComparison.Ordinal), "the 64 KiB id is left out");
+        thrown.Message.Should().Contain("eeee", "precondition: with this request id the whole text spells it, so a search of the whole text would fail");
+        WithoutOurRequestId(thrown).Should().NotContain("eeee").And.NotContain("didcomm.org");
     }
 
     [Fact]
@@ -516,6 +527,39 @@ public sealed class MediationClientNegotiationTests
         => new() { FeatureType = "protocol", Id = id, Roles = role is null ? null : new[] { role } };
 
     private static JsonObject Raw(string id) => new() { ["feature-type"] = "protocol", ["id"] = id };
+
+    // Disclosures a client cleans: a duplicate, ids with characters outside printable ASCII, a
+    // 64 KiB id, ids at and beyond the length bound, ids that are no protocol identifier, entries
+    // without a usable id, and a hundred clean ones (more than are reported).
+    private static JsonArray UncleanDisclosures()
+    {
+        var entries = new JsonArray();
+        entries.Add(Raw("https://didcomm.org/a/1.0"));
+        entries.Add(Raw("https://didcomm.org/a/1.0")); // duplicate
+        entries.Add(Raw("https://didcomm.org/b\u0007/1.0")); // control character
+        entries.Add(Raw("https://didcomm.org/c /1.0")); // space
+        entries.Add(Raw("https://didcomm.org/d\u00e9/1.0")); // non-ASCII
+        entries.Add(Raw("https://didcomm.org/" + new string('e', 65_536) + "/1.0")); // 64 KiB id
+        entries.Add(Raw("https://didcomm.org/" + new string('f', 230) + "/1.0")); // 254 characters: kept
+        entries.Add(Raw("https://didcomm.org/" + new string('g', 234) + "/1.0")); // 258 characters: dropped
+        entries.Add(Raw("not a piuri"));
+        entries.Add(Raw("https://didcomm.org/h/1"));
+        entries.Add(new JsonObject { ["feature-type"] = "protocol", ["id"] = 42 });
+        entries.Add(new JsonObject { ["feature-type"] = "protocol" });
+        for (var i = 0; i < 100; i++)
+            entries.Add(Raw($"https://didcomm.org/p{i}/1.0"));
+        return entries;
+    }
+
+    // The exception's text with our own request id taken out. The id must be there exactly once
+    // (so a text that repeated it, as an echo of a disclosed id built from it would, fails here);
+    // what is left is what a test searches for values the mediator sent.
+    private static string WithoutOurRequestId(MediationProtocolException thrown)
+    {
+        var quoted = $"'{thrown.RequestId}'";
+        thrown.Message.Split(quoted).Should().HaveCount(2, "the text names our request id once");
+        return thrown.Message.Replace(quoted, "''", StringComparison.Ordinal);
+    }
 
     private static JsonArray Hostile(int count, int coordinateMediationAt)
     {
