@@ -62,17 +62,25 @@ public sealed class SlowSenderDiscardingHostRt3Tests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// One fewer message that never opens than are opened at once, in front of one that does, in
-    /// one fetch: every message of the delivery gets a worker, so the last one is returned opened in
-    /// the first fetch, whatever the host does with the failures.
+    /// Fewer messages that never open than are opened at once (four, nine, and fifteen: one fewer),
+    /// in front of one that does, all in one fetch: every message of the delivery gets a worker, so
+    /// the last one is returned opened in the first fetch, whatever the host does with the failures,
+    /// a host that discards every failed item included.
     /// </summary>
     [Theory]
-    [InlineData(Qa1Discard.Nothing)]
-    [InlineData(Qa1Discard.WhatWasTried)]
-    [InlineData(Qa1Discard.EveryFailure)]
-    public async Task Behind_fifteen_that_never_open_in_one_fetch_the_message_is_returned_opened_in_the_first_fetch_whatever_the_host_discards(Qa1Discard discard)
+    [InlineData(4, 10, Qa1Discard.Nothing)]
+    [InlineData(4, 10, Qa1Discard.WhatWasTried)]
+    [InlineData(4, 10, Qa1Discard.EveryFailure)]
+    [InlineData(9, 10, Qa1Discard.Nothing)]
+    [InlineData(9, 10, Qa1Discard.WhatWasTried)]
+    [InlineData(9, 10, Qa1Discard.EveryFailure)]
+    [InlineData(AtOnce - 1, AtOnce, Qa1Discard.Nothing)]
+    [InlineData(AtOnce - 1, AtOnce, Qa1Discard.WhatWasTried)]
+    [InlineData(AtOnce - 1, AtOnce, Qa1Discard.EveryFailure)]
+    public async Task Behind_fewer_than_sixteen_that_never_open_in_one_fetch_the_message_is_returned_opened_in_the_first_fetch_whatever_the_host_discards(int inFront, int limit, Qa1Discard discard)
     {
-        var run = await RunAsync(inFront: AtOnce - 1, limit: AtOnce, discard);
+        inFront.Should().BeLessThan(AtOnce);
+        var run = await RunAsync(inFront, limit, discard);
 
         run.Reach.Found.Should().BeTrue("every message of the delivery had a worker");
         run.Reach.Fetches.Should().Be(1);
