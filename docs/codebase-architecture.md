@@ -3435,7 +3435,7 @@ asked about (as a DID subject). One present without a filter is refused too, as 
    drained, no status. Attachments of which none has a usable id → `MediationProtocolException` (a
    hostile mediator cannot spin a fetch-until-drained loop).
 5. **Open the delivery** through the unpacker (`UnpackDeliveredBatchAsync`, naming our request id
-   and the scope (`mediatorDid`, `from`)): a message remembered as slow to open fails at once without
+   and the scope (`mediatorDid`, `from`)): a message remembered as not opening fails at once without
    being opened; every other decodable message is opened under one budget, `UnpackTimeout`, four at
    a time, each with a share of the time left and its host call reserved (below). A message not open
    when its share is up is cut only while another message waits (owner decision A1, below); a cut
@@ -3471,7 +3471,7 @@ asked about (as a DID subject). One present without a filter is refused too, as 
 Once `FetchAsync` returns, the caller holds the only copy: the acknowledgement is inside the call
 (FR-PICK-11; no opt-out, R-6). A failed item stays leased for the mediator's lease (60 s at ours) and
 is not delivered again within it, so a loop that fetches until `Drained` gets past the failures to
-what is behind them; past messages that are slow to open, too, since #111 (up to 256 in front, R-4
+what is behind them; past messages that never open, too, since #111 (up to 256 in front, R-4
 beyond): the client remembers them and holds them back without opening them, so the fetches that
 meet only remembered ones take no time (ADV3-6; `SlowMemory`, below; the bound is under Documented
 limits). A caller
@@ -3637,7 +3637,7 @@ going lower (ADV4-4).
   messages it already handled come back first (their lease ended, and a Message Pickup 3.0
   `delivery-request` has no offset to ask past them), and a round made only of them ends the drain:
   the messages queued behind them wait one more `LivePollInterval`. Who is affected: a recipient
-  with more messages that are slow to open than one drain can pass within a lease. Nothing is
+  with more messages that do not open than one drain can pass within a lease. Nothing is
   lost: live mode stays on, and what is not acknowledged stays queued.
 - **Items.** A push that is not a readable `delivery` is ignored. At most 10 attachments are read
   from one delivery (push or drain). A delivery that brings nothing new is not opened; otherwise
@@ -3767,7 +3767,7 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   delivery's messages, every layer included, linked to the caller's token and to the channel's
   shutdown token. First the memory (`SlowMemory`, below) is asked once, under one lock, which of the
   delivery's attachment ids are in their pause: each such message fails at once (a
-  `TimeoutException`: "it was slow to open when it was delivered before"), takes no reservation,
+  `TimeoutException`: "it did not open when it was delivered before"), takes no reservation,
   runs no host code and is not acknowledged, and a delivery made only of them returns at once, with
   no timer (I-13). The others are opened by at most 4 workers, in delivery order. For the message a
   worker takes at position p of the n not held back, with F = max(1 tick, B/4) and e the time since
@@ -3797,20 +3797,34 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   holds counts as waiting). Otherwise it is extended: it keeps the rest of the budget, and the next
   refusal for its partition, or for the container, cuts it (`UnpackReservations`). The time-left
   share and its floors are unchanged. Before A1 a message was cut at its share even when nothing
-  waited, and then remembered as slow (QA1-4). The cost, accepted by the owner: a delivery whose
+  waited, and then remembered (QA1-4). The cost, accepted by the owner: a delivery whose
   last messages never open lasts its whole budget, still well inside the lease.
 
-  A delivery of up to 100 messages that each fail within τ = (B − F) / 25 (0.6 s by default) starts
-  every message (I-8). The failures name our request id when there is one, never a DID or a
-  message. The delivery's outcome is complete when its last message ends or, at the latest, when the
-  budget ends: the budget's callback fills in the missing outcomes and lets go of the calls still
-  running, without waiting for host code (I-5); the result is set only after the delivery's last
-  memory write. **What is remembered (I-9):** a message whose host call ran and did not open is
-  struck when the call started after the budget did and ran at least τ until its outcome was
-  decided — its own failure, its cut or the budget's end; a message that opens is forgotten.
-  Nothing is written for a refusal, a message that did not start, a call that never ran (its token
-  was cancelled first), a malformed message, or one still running when the caller cancelled or the
-  shutdown came. A delivery of more than 16 messages that never open has 16 of them started and
+  Messages that fail at once leave their time to the ones after them, so a delivery of many fast
+  failures starts every message (I-8). The failures name our request id when there is one, never a
+  DID or a message. The delivery's outcome is complete when its last message ends or, at the latest,
+  when the budget ends: the budget's callback fills in the missing outcomes and lets go of the calls
+  still running, without waiting for host code (I-5); the result is set only after the delivery's
+  last memory write. **What is remembered (I-9, as amended by owner decision C on #111, "Every
+  failure, fair to late starts").** A message whose host call ran (its code started: `HostCall.Run`
+  reads the clock as its first action) and did not open is struck when it failed on its own,
+  whatever the duration; or when it ran for its share, measured from its code's start, and was
+  then cut — at its share, by a refusal while extended (A1), or at the budget's end. A host call
+  needs a thread before its code runs, so a cut call counts as having run its share when its code
+  lost at most `StartAllowance` = F/2 (an eighth of the budget, 2.5 s by default) of the share it was
+  given before it started (our choice, not the owner's: without an allowance a call whose share ends
+  with the budget could never have run all of it; the window it leaves is R-15). A message that
+  opens is forgotten. Nothing is
+  written for a message cut before its code ran its share (it is opened again at the next
+  delivery), a refusal, a held-back message, a message that did not start, a call that never ran
+  (its token was cancelled first), a malformed message, or one still running when the caller
+  cancelled or the shutdown came; an entry still inside its pause gets no further strike. So every
+  failure is remembered for at least its first pause, an honest message that failed only for a
+  passing reason included (its sender's DID host briefly down, for example): it comes back after
+  10 minutes, not at the next fetch. Before owner decision C a failure was remembered only after it
+  had run for a minimum time, so junk that failed just under it was opened at every delivery and a
+  fetch loop at a short lease never got past it (RT1C-1), and that time was measured from before the
+  work item ran (RT1B-1). A delivery of more than 16 messages that never open has 16 of them started and
   remembered (four rounds of F); from the next delivery on those 16 are held back and the others
   get their turn. Every unpack
   runs on a thread-pool work item of its own (fix round 3, ADV3-4): host code (the DID and secrets
@@ -3821,7 +3835,7 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   at once, every host lookup's token is cancelled, and the channel reports the cancellation as
   `ObjectDisposedException` (fix round 3, ADV3-7). A bad message is always a failure outcome; only
   the caller's cancellation and the shutdown throw.
-- **`UnpackReservations`** (#111, I-1, I-2, D-4): per container (channel), at most C = 64 host unpack
+- **`UnpackReservations`** (#111, I-1, I-2, D-4): per container (channel), at most C = 256 host unpack
   calls started and not yet ended, and per (mediator, mailbox, sender) at most 4 for a named sender
   or 16 for the mailbox's anonymous partition. A reservation counts one host call from before its
   work item exists until it ends for any reason, whether its worker still waits for it or let it go.
@@ -3830,11 +3844,15 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   running), and given back exactly once: by the worker as soon as the call it awaited ended, before
   it takes its next message (D-13); by a continuation on the call's task when it ends after its
   worker let it go (a call whose token was cancelled before it ran included); or directly when the
-  work item is never created. A partition's entry is removed at zero, so the table holds at most 64
-  entries. C = 16 live streams × 4; 4 per sender = the workers of one delivery, so one delivery never
-  refuses an honest sender for calls of its own that have ended; 16 anonymous, no worse than the
-  former container-wide 16 and now per mailbox. The bound also caps the pool threads host code that
-  blocks can hold at 64 per container. **Refusals and extended messages (A1).** Each refusal is
+  work item is never created. A partition's entry is removed at zero, so the table holds at most
+  256 entries. C = 256 (owner decision D on #111, "Raise to 256, document"; it was 64 = 16 live
+  streams × 4): holding it all takes 64 mailboxes of one container each with four slow lookups
+  (RT1A-1: one sender keeping 16 mailboxes busy held the former 64); 4 per sender = the workers of
+  one delivery, so one delivery never refuses an honest sender for calls of its own that have
+  ended; 16 anonymous, no worse than the former container-wide 16 and now per mailbox. So one
+  sender's stalled lookups do not refuse another sender's message within a mailbox, and across
+  mailboxes up to that bound. The bound also caps the pool threads host code that blocks can hold:
+  up to 256 per container, the cost of the raise. **Refusals and extended messages (A1).** Each refusal is
   counted per partition and for the container, and a reservation remembers both counts when it is
   taken; a message whose share's time is up is extended only if neither count has grown since
   (`TryExtend`). A refusal cuts the extended messages it waits behind — a partition's refusal that
@@ -3866,8 +3884,8 @@ same loop and the same 8-layer bound (Inbound flow step 3a).
   be paused at once even when a fetch of one learns one message per budget; it was 180·B); a
   reading below `struckAt` counts as due, so a clock step costs at most one more opening and never
   locks a message out (I-12). A strike on an entry still inside its pause only refreshes its
-  eviction order: deliveries of the same message that ran at the same time saw one slow episode, so
-  they add one strike, not one each (RT1B-2). At most 256 entries per partition (the least recently
+  eviction order: deliveries of the same message that ran at the same time saw one failure, so they
+  add one strike, not one each (RT1B-2). At most 256 entries per partition (the least recently
   seen goes, ordered by a sequence counter, not a clock) and 256 partitions (the least recently used
   goes); one leaf lock, O(Q + R) per operation, about 4 MB at worst. In process only: a restart, or
   a partition pushed out, forgets what was learned there. T0 outlasts the learning at this
@@ -3954,7 +3972,7 @@ or text. Every call goes through `MediatorLog.Write`, so a throwing provider cha
 - **Resources.** Pending requests ≤ 64; live streams ≤ 16, each ≤ 8 buffered snapshots of at most
   `MaxReceiveBytes`; the ids a stream holds are bounded by its ready, buffered and taken bounds
   (10 + 8 + 100), each id at most 2048 characters; duplicate filter ≤ 4096 × 16 B; version cache
-  ≤ 64; host unpack calls reserved, ≤ 64 per container, 4 per sender and 16 anonymous per
+  ≤ 64; host unpack calls reserved, ≤ 256 per container, 4 per sender and 16 anonymous per
   (mediator, mailbox) (#111); the memory of slow messages ≤ 256 partitions × 256 entries (#111); the
   failures a live drain remembers ≤ (50 + 50) × 10 keys of 16 B; an idle correlator costs one
   volatile read.
@@ -4092,9 +4110,10 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   and they can be delivered again; the duplicate filter recognises them.
 - **A burst re-pushed after the push buffer overflowed** is cleared over several cycles: latency
   only, nothing is lost.
-- **Slow senders (#111; owner decision on #88, 2026-11-14, for the design direction).** A slow
-  sender DID costs the first delivery that carries one of its messages up to that message's share;
-  the message is then remembered and held back for its pause at no cost, and it comes back once per
+- **Slow senders (#111; owner decision on #88, 2026-11-14, for the design direction; owner
+  decisions A1, B1, C and D on #111 for its fix rounds).** A slow sender DID costs the first
+  delivery that carries one of its messages up to that message's share; the message is then
+  remembered (every failure is) and held back for its pause at no cost, and it comes back once per
   lease period as a failed item until the application discards it with `AckAsync` (the client never
   does). The reproductions #96 deferred here (ADV3-2, ADV3-3, ADV3-6, ADV4-2, ADV4-3, ADV4-4,
   ADV5-3, ADV5-4) now pass and pin the fixes; ADV4-1 was resolved in #96. The bounds, measured
@@ -4113,21 +4132,30 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     60 s lease;
   - one sender whose lookups ignore their token holds 4 reservations, and another sender's message
     is reached within one lease; an honest slow sender's message behind junk naming its key reaches
-    the application within the same bound (D-13);
+    the application within the same bound (D-13). #111's acceptance line, "one sender's stalled
+    lookups do not refuse another sender's message", holds within a mailbox, and across the
+    container's mailboxes up to C = 256 (owner decision D; R-1 below);
   - a live stream reaches it in cycle `C = ceil((N + 1) / (10 · max(1, floor(lease / B))))` when
     that learning fits in the first pause (99 at the defaults: the fourth cycle, about 6 minutes),
     and within `2C − 1` cycles otherwise (R-10).
 
   What remains (documented, not fixed; the residuals of the #111 plan):
-  - **R-1.** Many sender DIDs whose lookups ignore cancellation can still fill the container's 64
-    reservations (ADV2-2 narrowed, not closed): until those lookups end, every delivered message
-    fails at once ("unpack capacity exhausted"), for every DID and tenant of the container. A
-    resolver that honours its token is the remedy; `UnpackTimeout` and `FetchAsync` say so.
+  - **R-1 (with owner decision D's numbers).** Many sender DIDs whose lookups ignore cancellation
+    can still fill the container's 256 reservations (ADV2-2 narrowed, not closed): until those
+    lookups end, every delivered message fails at once ("unpack capacity exhausted"), for every DID
+    and tenant of the container. A resolver that honours its token is the remedy; `UnpackTimeout`
+    and `FetchAsync` say so. With lookups that honour their tokens, the cross-tenant residual: an
+    attacker who keeps 64 mailboxes of one container busy, each with 4 slow messages per budget —
+    about 13 fresh messages a second at the defaults (RT1-A measured 3.2 a second to keep 16
+    mailboxes busy; four times that) — holds all 256 while they run, and a message of another
+    mailbox is then refused for the container; it is not remembered, and it comes back (pinned by
+    `ContainerSharingRt1ATests`: one sender keeping C/4 mailboxes busy holds the container).
   - **R-2.** Messages whose outer envelope names no sender — anoncrypted, authcrypt naming its sender
     only in `apu`, re-wrapped by a mediator — share one partition of 16 per mailbox.
   - **R-3.** Under a sustained flood of fresh slow junk, an honest message that takes longer than F
-    (a quarter of the budget, 5 s by default) to open is cut at F every time (a message, not a DID:
-    a signed and authcrypted message resolves its sender twice).
+    (a quarter of the budget, 5 s by default) to open is cut at F every time, and then held back
+    like the junk (a message, not a DID: a signed and authcrypted message resolves its sender
+    twice).
   - **R-4 (restated in fix round 1, QA1-3).** When more than Q = 256 messages that never open are
     queued in front of a message — which takes a mediator whose quota is above this library's 100 —
     the memory cannot hold them all paused at once, and the loop alone does not reach the message
@@ -4140,12 +4168,14 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     fetches over remembered messages take no time and run no host code.
   - **R-7.** A message refused by the `recipientDid` filter is not remembered: it is opened again
     each time it comes.
-  - **R-8.** Up to 64 host calls per container may be held by host code that does not return (and
-    so up to 64 pool threads by code that blocks them).
-  - **R-9.** A host clock that jumps forward while messages are being opened fires their shares'
-    timers, or the budget's, early: the messages are cut and then remembered, held back for a pause;
-    a quick failure can look slow the same way. A clock that steps back never holds one back longer
-    (I-12).
+  - **R-8.** Up to 256 host calls per container may be held by host code that does not return (and
+    so up to 256 pool threads by code that blocks them).
+  - **R-9 (removed by owner decision C).** It said a forward clock jump could make a fast failure
+    look slow once; every failure is now remembered, whatever its duration. What stays: a host clock
+    that jumps forward while messages are being opened fires their shares' timers, or the budget's,
+    early, and the messages are cut; they are remembered only if their code ran its share as that
+    clock measures it, and the jump counts toward it. A clock that steps back never holds one back
+    longer (I-12).
   - **R-10.** The stream learns per cycle in proportion to the lease: with a lease shorter than
     `UnpackTimeout`, 10 messages per cycle; and when the learning takes longer than the first pause,
     the messages learned first are opened once more as their pauses end (99 at a 10 s lease: cycle
@@ -4161,17 +4191,24 @@ keeps it. A failed query releases the registration and ends the enumeration at i
   - **R-12 (our call, not an owner decision).** A Message Pickup 3.0 `delivery-request` has no
     offset, so a drain that outlasts the mediator's lease meets the messages it already handled
     again, first, and a round made only of them ends the drain (I-19). The messages queued behind
-    them wait one more `LivePollInterval`. Who is affected: a recipient with more messages that are
-    slow to open than one drain can pass within a lease. Nothing is lost: live mode stays on, and
+    them wait one more `LivePollInterval`. Who is affected: a recipient with more messages that do
+    not open than one drain can pass within a lease. Nothing is lost: live mode stays on, and
     unacknowledged messages stay queued.
   - **R-13 (fix round 1, QA1-5).** Right after a message is cut at its share, its sender's lookups
     that are still ending can make that sender's next message in the same delivery be refused once
     for its partition ("unpack capacity exhausted"). That message is not remembered and opens at the
     next delivery (pinned by `SlowMemoryQa1Tests`).
+  - **R-14 (owner decision C, in the owner's words).** "An attacker who can tie up the pool,
+    possible only with a host resolver that blocks its thread, can make junk start late and dodge
+    being remembered." A message cut before its code ran its share is not remembered, and late
+    starts are what the pool decides.
+  - **R-15 (our choice, not an owner decision: `StartAllowance` = F/2).** An honest message whose
+    code starts up to 2.5 s late (half the 5 s floor), delayed by a busy thread pool, and then runs
+    out its share without opening, is still remembered, and is held back for its pause.
 - **Blocking host code cannot be bounded.** Every unpack runs on the pool, so a resolver that blocks
   its thread no longer holds the caller, and the budget still decides the outcome; but the blocked
   thread and its work stay the host's until it returns, holding its reservation meanwhile (at most
-  64 per container, R-8). `FetchAsync`, `UnpackTimeout` and the unpacker's XML say so.
+  256 per container, R-8). `FetchAsync`, `UnpackTimeout` and the unpacker's XML say so.
 - **Junk that never opens stays queued** until the host discards it with `AckAsync` or it ages out
   at the mediator (`MessagePickupOptions.MaxMessageAge`, 30 days by default), and it counts against
   the recipient's mailbox quota there (this library's mediator: `MaxQueueMessages`, 100 by
