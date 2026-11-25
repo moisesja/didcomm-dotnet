@@ -311,8 +311,9 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// QA1-3, a residual pin (R-4): with more never-opening messages in front than one mailbox's
     /// memory keeps (Q = 256), the memory cannot hold them all paused at once, and a fetch loop alone
-    /// does not reach the message behind, even well past the bound for Q in front. A host that
-    /// discards the failures it is handed (<see cref="PickupClient.AckAsync"/>) reaches it.
+    /// does not reach the message behind, even well past the bound for Q in front. The careful host,
+    /// which discards the failures it is handed (<see cref="PickupClient.AckAsync"/>) except those
+    /// whose <see cref="PickupItem.NotAttempted"/> is true, reaches it.
     /// </summary>
     [Theory]
     [InlineData(4, 270, 60)]
@@ -333,9 +334,9 @@ public sealed class SlowSenderFetchQa1Tests
 
         var (discarding, discardingMediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, lease);
         Queue(discardingMediator, junk: n, honestAt: n);
-        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discardFailures: true);
+        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discard: Qa1Discard.WhatWasTried);
 
-        reach.Found.Should().BeTrue("discarding the failures it is handed empties the queue in front");
+        reach.Found.Should().BeTrue("discarding the failures it is handed that were tried empties the queue in front");
         discardingMediator.Holds("honest").Should().BeFalse("the honest message was acknowledged");
     }
 
@@ -622,9 +623,11 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// A fetch loop of the eagerest host: it fetches until drained and, when drained, fetches again
     /// as soon as the mediator's next lease ends; it stops when <paramref name="honest"/> is returned
-    /// opened, or after <paramref name="cap"/> of clock time.
+    /// opened, or after <paramref name="cap"/> of clock time. With <paramref name="discard"/> the
+    /// host discards failed items after each fetch (<see cref="Qa1.ToDiscard"/>), and its next fetch
+    /// follows once the lookups of the last delivery have ended (<see cref="Qa1.LookupsEnded"/>).
     /// </summary>
-    internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null, bool discardFailures = false)
+    internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null, Qa1Discard discard = Qa1Discard.Nothing)
     {
         using var floor = new PoolFloor(parked: 2);
         var client = exchange.Client();
@@ -636,8 +639,12 @@ public sealed class SlowSenderFetchQa1Tests
             batches.Add(batch);
             if (batch.Items.Any(i => i.Id == honest && i.Unpacked != null))
                 return new Reach(true, exchange.Clock.TrueNow - start, batches.Count, batches);
-            if (discardFailures && batch.Items.Where(i => i.Error != null).Select(i => i.Id).ToArray() is { Length: > 0 } failed)
-                await client.AckAsync(FakePickupExchange.M, FakePickupExchange.L, failed).WaitAsync(Qa1Exchange.Guard);
+            if (discard != Qa1Discard.Nothing)
+            {
+                Qa1.LookupsEnded(exchange.Unpacker);
+                if (Qa1.ToDiscard(batch.Items, discard) is { Length: > 0 } failed)
+                    await client.AckAsync(FakePickupExchange.M, FakePickupExchange.L, failed).WaitAsync(Qa1Exchange.Guard);
+            }
             if (batch.Drained)
             {
                 if (mediator.NextLeaseEnd() is not { } next)

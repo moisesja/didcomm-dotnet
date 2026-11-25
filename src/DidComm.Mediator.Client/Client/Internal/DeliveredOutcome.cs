@@ -10,12 +10,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// </summary>
 internal sealed class DeliveredOutcome
 {
-    private DeliveredOutcome(UnpackResult? unpacked, int layersOpened, UInt128 dedupeKey, Exception? error)
+    private DeliveredOutcome(UnpackResult? unpacked, int layersOpened, UInt128 dedupeKey, Exception? error, bool notAttempted)
     {
         Unpacked = unpacked;
         LayersOpened = layersOpened;
         DedupeKey = dedupeKey;
         Error = error;
+        NotAttempted = notAttempted;
     }
 
     /// <summary>The innermost unpack result (every re-wrap layer opened); <c>null</c> on failure.</summary>
@@ -30,6 +31,15 @@ internal sealed class DeliveredOutcome
     /// <summary>Why the message did not unpack (the unpack exception, or a <see cref="TimeoutException"/> for the delivery's budget, a refused reservation and a message held back as slow); <c>null</c> on success.</summary>
     internal Exception? Error { get; }
 
+    /// <summary>
+    /// Whether no attempt was made to open the message in this delivery, so that nothing was learned
+    /// about it (<see cref="PickupItem.NotAttempted"/>, which the fetch path and the live stream copy
+    /// from here). The unpacker sets it in two cases only: the delivery's budget ran out before the
+    /// message's turn came (its host call was never created), and the message was refused for
+    /// capacity. <c>false</c> on success and for every other failure.
+    /// </summary>
+    internal bool NotAttempted { get; }
+
     /// <summary>Whether the message unpacked.</summary>
     internal bool Succeeded => Unpacked is not null;
 
@@ -40,14 +50,15 @@ internal sealed class DeliveredOutcome
     internal static DeliveredOutcome Success(UnpackResult unpacked, int layersOpened, UInt128 dedupeKey)
     {
         ArgumentNullException.ThrowIfNull(unpacked);
-        return new DeliveredOutcome(unpacked, layersOpened, dedupeKey, error: null);
+        return new DeliveredOutcome(unpacked, layersOpened, dedupeKey, error: null, notAttempted: false);
     }
 
     /// <summary>A message that did not unpack.</summary>
     /// <param name="error">Why.</param>
-    internal static DeliveredOutcome Failure(Exception error)
+    /// <param name="notAttempted">Whether no attempt was made to open it in this delivery (<see cref="NotAttempted"/>); <c>false</c> for a message that was tried, or that failed when it was tried before.</param>
+    internal static DeliveredOutcome Failure(Exception error, bool notAttempted = false)
     {
         ArgumentNullException.ThrowIfNull(error);
-        return new DeliveredOutcome(unpacked: null, layersOpened: 0, dedupeKey: default, error);
+        return new DeliveredOutcome(unpacked: null, layersOpened: 0, dedupeKey: default, error, notAttempted);
     }
 }

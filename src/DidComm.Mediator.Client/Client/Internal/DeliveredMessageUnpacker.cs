@@ -277,9 +277,17 @@ internal sealed class DeliveredMessageUnpacker
         return started >= budgetStart && Time.GetElapsedTime(budgetStart, started) <= StartAllowance;
     }
 
+    // Which failures say "not attempted" (DeliveredOutcome.NotAttempted, PickupItem.NotAttempted): the
+    // two below that are made before a message's host call exists, and no other. A message that ran
+    // out of time before its turn (started: false: the start rule refused it, no worker took it, or
+    // the delivery ended before its call was created) and one refused for capacity were not tried in
+    // this delivery, and nothing was learned about them. One whose call was created is an attempt,
+    // also when the budget ended before its code started; a held-back message failed when it was
+    // tried before.
     private DeliveredOutcome OutOfTime(string? requestId, bool started)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
-            $"The delivered message{ForRequest(requestId)} was not unpacked: the delivery's budget of {Budget} (MediatorClientOptions.UnpackTimeout) ran out {(started ? "while it was being opened" : "before its turn came")}. It was not acknowledged.")));
+            $"The delivered message{ForRequest(requestId)} was not unpacked: the delivery's budget of {Budget} (MediatorClientOptions.UnpackTimeout) ran out {(started ? "while it was being opened" : "before its turn came")}. It was not acknowledged.")),
+            notAttempted: !started);
 
     private static DeliveredOutcome HeldBackFailure(string? requestId)
         => DeliveredOutcome.Failure(new TimeoutException(string.Create(CultureInfo.InvariantCulture,
@@ -290,7 +298,8 @@ internal sealed class DeliveredMessageUnpacker
             ? string.Create(CultureInfo.InvariantCulture,
                 $"The delivered message{ForRequest(requestId)} was not unpacked: {UnpackReservations.MaxReserved} unpacks are still running, the bound for all mailboxes together (unpack capacity exhausted). It was not acknowledged.")
             : string.Create(CultureInfo.InvariantCulture,
-                $"The delivered message{ForRequest(requestId)} was not unpacked: the unpacks still running for its sender in this mailbox (or, without a named sender, for every such message in it) are at their bound (unpack capacity exhausted). It was not acknowledged.")));
+                $"The delivered message{ForRequest(requestId)} was not unpacked: the unpacks still running for its sender in this mailbox (or, without a named sender, for every such message in it) are at their bound (unpack capacity exhausted). It was not acknowledged.")),
+            notAttempted: true);
 
     private static string ForRequest(string? requestId)
         => requestId is null ? string.Empty : string.Create(CultureInfo.InvariantCulture, $" of request '{requestId}'");

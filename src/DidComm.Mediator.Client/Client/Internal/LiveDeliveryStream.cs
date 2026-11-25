@@ -786,7 +786,10 @@ internal sealed class LiveDeliveryStream
         if (opened.Outcome is not { } outcome || outcome.Unpacked is not { } unpacked)
         {
             _held.Remove(entry.Id);
-            return new PickupItem(entry.Id, unpacked: null, opened.Outcome?.Error ?? entry.Error);
+            // Whether the unpacker tried it is passed on as it is (PickupItem.NotAttempted); an entry
+            // that never reached the unpacker (no usable payload) is not a message that was left
+            // untried.
+            return new PickupItem(entry.Id, unpacked: null, opened.Outcome?.Error ?? entry.Error, opened.Outcome?.NotAttempted ?? false);
         }
         if (_exchange.Duplicates.Contains(_localDid, outcome.DedupeKey))
         {
