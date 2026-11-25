@@ -146,10 +146,12 @@ public sealed class PickupItem
     /// set delivered messages aside delivers it again at the next fetch), and the client starts on
     /// it again then, once what was in its way is gone. For a message whose turn did not come, or
     /// that was started late: once the messages that were in front of it have opened, are held
-    /// back, or were discarded by you. For a message refused for capacity: once the openings that
-    /// were in its way have ended (a DID resolver that ignores cancellation can keep them running;
-    /// until they end, the message comes back inconclusive again). Discarding an inconclusive item
-    /// deletes a message that was not given its chance, which may be an honest sender's.
+    /// back, or were discarded by you, and a thread is free for it in time (while your resolvers
+    /// keep the thread pool busy, it can come back inconclusive again). For a message refused for
+    /// capacity: once the openings that were in its way have ended (a DID resolver that ignores
+    /// cancellation can keep them running; until they end, the message comes back inconclusive
+    /// again). Discarding an inconclusive item deletes a message that was not given its chance,
+    /// which may be an honest sender's.
     /// </para>
     /// <para>
     /// One narrow window: a message whose turn on a thread came at the very moment the time ran out

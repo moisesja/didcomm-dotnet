@@ -639,8 +639,8 @@ internal sealed class DeliveredMessageUnpacker
             }
             try
             {
-                // _calls and _outcomes are written only while the delivery is open, and the result
-                // is not set before Written() below: nobody else reads or writes them here.
+                // The delivery is closed, so nobody else writes the outcomes of these messages or
+                // their calls, and the result is not set before Written() below: nobody reads them.
                 var strikes = byTheBudget;
                 foreach (var (index, started) in pending)
                 {
