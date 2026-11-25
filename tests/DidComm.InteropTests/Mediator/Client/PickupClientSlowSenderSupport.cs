@@ -53,6 +53,13 @@ internal sealed class SlowSenderSeam
     /// </summary>
     public int Held => Volatile.Read(ref _held);
 
+    /// <summary>
+    /// When set, a call for a message that never opens ends only once this has completed after its
+    /// token was cancelled: a lookup that honours its token and takes a moment more to end. Until
+    /// then it holds its reservation.
+    /// </summary>
+    public Task? EndGate { get; set; }
+
     /// <summary>The outer-envelope sender of every host call made, in order (<c>null</c>: anonymous).</summary>
     public IReadOnlyList<string?> Calls => _calls.ToArray();
 
@@ -91,7 +98,17 @@ internal sealed class SlowSenderSeam
             await WaitAsync(Task.Delay(lookup, Time, ct), ct); // the timer exists before the call counts as waiting
         var unpacked = await client.UnpackDeliveredAsync(text, ct);
         if (unpacked.Result.Message.Body?["content"]?.GetValue<string>() == "slow")
-            await WaitAsync(Task.Delay(Timeout.InfiniteTimeSpan, ct), ct);
+        {
+            try
+            {
+                await WaitAsync(Task.Delay(Timeout.InfiniteTimeSpan, ct), ct);
+            }
+            catch (OperationCanceledException) when (EndGate is not null)
+            {
+                await EndGate.ConfigureAwait(false);
+                throw;
+            }
+        }
         return unpacked;
     }
 
@@ -151,6 +168,7 @@ internal sealed class SlowFetchLoop(MediatorTestServer mediator, MediatorClientH
 {
     private static readonly TimeSpan HangGuard = MediatorTestServer.Timeout;
     private readonly Dictionary<string, DateTimeOffset> _leasedUntil = new(StringComparer.Ordinal);
+    private int _mostReserved;
     private readonly TimeSpan _lease = mediator.App.Services.GetRequiredService<Microsoft.Extensions.Options.IOptions<MessagePickupOptions>>().Value.LeaseTimeout;
 
     /// <summary>The fetches made.</summary>
@@ -241,12 +259,28 @@ internal sealed class SlowFetchLoop(MediatorTestServer mediator, MediatorClientH
         return false;
     }
 
+    /// <summary>The most reservations seen still held by lookups that honour their token, while a fetch was kept from starting for them.</summary>
+    public int MostReservedBeforeAFetch => Volatile.Read(ref _mostReserved);
+
+    /// <summary>Whether a fetch was kept from starting while a lookup that honours its token still held its reservation.</summary>
+    public bool SawLookupsStillEnding => Volatile.Read(ref _mostReserved) > 0;
+
+    private bool LookupsEnded()
+    {
+        var stillEnding = Unpacker.Reserved - seam.Held;
+        if (stillEnding == 0)
+            return true;
+        if (stillEnding > Volatile.Read(ref _mostReserved))
+            Volatile.Write(ref _mostReserved, stillEnding);
+        return false;
+    }
+
     /// <summary>One fetch, driven to its end.</summary>
     public async Task<PickupBatch> FetchOnceAsync(int limit)
     {
         // The model's lookups (see the remarks): every host call of the fetches before has ended,
         // except the lookups that never end.
-        SpinWait.SpinUntil(() => Unpacker.Reserved == seam.Held, HangGuard).Should().BeTrue("every host call of the fetches before ends, but for the {0} that never do ({1} reserved)", seam.Held, Unpacker.Reserved);
+        SpinWait.SpinUntil(LookupsEnded, HangGuard).Should().BeTrue("every host call of the fetches before ends, but for the {0} that never do ({1} reserved)", seam.Held, Unpacker.Reserved);
         var start = time.GetUtcNow();
         var leases = store.Leases.Count;
         var settled = Unpacker.Settled;

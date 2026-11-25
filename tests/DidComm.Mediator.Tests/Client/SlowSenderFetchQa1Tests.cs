@@ -623,9 +623,11 @@ public sealed class SlowSenderFetchQa1Tests
     /// <summary>
     /// A fetch loop of the eagerest host: it fetches until drained and, when drained, fetches again
     /// as soon as the mediator's next lease ends; it stops when <paramref name="honest"/> is returned
-    /// opened, or after <paramref name="cap"/> of clock time. With <paramref name="discard"/> the
-    /// host discards failed items after each fetch (<see cref="Qa1.ToDiscard"/>), and its next fetch
-    /// follows once the lookups of the last delivery have ended (<see cref="Qa1.LookupsEnded"/>).
+    /// opened, or after <paramref name="cap"/> of clock time. Each fetch starts once the lookups of
+    /// the fetches before have ended (<see cref="Qa1Exchange.DriveAsync{T}"/> waits for them: the
+    /// model of the host's lookups stated there). With <paramref name="discard"/> the host discards
+    /// failed items after each fetch (<see cref="Qa1.ToDiscard"/>), once those lookups have ended
+    /// (<see cref="Qa1.LookupsEnded"/>).
     /// </summary>
     internal static async Task<Reach> ReachAsync(Qa1Exchange exchange, Qa1Mediator mediator, int limit, TimeSpan cap, string honest = "honest", string? recipientDid = null, Qa1Discard discard = Qa1Discard.Nothing)
     {
