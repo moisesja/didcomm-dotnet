@@ -270,6 +270,36 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
         seam.Calls.Count(sender => sender == sam.Did).Should().Be(junk + 1, "each piece of junk is opened once, then held back while its pause lasts");
     }
 
+    /// <summary>
+    /// What "sixteen in one delivery takes another mediator" rests on: at its defaults this library's
+    /// mediator answers a fetch with at most ten messages (<see cref="MessagePickupOptions.MaxDeliveryBatch"/>),
+    /// whatever limit the client asks for. Thirty are queued; a fetch with a limit of 100 returns
+    /// the first ten, and the next fetch the next ten.
+    /// </summary>
+    [Fact]
+    public async Task At_its_defaults_this_librarys_mediator_delivers_at_most_ten_messages_per_fetch()
+    {
+        var (mediator, store) = await StartMediatorAsync(DefaultLease);
+        await using var _ = mediator;
+        var time = new QaManualTimeProvider();
+        var seam = new SlowSenderSeam(time);
+        await using var harness = await SlowFetchLoop.HarnessAsync(mediator, time, seam);
+        var (bob, recipient) = await PickupE2E.EnrolAsync(mediator, harness);
+        var alice = await harness.NewAliceAsync();
+        for (var i = 0; i < 30; i++)
+            await PickupE2E.SendAsync(mediator, alice, recipient, "note");
+        var leasesBefore = store.Leases.Count;
+
+        var first = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 100).WaitAsync(MediatorTestServer.Timeout);
+        var second = await harness.Pickup.FetchAsync(mediator.Did, bob.Did, limit: 100).WaitAsync(MediatorTestServer.Timeout);
+
+        output.WriteLine($"30 queued, limit 100: the first fetch returned {first.Items.Count}, the second {second.Items.Count}; MaxDeliveryBatch {new MessagePickupOptions().MaxDeliveryBatch}");
+        new MessagePickupOptions().MaxDeliveryBatch.Should().Be(10);
+        first.Items.Should().HaveCount(10).And.OnlyContain(i => i.Unpacked != null);
+        second.Items.Should().HaveCount(10).And.OnlyContain(i => i.Unpacked != null);
+        store.Leases.Skip(leasesBefore).Should().OnlyContain(l => l.Ids.Count <= 10, "no delivery carries more than ten");
+    }
+
     // The learning fetches the bound allows: ceil(slow / min(limit, 16)).
     private static int Bound(int slow, int limit)
     {
