@@ -165,9 +165,10 @@ public sealed class SlowSenderDiscardingHostRt3Tests(ITestOutputHelper output)
     /// aside: sixteen messages of one sender whose lookups ignore their token are opened and end at
     /// their budget, still holding that sender's sixteen reservations, and a seventeenth message of
     /// the same sender, which would open, is queued behind them. While those lookups have not ended,
-    /// every delivery hands the seventeenth over as not attempted, without calling host code for it.
-    /// The careful host leaves it queued, and the first delivery after the lookups end returns it
-    /// opened. A host that discards every failed item has deleted it by then.
+    /// every delivery hands the seventeenth over as not attempted, without calling host code for it;
+    /// such a fetch takes no time on the clock and is not a drained one. The careful host leaves it
+    /// queued, and the first delivery after the lookups end returns it opened. A host that discards
+    /// every failed item has deleted it by then.
     /// </summary>
     [Theory]
     [InlineData(Qa1Discard.WhatWasTried, true)]
@@ -199,7 +200,10 @@ public sealed class SlowSenderDiscardingHostRt3Tests(ITestOutputHelper output)
             var deliveries = discard == Qa1Discard.WhatWasTried ? 3 : 1;
             for (var d = 0; d < deliveries; d++)
             {
+                var before = exchange.Clock.TrueNow;
                 var refused = await FetchAndDiscardAsync();
+                (exchange.Clock.TrueNow - before).Should().Be(TimeSpan.Zero, "a delivery of refused messages ends at once");
+                refused.Drained.Should().BeFalse("the mediator delivered a message");
                 var item = refused.Items.Should().ContainSingle().Which;
                 item.Id.Should().Be("target");
                 item.NotAttempted.Should().BeTrue("it was refused for its sender's bound (delivery {0})", d + 2);

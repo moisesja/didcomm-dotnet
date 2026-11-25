@@ -56,10 +56,10 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
     /// Messages refused for capacity, on a live stream: two messages that would open are queued
     /// while the mailbox's bound for messages naming no sender is held (as sixteen lookups of earlier
     /// deliveries that have not ended hold it; the test takes those reservations itself). In each
-    /// cycle while it is held the stream yields both as failed items that were not attempted, and
-    /// calls no host code for them. The careful host leaves them queued, and the first cycle after
-    /// the bound is free yields both opened. A host that discards every failed item deleted them in
-    /// the first cycle, and never receives them.
+    /// cycle while it is held the stream yields both as failed items that were not attempted, once
+    /// per cycle, and calls no host code for them. The careful host leaves them queued, and the
+    /// first cycle after the bound is free yields both opened. A host that discards every failed
+    /// item deleted them in the first cycle, and never receives them.
     /// </summary>
     [Theory]
     [InlineData(Qa1Discard.WhatWasTried, true)]
@@ -86,6 +86,7 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
         host.Items.Should().HaveCount(2 * cyclesWhileHeld);
         host.Items.Select(i => i.Item.Id).Should().Equal(Enumerable.Repeat(new[] { "m-1", "m-2" }, cyclesWhileHeld).SelectMany(ids => ids));
         host.Items.Should().OnlyContain(i => i.Item.NotAttempted && i.Item.Error is TimeoutException && i.Item.Error.Message.Contains("capacity exhausted"));
+        host.Items.Select(i => i.At).Should().Equal(Enumerable.Range(0, cyclesWhileHeld).SelectMany(cycle => new[] { Lease * cycle, Lease * cycle }), "they are yielded once per cycle, a poll interval apart");
         exchange.HostCalls.Should().Be(0, "a refused message's host code does not start");
         mediator.Queued.Should().Equal(received ? new[] { "m-1", "m-2" } : Array.Empty<string>(), "only the host that left them queued still has them");
 
