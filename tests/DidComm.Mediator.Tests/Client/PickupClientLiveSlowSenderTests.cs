@@ -77,7 +77,7 @@ public sealed class PickupClientLiveSlowSenderTests(ITestOutputHelper output)
                 reached = true;
                 break;
             }
-            stream.Current.Error.Should().BeOfType<TimeoutException>("a message that never opens fails at its share, or at once while it is held back");
+            stream.Current.Error.Should().BeOfType<TimeoutException>("a message that never opens fails when its delivery's budget ends, or at once while it is held back");
         }
         var cycles = LiveOns(exchange);
         var elapsed = time.GetUtcNow() - started;

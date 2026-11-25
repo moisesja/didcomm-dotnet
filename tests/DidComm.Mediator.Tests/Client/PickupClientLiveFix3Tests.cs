@@ -32,7 +32,7 @@ public sealed class PickupClientLiveFix3Tests
         exchange.UseBudget(Budget);
         // Nothing is queued at the start; one interval later a delayed message is due; then nothing.
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Status(r), r => Delivery(r, ("late", "ok:late")), r => Status(r));
-        // Each slow push signals once its opening has started: its budget and its share exist then.
+        // Each slow push signals once its opening has started: its budget exists then.
         // That is the rendezvous, not a count of scheduled timers: the next cycle's alarm and the
         // flush age are scheduled meanwhile (#111).
         var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -63,7 +63,7 @@ public sealed class PickupClientLiveFix3Tests
         {
             for (var i = 0; i < 3 * perInterval; i++)
             {
-                // A slow push is being opened (its budget and its share exist); the next one is waiting.
+                // A slow push is being opened (its budget exists); the next one is waiting.
                 await Volatile.Read(ref stalled[0]).Task.WaitAsync(PickupTest.Timeout);
                 exchange.Registration!.TryPush(Push(($"s{i + 1}", $"stall:s{i + 1}"))).Should().BeTrue();
                 exchange.Clock.Advance(Budget);
@@ -126,7 +126,7 @@ public sealed class PickupClientLiveFix3Tests
         var move = stream.MoveNextAsync().AsTask();
         try
         {
-            await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // the first round's d1 is being opened
+            await exchange.Clock.WaitForTimerAsync(Budget, 0, PickupTest.Timeout); // the first round's d1 is being opened: its delivery's budget is scheduled
             exchange.Clock.Advance(Budget);
             (await PickupTest.Within(move)).Should().BeTrue();
             stream.Current.Should().Match<PickupItem>(i => i.Id == "d1" && i.Error is TimeoutException, "the cycle's drain round goes before the waiting push");
@@ -134,7 +134,7 @@ public sealed class PickupClientLiveFix3Tests
             (await Next(stream)).Should().Match<PickupItem>(i => i.Id == "p1" && i.Error == null, "then the push has its turn, before the next drain round");
 
             move = stream.MoveNextAsync().AsTask();
-            await exchange.Clock.WaitForScheduledTimersAsync(2, PickupTest.Timeout); // the next round's d2 is being opened
+            await exchange.Clock.WaitForTimerAsync(Budget, 0, PickupTest.Timeout); // the next round's d2 is being opened
             Types(exchange).Should().Equal(LiveOn, Drain, Ack, Drain);
             exchange.AcknowledgedIds.Should().Equal("p1");
         }

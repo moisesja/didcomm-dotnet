@@ -11,10 +11,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// ADV-3 red-team pass on the per-delivery budget of fix round 2 (#96, owner decision 2-A and the
-/// equal share of <c>2e45df7</c>), and since #111 the reservations of host unpack calls and the
-/// share of the time left: the share arithmetic, the bound on host calls, host code that blocks, and
-/// the timer and token handling under races. Every timing is driven by the injected
+/// ADV-3 red-team pass on the per-delivery budget of fix round 2 (#96, owner decision 2-A), and
+/// since #111 the reservations of host unpack calls and one budget with no time limit per message
+/// (owner decision E): the bound on host calls, host code that blocks, and the timer and token
+/// handling under races. Every timing is driven by the injected
 /// <see cref="ManualTimeProvider"/> and rendezvous on scheduled timers (L-044); nothing sleeps.
 /// </summary>
 public sealed class DeliveredUnpackAdv3Tests
@@ -67,13 +67,13 @@ public sealed class DeliveredUnpackAdv3Tests
     }
 
     /// <summary>
-    /// ADV3-3 (fixed by #111, I-6, D-5): ninety-nine messages that fail at once and an honest message
-    /// first whose sender's DID takes 2 s to resolve, in one delivery of a hundred under the default
-    /// 20 s budget. The honest message's share is at least the floor (5 s), not the static share
-    /// (0.8 s), so it opens; alone, it opens too.
+    /// ADV3-3 (fixed by #111): ninety-nine messages that fail at once and an honest message first
+    /// whose sender's DID takes 2 s to resolve, in one delivery of a hundred under the default 20 s
+    /// budget. A message has no time limit of its own (owner decision E; before, a share of the
+    /// budget sized from the count, 0.8 s here), so it opens; alone, it opens too.
     /// </summary>
     [Fact]
-    public async Task ADV3_3_junk_that_fails_at_once_leaves_an_honest_message_first_at_least_the_floor()
+    public async Task ADV3_3_junk_that_fails_at_once_leaves_an_honest_message_first_the_time_to_open()
     {
         var time = new ManualTimeProvider();
         var resolution = TimeSpan.FromSeconds(2);
@@ -100,9 +100,7 @@ public sealed class DeliveredUnpackAdv3Tests
         var outcomes = await batch.WaitAsync(RealTime);
 
         outcomes.Skip(1).Should().OnlyContain(o => o.Error is CryptoException, "the junk failed at once");
-        outcomes[0].Succeeded.Should().BeTrue(
-            "its share is at least the floor of {0}, which its {1} lookup fits in, not the static share of {2}",
-            unpacker.Floor, resolution, DeliveredMessageUnpacker.ShareOf(Budget, padded.Length));
+        outcomes[0].Succeeded.Should().BeTrue("it runs until it opens: its {0} lookup fits in the budget of {1}", resolution, Budget);
     }
 
     /// <summary>
@@ -138,7 +136,7 @@ public sealed class DeliveredUnpackAdv3Tests
             // Fix round 3: awaited (bounded) rather than read after the budget, a rendezvous instead
             // of a race with the caller's thread; before the fix the caller stays blocked here.
             var delivery = await call.WaitAsync(RealTime);
-            await time.WaitForScheduledTimersAsync(2, RealTime); // the budget and the share
+            await time.WaitForScheduledTimersAsync(1, RealTime); // the budget
             time.Advance(Budget); // the budget fires: the outcome is decided
 
             call.IsCompleted.Should().BeTrue("the delivery's budget ran out, so the caller must hold its (failed) outcome; it is still blocked inside UnpackAllAsync");
@@ -153,28 +151,32 @@ public sealed class DeliveredUnpackAdv3Tests
     }
 
     /// <summary>
-    /// Held (passes): the share and the budget fire at the same instant (a delivery of up to four
-    /// messages: share = budget), the caller cancels at that instant too, and a callback host code
-    /// registered on the share's token throws — the call ends cancelled, nothing escapes onto the
-    /// timer thread or into the caller's <c>Cancel()</c>, and every reservation comes back.
+    /// Held (passes): the caller cancels at the instant the budget ends, and a callback host code
+    /// registered on its token throws — the call ends cancelled, nothing escapes onto the timer
+    /// thread or into the caller's <c>Cancel()</c>, and every reservation comes back.
     /// </summary>
     [Fact]
-    public async Task Share_budget_and_caller_ending_together_with_a_throwing_host_callback_end_cleanly()
+    public async Task Budget_and_caller_ending_together_with_a_throwing_host_callback_end_cleanly()
     {
         var time = new ManualTimeProvider();
         using var caller = new CancellationTokenSource();
+        using var registered = new SemaphoreSlim(0);
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             ct.Register(() => throw new InvalidOperationException("host callback"));
-            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            var stall = Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            registered.Release();
+            await stall;
             return Opened(text);
         }, Budget, time);
-        // The caller cancels from a timer of its own, due at the same instant as the budget and the
-        // shares and created first, so it fires first: its Cancel() runs the budget's and the shares'
-        // cancellations, and the throwing host callbacks, inline.
+        // The caller cancels from a timer of its own, due at the same instant as the budget and
+        // created first, so it fires first: its Cancel() runs the budget's cancellation, and the
+        // throwing host callbacks, inline.
         using var callerTimer = time.CreateTimer(_ => caller.Cancel(), null, Budget, Timeout.InfiniteTimeSpan);
         var batch = unpacker.UnpackAllAsync(Payloads(4, "m-"), "request-1", caller.Token);
-        await time.WaitForScheduledTimersAsync(6, RealTime);
+        for (var i = 0; i < 4; i++)
+            (await registered.WaitAsync(RealTime)).Should().BeTrue("each host call registered its callback");
+        time.ScheduledTimers.Should().Be(2, "the caller's timer and the budget");
 
         FluentActions.Invoking(() => { time.Advance(Budget); }).Should().NotThrow("nothing a host callback throws escapes into the caller's Cancel() or onto a timer");
 
@@ -183,48 +185,51 @@ public sealed class DeliveredUnpackAdv3Tests
     }
 
     /// <summary>
-    /// Held (passes): a host callback on the share's token completes the unpack <em>successfully</em>
-    /// inside the share's own <c>Cancel()</c> (registered after the worker's wait, so it runs first).
-    /// The message is a success exactly once, the delivery completes, the next message still gets
-    /// its own share (the time left), and no reservation or timer is left behind.
+    /// Held (passes): a host callback on the call's token completes the unpack <em>successfully</em>
+    /// inside the budget's own <c>Cancel()</c>. Whichever comes first, that result or the delivery's
+    /// end, each message has exactly one outcome; the message that waited for a worker is not
+    /// started; and no reservation or timer is left behind (the budget may be disposed inside its
+    /// own <c>Cancel()</c>).
     /// </summary>
     [Fact]
-    public async Task An_unpack_that_completes_inside_its_shares_cancel_is_recorded_once_and_leaves_nothing_behind()
+    public async Task An_unpack_that_completes_inside_the_budgets_cancel_is_recorded_once_and_leaves_nothing_behind()
     {
         var time = new ManualTimeProvider();
+        using var registered = new SemaphoreSlim(0);
+        var started = 0;
         var unpacker = new DeliveredMessageUnpacker((text, ct) =>
         {
+            Interlocked.Increment(ref started);
             var done = new TaskCompletionSource<DeliveredUnpack>();
-            // Completes synchronously, on the share's timer thread, when the share runs out.
+            // Completes synchronously, on the budget's timer thread, when the budget runs out.
             _ = Task.Run(async () =>
             {
                 await Task.Yield();
                 ct.Register(() => done.TrySetResult(Opened(text)));
+                registered.Release();
             });
             return done.Task;
         }, Budget, time);
-        var payloads = Payloads(5, "m-"); // two rounds: four, then one
+        var payloads = Payloads(5, "m-"); // four at once; the fifth waits for a worker
         var batch = unpacker.UnpackAllAsync(payloads, "request-1", default);
-        // The first message's share is half the budget (two rounds left); the other three get all of it.
-        var first = unpacker.ShareAt(payloads.Length, 0, TimeSpan.Zero);
 
-        await time.WaitForScheduledTimersAsync(5, RealTime);
-        var mark = time.Mark();
-        time.Advance(first);
-        // The fifth message starts when the first ends, with the time left as its share.
-        await time.WaitForTimerAsync(Budget - first, mark, RealTime);
-        time.Advance(Budget - first);
+        for (var i = 0; i < 4; i++)
+            (await registered.WaitAsync(RealTime)).Should().BeTrue("each host call registered its callback");
+        time.ScheduledTimers.Should().Be(1, "the budget");
+        time.Advance(Budget);
         var outcomes = await batch.WaitAsync(RealTime);
 
         outcomes.Should().HaveCount(5);
-        // Whichever won (the late result or the share), each message has exactly one outcome.
+        // Whichever won (the late result or the budget), each message has exactly one outcome.
         outcomes.Should().OnlyContain(o => o.Succeeded || o.Error is TimeoutException);
+        outcomes[4].Error.Should().BeOfType<TimeoutException>("the delivery's token was cancelled before a worker was free for it");
+        Volatile.Read(ref started).Should().Be(4);
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
     /// <summary>
     /// Held (passes): thousands of deliveries with every kind of message — opens at once, fails at
-    /// once, throws synchronously, honours its share, ignores its token and ends later, plus callers
+    /// once, throws synchronously, honours its token, ignores its token and ends later, plus callers
     /// that cancel mid-delivery — leave the reserved count at exactly zero once the late unpacks
     /// end (it never drifts up or down), and no timer scheduled.
     /// </summary>
@@ -261,7 +266,7 @@ public sealed class DeliveredUnpackAdv3Tests
             }
             if (round % 3 == 0)
                 cancel.Cancel();
-            // Run every share and budget out.
+            // Run every budget out.
             for (var step = 0; step < 4 && batches.Any(b => !b.Task.IsCompleted); step++)
             {
                 time.Advance(Budget);

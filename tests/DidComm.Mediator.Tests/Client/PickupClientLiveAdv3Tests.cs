@@ -29,7 +29,7 @@ public sealed class PickupClientLiveAdv3Tests
     /// Attack: the stream's loop serves a buffered push before a drain round
     /// (<c>LiveDeliveryStream.NextAsync</c>: <c>_ready</c>, then <c>Pushes.TryRead</c>, then the drain),
     /// and since fix round 2 it opens each push whole before going on, under the full budget (a live
-    /// push carries one message, so its share is the whole 20 s). A sender whose DID never resolves
+    /// push carries one message, which has the whole 20 s). A sender whose DID never resolves
     /// (or resolves just under the budget) — any outsider who can address the recipient through its
     /// mediator — sends one message every 20 s or faster. Each is pushed live, and while one is being
     /// opened the next is already buffered, so the loop never finds the push buffer empty and never
@@ -48,7 +48,7 @@ public sealed class PickupClientLiveAdv3Tests
         exchange.UseBudget(Budget);
         // Queued before the stream started (or delayed by its sender, or its push dropped): only a drain reaches it.
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("queued-1", "ok:queued-1")), r => Status(r));
-        // Each slow push signals once its opening has started: its budget and its share exist then.
+        // Each slow push signals once its opening has started: its budget exists then.
         // That is the rendezvous, not a count of scheduled timers: the next cycle's alarm and the
         // flush age are scheduled meanwhile (#111).
         var stalled = new[] { new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously) };
@@ -87,7 +87,7 @@ public sealed class PickupClientLiveAdv3Tests
 
             for (var i = 0; i < rounds; i++)
             {
-                // The push being opened: its budget and its message's share exist.
+                // The push being opened: its delivery's budget exists.
                 await Volatile.Read(ref stalled[0]).Task.WaitAsync(PickupTest.Timeout);
                 // The attacker's next message arrives while this one is still being opened.
                 exchange.Registration!.TryPush(Push(($"s{i + 1}", $"stall:s{i + 1}"))).Should().BeTrue();
@@ -177,7 +177,7 @@ public sealed class PickupClientLiveAdv3Tests
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
-        // "slow" signals once its opening has started (its budget and its share exist then); the next
+        // "slow" signals once its opening has started (its budget exists then); the next
         // cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no rendezvous (#111).
         var stalled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.Unpacker = async (text, ct) =>
@@ -224,15 +224,15 @@ public sealed class PickupClientLiveAdv3Tests
 
     /// <summary>
     /// Held (passes): the consumer's cancellation while a delivery is being opened ends the stream
-    /// with nothing of that delivery acknowledged or remembered, the budget's and the shares' timers
-    /// gone, and the mailbox closed.
+    /// with nothing of that delivery acknowledged or remembered, the budget's timer gone, and the
+    /// mailbox closed.
     /// </summary>
     [Fact]
     public async Task Cancelled_while_a_push_is_opened_leaves_no_timer_no_registration_and_nothing_remembered()
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
-        // Every worker signals once its message's opening has started (the budget and that share exist
+        // Every worker signals once its message's opening has started (the delivery's budget exists
         // then); the next cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no
         // rendezvous (#111).
         var entered = 0;
@@ -262,7 +262,7 @@ public sealed class PickupClientLiveAdv3Tests
             exchange.Duplicates.Contains(L, DefaultOutcome($"ok:{id}").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
         SpinWait.SpinUntil(() => exchange.Clock.ScheduledTimers == 0 && exchange.Budgeted!.Reserved == 0, PickupTest.Timeout)
-            .Should().BeTrue("the budget's and the shares' timers are disposed and every unpack let its slot go");
+            .Should().BeTrue("the budget's timer is disposed and every unpack let its slot go");
     }
 
     /// <summary>

@@ -275,8 +275,9 @@ public sealed class UnpackSlotsQa2Tests
     /// <summary>
     /// I-1 (exactly once): one set of reservations shared by an unpacker per round, over thousands of
     /// deliveries whose messages open, fail at once (as a faulted task or a throw before any task),
-    /// fail after a second, are cut at their share, run into the budget, ignore their tokens and end
-    /// later, or are refused; with callers that cancel and owners that shut down mid-delivery. A
+    /// fail after a second, run into the budget, are out of time before their turn, ignore their
+    /// tokens and end later, or are refused; with callers that cancel and owners that shut down
+    /// mid-delivery. A
     /// sampler reads the count throughout: it never goes below 0 or above C. After each round the
     /// reservations held are exactly the late calls still running, and at the end none are held.
     /// </summary>
@@ -335,7 +336,7 @@ public sealed class UnpackSlotsQa2Tests
         var kinds = new[] { 'o', 'x', 'f', 'd', 's', 'l' };
         var random = new Random(2111);
         var deliveries = 0;
-        var ended = new Dictionary<string, int> { ["opened"] = 0, ["failed"] = 0, ["share"] = 0, ["budget"] = 0, ["refused"] = 0, ["caller"] = 0, ["shutdown"] = 0 };
+        var ended = new Dictionary<string, int> { ["opened"] = 0, ["failed"] = 0, ["budget"] = 0, ["refused"] = 0, ["caller"] = 0, ["shutdown"] = 0 };
         try
         {
             for (var round = 0; round < 250; round++)
@@ -364,7 +365,7 @@ public sealed class UnpackSlotsQa2Tests
                         shutdown.Cancel();
                         break;
                     case 3:
-                        time.Advance(Budget / 4); // a share of a long delivery runs out first
+                        time.Advance(Budget / 4); // part of the budget passes first: the messages taken after it start late
                         break;
                 }
                 for (var step = 0; step < 6 && batches.Any(b => !b.IsCompleted); step++)
@@ -385,7 +386,6 @@ public sealed class UnpackSlotsQa2Tests
                     {
                         var kind = outcome.Succeeded ? "opened"
                             : IsRefusal(outcome, "capacity") ? "refused"
-                            : outcome.Error is TimeoutException t && t.Message.Contains("share", StringComparison.Ordinal) ? "share"
                             : outcome.Error is TimeoutException ? "budget"
                             : "failed";
                         ended[kind]++;
@@ -429,9 +429,6 @@ public sealed class UnpackSlotsQa2Tests
     /// <summary>How a delivery ends while one of its host calls keeps running.</summary>
     public enum Ending
     {
-        /// <summary>The call is cut at its share while another message waits for a worker (A1); the rest of the delivery opens.</summary>
-        ShareCut,
-
         /// <summary>The budget runs out.</summary>
         Budget,
 
@@ -442,42 +439,60 @@ public sealed class UnpackSlotsQa2Tests
         Shutdown,
     }
 
+    /// <summary>How host code outlives the delivery it was opening a message of.</summary>
+    public enum Outliving
+    {
+        /// <summary>Its call blocks its thread.</summary>
+        BlocksItsThread,
+
+        /// <summary>Its call's task never ends, and it ignores its token.</summary>
+        NeverEndsAndIgnoresItsToken,
+
+        /// <summary>Its call's task never ends, it ignores its token, and it keeps a registration it made on that token.</summary>
+        KeepsARegistrationOnItsToken,
+    }
+
+    // What the host code of the kept call holds on to: nothing of the delivery, by itself.
+    private sealed class HostState
+    {
+        public CancellationTokenRegistration Registration;
+    }
+
     /// <summary>
-    /// I-4 (ADV4-2) for every way a delivery ends and both kinds of host call that outlive it — one
-    /// that blocks its thread and one whose task never ends and ignores its token: while that call
-    /// still runs (and keeps its reservation), the delivery's message list, another message's bytes
-    /// and, when the delivery returned them, its outcomes are unreachable.
+    /// I-4 (ADV4-2) for every way a delivery ends and every kind of host call that outlives it — one
+    /// that blocks its thread, one whose task never ends and ignores its token, and one that also
+    /// keeps a registration it made on its token: while that call still runs (and keeps its
+    /// reservation), the delivery's message list, another message's bytes and, when the delivery
+    /// returned them, its outcomes are unreachable.
     /// </summary>
     [Theory]
-    [InlineData(Ending.ShareCut, true)]
-    [InlineData(Ending.Budget, true)]
-    [InlineData(Ending.Caller, true)]
-    [InlineData(Ending.Shutdown, true)]
-    [InlineData(Ending.ShareCut, false)]
-    [InlineData(Ending.Budget, false)]
-    [InlineData(Ending.Caller, false)]
-    [InlineData(Ending.Shutdown, false)]
-    public async Task A_host_call_that_outlives_its_delivery_keeps_nothing_of_the_delivery_reachable(Ending ending, bool blocksItsThread)
+    [InlineData(Ending.Budget, Outliving.BlocksItsThread)]
+    [InlineData(Ending.Caller, Outliving.BlocksItsThread)]
+    [InlineData(Ending.Shutdown, Outliving.BlocksItsThread)]
+    [InlineData(Ending.Budget, Outliving.NeverEndsAndIgnoresItsToken)]
+    [InlineData(Ending.Caller, Outliving.NeverEndsAndIgnoresItsToken)]
+    [InlineData(Ending.Shutdown, Outliving.NeverEndsAndIgnoresItsToken)]
+    [InlineData(Ending.Budget, Outliving.KeepsARegistrationOnItsToken)]
+    [InlineData(Ending.Caller, Outliving.KeepsARegistrationOnItsToken)]
+    [InlineData(Ending.Shutdown, Outliving.KeepsARegistrationOnItsToken)]
+    public async Task A_host_call_that_outlives_its_delivery_keeps_nothing_of_the_delivery_reachable(Ending ending, Outliving outliving)
     {
         using var floor = new PoolFloor(parked: 1);
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);
         using var entered = new SemaphoreSlim(0);
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var busy = new Busy();
+        var hostState = new HostState();
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
         var unpacker = new DeliveredMessageUnpacker((text, ct) =>
         {
-            if (text.StartsWith("busy", StringComparison.Ordinal))
-            {
-                busy.Calls.Enter(text, ct);
-                return busy.Release.Task.ContinueWith(_ => UnpackFakes.Opened(text), TaskScheduler.Default);
-            }
             if (!text.StartsWith("kept", StringComparison.Ordinal))
                 return Task.FromResult(UnpackFakes.Opened(text));
+            if (outliving == Outliving.KeepsARegistrationOnItsToken)
+                hostState.Registration = ct.Register(static () => { });
             entered.Release();
-            if (!blocksItsThread)
+            if (outliving != Outliving.BlocksItsThread)
                 return never.Task;
             gate.Wait(RealTime); // blocks its thread (bounded only so a red run cannot hang)
             return Task.FromResult(UnpackFakes.Opened(text));
@@ -486,7 +501,7 @@ public sealed class UnpackSlotsQa2Tests
         bool kept;
         try
         {
-            refs = await OpenAndEndAsync(unpacker, time, entered, ending, shutdown, caller, busy);
+            refs = await OpenAndEndAsync(unpacker, time, entered, ending, shutdown, caller);
             unpacker.Reserved.Should().Be(1, "the call still runs and keeps its reservation");
             SpinWait.SpinUntil(() => time.ScheduledTimers == 0 && unpacker.Opening == 0, RealTime).Should().BeTrue("the delivery left no timer behind");
             kept = refs.Any(r => !BecomesUnreachable(r));
@@ -495,42 +510,63 @@ public sealed class UnpackSlotsQa2Tests
         {
             gate.Set();
             never.TrySetCanceled();
-            busy.Release.TrySetResult();
         }
         SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
+        // The host code held its registration until here; the control runs without it.
+        hostState.Registration.Dispose();
+        hostState.Registration = default;
         refs.Should().OnlyContain(r => BecomesUnreachable(r), "the control: the test holds nothing of the delivery");
-        kept.Should().BeFalse("a host call that outlives its delivery references only the unpack step, its text and its token ({0})", ending);
+        kept.Should().BeFalse("a host call that outlives its delivery references the unpack step, its text and its token, and the token nothing of the delivery once it has ended ({0}, {1})", ending, outliving);
     }
 
-    // The three calls that keep the other workers busy in the ShareCut ending, until released.
-    private sealed class Busy
+    /// <summary>
+    /// I-4 for a delivery that ends because every message has its outcome: host code whose call
+    /// opened its message, and that still holds a registration it made on its token, keeps nothing of
+    /// the delivery reachable either: not its message list, another message's bytes or its outcomes.
+    /// </summary>
+    [Fact]
+    public async Task Host_code_that_keeps_a_registration_on_its_token_after_its_call_ended_keeps_nothing_of_the_delivery_reachable()
     {
-        public HostCallLog Calls { get; } = new();
+        var time = new ManualTimeProvider();
+        var hostState = new HostState();
+        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
+        {
+            if (text.StartsWith("kept", StringComparison.Ordinal))
+                hostState.Registration = ct.Register(static () => { });
+            return Task.FromResult(UnpackFakes.Opened(text));
+        }, Budget, time);
 
-        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var refs = await OpenAndLetEndAsync(unpacker);
+        SpinWait.SpinUntil(() => time.ScheduledTimers == 0 && unpacker.Opening == 0 && unpacker.Reserved == 0, RealTime).Should().BeTrue("the delivery left nothing behind");
+        var kept = refs.Any(r => !BecomesUnreachable(r));
+
+        // The host code held its registration until here; the control runs without it.
+        hostState.Registration.Dispose();
+        hostState.Registration = default;
+        refs.Should().OnlyContain(r => BecomesUnreachable(r), "the control: the test holds nothing of the delivery");
+        kept.Should().BeFalse("once a delivery has ended, the token host code holds references nothing of it");
+    }
+
+    // A delivery of five that all open at once; only weak references leave this frame.
+    private static async Task<WeakReference[]> OpenAndLetEndAsync(DeliveredMessageUnpacker unpacker)
+    {
+        var (messages, other, _) = Start(unpacker);
+        var outcomes = await unpacker.UnpackAllAsync(new DeliveryScope(M1, Bob), messages, "request-1", default).WaitAsync(RealTime);
+        outcomes.Should().OnlyContain(o => o.Succeeded);
+        return new[] { new WeakReference(messages), new WeakReference(other), new WeakReference(outcomes), new WeakReference(outcomes[1].Unpacked) };
     }
 
     // A delivery of five: "kept-0", whose call outlives the delivery, and four that open at once. It
-    // ends the given way; only weak references leave this frame. For the ShareCut ending three of the
-    // others keep the other workers busy until released, so the fifth still waits for a worker when
-    // kept-0's share ends (A1: it is cut only while another message waits).
-    private static async Task<WeakReference[]> OpenAndEndAsync(DeliveredMessageUnpacker unpacker, ManualTimeProvider time, SemaphoreSlim entered, Ending ending, CancellationTokenSource shutdown, CancellationTokenSource caller, Busy busy)
+    // ends the given way; only weak references leave this frame.
+    private static async Task<WeakReference[]> OpenAndEndAsync(DeliveredMessageUnpacker unpacker, ManualTimeProvider time, SemaphoreSlim entered, Ending ending, CancellationTokenSource shutdown, CancellationTokenSource caller)
     {
-        var (messages, other, settled) = Start(unpacker, busyOthers: ending == Ending.ShareCut);
+        var (messages, other, settled) = Start(unpacker);
         var batch = unpacker.UnpackAllAsync(new DeliveryScope(M1, Bob), messages, "request-1", ending == Ending.Caller ? caller.Token : default);
         (await entered.WaitAsync(RealTime)).Should().BeTrue();
-        if (ending == Ending.ShareCut)
-            await busy.Calls.WaitForAsync(3, RealTime);
-        else
-            SpinWait.SpinUntil(() => unpacker.Settled == settled + 4, RealTime).Should().BeTrue("the four others opened");
+        SpinWait.SpinUntil(() => unpacker.Settled == settled + 4, RealTime).Should().BeTrue("the four others opened");
         var refs = new List<WeakReference> { new(messages), new(other) };
         switch (ending)
         {
-            case Ending.ShareCut:
-                time.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5)); // its share, half the budget, with the fifth still waiting
-                SpinWait.SpinUntil(() => unpacker.Settled == settled + 2, RealTime).Should().BeTrue("kept-0 was cut and the fifth opened");
-                busy.Release.TrySetResult();
-                break;
             case Ending.Budget:
                 time.Advance(Budget);
                 break;
@@ -558,25 +594,23 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static (DeliveredInput[] Messages, byte[] Other, long Settled) Start(DeliveredMessageUnpacker unpacker, bool busyOthers)
+    private static (DeliveredInput[] Messages, byte[] Other, long Settled) Start(DeliveredMessageUnpacker unpacker)
     {
-        var name = busyOthers ? "busy" : "honest";
-        var other = Encoding.UTF8.GetBytes(name + "-1");
+        var other = Encoding.UTF8.GetBytes("honest-1");
         var messages = new[]
         {
             new DeliveredInput("q-0", Encoding.UTF8.GetBytes("kept-0")),
             new DeliveredInput("q-1", other),
-            new DeliveredInput("q-2", Encoding.UTF8.GetBytes(name + "-2")),
-            new DeliveredInput("q-3", Encoding.UTF8.GetBytes(name + "-3")),
+            new DeliveredInput("q-2", Encoding.UTF8.GetBytes("honest-2")),
+            new DeliveredInput("q-3", Encoding.UTF8.GetBytes("honest-3")),
             new DeliveredInput("q-4", Encoding.UTF8.GetBytes("honest-4")),
         };
         return (messages, other, unpacker.Settled);
     }
 
-    // ---- I-3 (ADV4-3): no host code after its delivery or share ended --------------------------
+    // ---- I-3 (ADV4-3): no host code after its delivery ended ------------------------------------
 
     private static readonly AsyncLocal<string?> Marked = new(OnMarkedContextRestored);
-    private static readonly AsyncLocal<Action?> AtRestore = new();
     private static Action? _atNextRestore;
 
     // Runs when a thread switches to an execution context in which Marked is "target": for the
@@ -601,7 +635,7 @@ public sealed class UnpackSlotsQa2Tests
     /// <summary>When the delivery ends relative to the target's host work item.</summary>
     public enum Window
     {
-        /// <summary>While its worker creates its share, before the work item exists.</summary>
+        /// <summary>While its worker is starting it (it reads the clock for the start rule), before the work item exists.</summary>
         BeforeTheWorkItem,
 
         /// <summary>After the work item was queued and its task passed its own cancellation check, before the unpack runs.</summary>
@@ -609,11 +643,13 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     /// <summary>
-    /// I-3 (ADV4-3) for every way the target message's opening ends — the budget, the caller, the
-    /// shutdown, or its own share (the four others open at once) — in both windows: while its worker is creating its share, and on
-    /// the pool thread that runs its work item, after the task's own cancellation check and before
-    /// the unpack is called. In every case its host code never starts, it is not remembered as slow,
-    /// and its reservation comes back.
+    /// I-3 (ADV4-3) for every way the target message's delivery ends — the budget, the caller, the
+    /// shutdown — in both windows: while its worker is starting it, before its work item exists, and
+    /// on the pool thread that runs its work item, after the task's own cancellation check and before
+    /// the unpack is called. In every case its host code never starts, it is not remembered, and its
+    /// reservation comes back. The clock's readings count from zero, so that the start reading of a
+    /// call that never ran (never taken, so zero) is not below the budget's start: such a call is
+    /// not remembered because its code did not run.
     /// </summary>
     [Theory]
     [InlineData(Ending.Budget, Window.BeforeTheWorkItem)]
@@ -622,31 +658,18 @@ public sealed class UnpackSlotsQa2Tests
     [InlineData(Ending.Budget, Window.AfterTheWorkItemStarted)]
     [InlineData(Ending.Caller, Window.AfterTheWorkItemStarted)]
     [InlineData(Ending.Shutdown, Window.AfterTheWorkItemStarted)]
-    [InlineData(Ending.ShareCut, Window.AfterTheWorkItemStarted)]
-    public async Task No_host_code_starts_once_its_delivery_or_its_share_has_ended(Ending ending, Window window)
+    public async Task No_host_code_starts_once_its_delivery_has_ended(Ending ending, Window window)
     {
-        using var floor = new PoolFloor(parked: 1); // the share cut's forced order holds m-0's pool thread in its gate
-        var clock = new CountingTimeProvider(new ManualTimeProvider());
+        var clock = new CountingTimeProvider(new ManualTimeProvider(), readingsFromZero: true);
         using var shutdown = new CancellationTokenSource();
         using var caller = new CancellationTokenSource();
         var calls = new HostCallLog();
-        // For the share cut, m-1..m-3 keep their workers until the cut has happened, so m-4 still
-        // waits for a worker when m-0's share ends and m-0 is cut (A1). Without that hold, when the
-        // pool runs the others before m-0's work item, every message is taken by then, m-0 is
-        // extended to the budget's end (nothing waits), and the delivery never ends at its share.
-        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var held = 0;
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             using (calls.Enter(text, ct))
             {
                 if (text == "m-0")
                     await Task.Delay(Timeout.InfiniteTimeSpan, ct); // a lookup that honours its token
-                else if (ending == Ending.ShareCut && text is "m-1" or "m-2" or "m-3")
-                {
-                    Interlocked.Increment(ref held);
-                    await release.Task;
-                }
             }
             return UnpackFakes.Opened(text);
         }, Budget, clock, shutdown.Token);
@@ -667,9 +690,6 @@ public sealed class UnpackSlotsQa2Tests
                     case Ending.Shutdown:
                         shutdown.Cancel();
                         break;
-                    case Ending.ShareCut:
-                        clock.Inner.Advance(DeliveredMessageUnpacker.ShareOf(Budget, 5));
-                        break;
                 }
             }
             catch (Exception ex)
@@ -679,10 +699,14 @@ public sealed class UnpackSlotsQa2Tests
             Volatile.Write(ref ended, 1);
         }
 
-        // Timer 1 is the budget, timer 2 the share of m-0, the target.
-        clock.OnCreate = n =>
+        // The delivery's only timer is its budget. The first reading of the clock after it was
+        // created is made by the worker that has just taken m-0, the target, for the start rule:
+        // before it reserves and before its work item exists.
+        var atTheTargetsTake = 0;
+        clock.OnCreate = _ => Interlocked.CompareExchange(ref atTheTargetsTake, 1, 0);
+        clock.OnRead = () =>
         {
-            if (n != 2)
+            if (Interlocked.CompareExchange(ref atTheTargetsTake, 2, 1) != 1)
                 return;
             if (window == Window.BeforeTheWorkItem)
                 End();
@@ -690,18 +714,7 @@ public sealed class UnpackSlotsQa2Tests
                 Marked.Value = "target"; // flows into m-0's work item only
         };
         if (window == Window.AfterTheWorkItemStarted)
-        {
-            // For the share cut, the order that matters is forced: m-0's work item ends its share
-            // only once the others have gone as far as they can, as when the pool runs them first:
-            // m-1..m-3 parked on their hold, or (without the hold) m-4 already taken and started.
-            Volatile.Write(ref _atNextRestore, ending == Ending.ShareCut
-                ? () =>
-                {
-                    SpinWait.SpinUntil(() => Volatile.Read(ref held) == 3 || calls.Labels.Contains("m-4"), RealTime);
-                    End();
-                }
-                : End);
-        }
+            Volatile.Write(ref _atNextRestore, End);
         Task<IReadOnlyList<DeliveredOutcome>> batch;
         try
         {
@@ -712,31 +725,21 @@ public sealed class UnpackSlotsQa2Tests
         finally
         {
             clock.OnCreate = null;
+            clock.OnRead = null;
         }
 
         SpinWait.SpinUntil(() => Volatile.Read(ref ended) == 1, RealTime).Should().BeTrue("the ending ran in its window");
-        if (ending == Ending.ShareCut)
-            Volatile.Read(ref held).Should().Be(3, "the others had started, and were held, before the share was cut");
-        release.TrySetResult();
-        if (ending == Ending.ShareCut)
-        {
-            var outcomes = await batch.WaitAsync(RealTime);
-            outcomes[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("used up its share");
-            outcomes.Skip(1).Should().OnlyContain(o => o.Succeeded, "the delivery went on after the target's share ended");
-        }
+        await ((Task)batch).ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(RealTime);
+        if (ending == Ending.Budget)
+            (await batch)[0].Error.Should().BeOfType<TimeoutException>();
         else
-        {
-            await ((Task)batch).ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(RealTime);
-            if (ending == Ending.Budget)
-                (await batch)[0].Error.Should().BeOfType<TimeoutException>();
-            else
-                batch.IsCanceled.Should().BeTrue();
-        }
+            batch.IsCanceled.Should().BeTrue();
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0, RealTime).Should().BeTrue("every reservation came back");
 
         endError.Should().BeNull();
-        calls.Labels.Should().NotContain("m-0", "the target's host code never starts once its {0} has ended ({1})", ending, window);
-        unpacker.Memory.HeldBack(new DeliveryScope(M1, Bob), new[] { "q-0" }).Single().Should().BeFalse("a call that never ran is not remembered as slow");
+        Volatile.Read(ref atTheTargetsTake).Should().Be(2, "the window was reached at the target's take");
+        calls.Labels.Should().NotContain("m-0", "the target's host code never starts once its delivery has ended ({0}, {1})", ending, window);
+        unpacker.Memory.HeldBack(new DeliveryScope(M1, Bob), new[] { "q-0" }).Single().Should().BeFalse("a call that never ran is not remembered");
         Volatile.Read(ref _atNextRestore).Should().BeNull("the armed ending was used");
     }
 

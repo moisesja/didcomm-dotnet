@@ -78,15 +78,19 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
         loop.Elapsed.Should().BeLessThanOrEqualTo(budget * bound, "each learning fetch takes at most one budget, and the others take none");
         Math.Ceiling(loop.Elapsed / lease).Should().BeLessThanOrEqualTo(Math.Ceiling(budget * bound / lease), "in the mediator's lease periods");
         seam.Calls.Count(sender => sender is null).Should().Be(slow, "each message that never opens is opened once, then held back while its pause lasts");
-        loop.Items.Where(i => i.Error is not null).Should().OnlyContain(i => i.Error is TimeoutException, "a message that never opens fails at its share, or at once while it is held back");
+        loop.Items.Where(i => i.Error is not null).Should().OnlyContain(i => i.Error is TimeoutException, "a message that never opens fails when its delivery's budget ends, or at once while it is held back");
     }
 
     /// <summary>
     /// A3: Mallory sends sixteen messages whose sender lookups never end and ignore their token, then
     /// Alice (another sender) sends hers. Mallory's partition holds four host calls: they are the
-    /// only ones of hers that ever run, and her fifth and later messages fail at once as "unpack
-    /// capacity exhausted" for the partition, without host code. Alice's message is reached within
-    /// one of the mediator's leases. Once the lookups end, every reservation is given back.
+    /// only ones of hers that ever run, and her fifth and later messages fail without host code. In
+    /// the fetch that starts her first four, those four keep the four workers until the budget ends
+    /// (a message has no time limit of its own: #111, owner decision E), so the messages behind them
+    /// in that fetch are out of time before their turn; in the fetches after it, each of her
+    /// messages is refused at once as "unpack capacity exhausted" for the partition. Alice's message
+    /// is reached within one of the mediator's leases. Once the lookups end, every reservation is
+    /// given back.
     /// </summary>
     [Theory]
     [InlineData(4)]
@@ -116,7 +120,9 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
             loop.Elapsed.Should().BeLessThan(DefaultLease, "Alice's message is reached within one lease");
             seam.Calls.Count(sender => sender == mallory.Did).Should().Be(UnpackReservations.MaxPerSender, "only the partition's four host calls of Mallory's ever run");
             var refused = loop.Items.Where(i => i.Error?.Message.Contains("unpack capacity exhausted", StringComparison.Ordinal) == true).ToArray();
-            refused.Should().HaveCount(fromMallory - UnpackReservations.MaxPerSender, "her fifth and later messages are refused at once");
+            var notStarted = loop.Items.Where(i => i.Error?.Message.Contains("before its turn came", StringComparison.Ordinal) == true).ToArray();
+            notStarted.Should().HaveCount(limit - UnpackReservations.MaxPerSender, "in the first fetch her first four keep the four workers, and the rest of that fetch is out of time before its turn");
+            refused.Should().HaveCount(fromMallory - limit, "her messages in the fetches after it are refused at once");
             refused.Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("its sender in this mailbox", StringComparison.Ordinal), "for her partition, not for the container");
             harness.Channel.Unpacker.Reserved.Should().Be(UnpackReservations.MaxPerSender, "the four lookups still hold their reservations");
         }
