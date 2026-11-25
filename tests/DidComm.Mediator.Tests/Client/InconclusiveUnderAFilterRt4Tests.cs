@@ -10,14 +10,17 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// RT4 (#111): a fetch loop under a <c>recipientDid</c> filter, with messages queued in front that
 /// open for another of the host's DIDs. Such a message opens, so the memory forgets it; the filter
-/// turns it away, so it is not acknowledged; it is a failed item that is not inconclusive, and the
-/// documentation says that is not a reason to discard it (R-7: it is opened again each time it
-/// comes). What is checked: whether the message queued behind sixteen of them, which opens at once,
-/// is ever returned opened to a host that leaves them queued, and what
-/// <see cref="PickupItem.Inconclusive"/> says of it and of messages that never open queued between.
-/// The mediator delivers oldest first and leases for 60 s; the host's lookups honour their token and
-/// block no thread; the real unpacker and its memory run on the manual clock, and real time is only
-/// a hang guard.
+/// turns it away, so it is not acknowledged; left queued, it is opened again at every delivery
+/// under the filter and stays in front (R-7). The contract (the coordinator's call on the review's
+/// finding F5): a message the filter turned away is the host's to settle, by taking it with a
+/// fetch without the filter or by discarding it with <see cref="PickupClient.AckAsync"/>; it is not
+/// to be left queued. What is pinned here: what a host that leaves such messages queued gets (the
+/// message behind sixteen of them is never returned opened, and is inconclusive at every fetch),
+/// and that each way of settling them returns it: discarding them, fetching without the filter, and
+/// fetching under the filter while taking them with a fetch without it every so often. The mediator
+/// delivers oldest first and leases for 60 s; the host's lookups honour their token and block no
+/// thread; the real unpacker and its memory run on the manual clock, and real time is only a hang
+/// guard.
 /// </summary>
 public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
 {
@@ -39,38 +42,86 @@ public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
     /// <summary>What the host does with the failed items of a fetch.</summary>
     public enum Host
     {
-        /// <summary>It discards a failed item unless it is inconclusive or a filter turned it away (the documentation's example of an item not to discard).</summary>
+        /// <summary>It discards a failed item unless it is inconclusive or a filter turned it away: what the filter turned away it leaves queued, against the contract.</summary>
         LeavesWhatTheFilterTurnedAway,
 
-        /// <summary>It discards a failed item unless it is inconclusive.</summary>
+        /// <summary>It discards a failed item unless it is inconclusive, what the filter turned away included.</summary>
         DiscardsUnlessInconclusive,
+
+        /// <summary>
+        /// It fetches under the filter and discards as <see cref="LeavesWhatTheFilterTurnedAway"/>
+        /// does; once a given number of deliveries under the filter have handed it something the
+        /// filter turned away, its next fetch is without the filter, which returns those messages
+        /// opened.
+        /// </summary>
+        TakesWhatTheFilterTurnedAwayWithoutTheFilter,
     }
 
     /// <summary>
-    /// Reproduction (fails on ae71081): the host fetches under the filter and leaves queued what the
-    /// filter turned away. Expected: the message that opens at once is returned opened within the
-    /// horizon of two hours. Observed: in every fetch the sixteen in front are opened again and
-    /// turned away again, never remembered; the message behind them is handed over as inconclusive
-    /// ("before its turn came") every time and is never opened; and in the second row the sixteen
-    /// that never open are started later than the start allowance every time, so they are
-    /// inconclusive every time and never remembered either.
+    /// A pin of documented behaviour (the review's finding F5; the coordinator's call: closed by the
+    /// contract, no change to the client): the host fetches under the filter and leaves queued what
+    /// the filter turned away. In every fetch the sixteen in front are opened again and turned away
+    /// again, never remembered. The message behind them, which would open at once, is handed over as
+    /// inconclusive ("before its turn came") at every delivery and is not returned opened within the
+    /// two hours: 120 times in 240 fetches, with no host call for it. In the second row the sixteen
+    /// that never open, queued between, are started later than the start allowance every time: they
+    /// are inconclusive at every delivery (1920 times) and never remembered.
     /// </summary>
-    [Theory(Skip = "RT4: whether a host that fetches under a recipientDid filter and leaves queued what the filter turned away receives the message queued behind sixteen such messages; observed: it is inconclusive in every fetch and never opened, and messages that never open queued between are inconclusive every time and never remembered")]
-    [InlineData(InFront.SixteenThatOpenForAnotherDidLate)]
-    [InlineData(InFront.SixteenThatOpenForAnotherDidThenSixteenThatNeverOpen)]
-    public async Task Under_a_filter_a_host_that_leaves_what_the_filter_turned_away_queued_receives_the_message_behind_sixteen_such_messages(InFront inFront)
+    /// <remarks>
+    /// The review committed this as a reproduction that expected the message to be returned opened
+    /// (red on ae71081). Its limits, as the review states them: the host fetches under a filter and
+    /// never without one; the sender knows another DID whose keys the host holds; a delivery brings
+    /// more than sixteen messages.
+    /// </remarks>
+    [Theory]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidLate, 17, 0)]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidThenSixteenThatNeverOpen, 33, 1920)]
+    public async Task Under_a_filter_a_host_that_leaves_queued_what_the_filter_turned_away_does_not_receive_the_message_behind_sixteen_such_messages_which_is_inconclusive_at_every_fetch(InFront inFront, int stillQueued, int neverOpeningInconclusive)
     {
         var run = await RunAsync(inFront, Host.LeavesWhatTheFilterTurnedAway, filtered: true);
 
-        run.Opened.Should().BeTrue("the message opens at once when a worker takes it in time (fetches: {0}; handed over inconclusive {1} times, as: {2}; remembered at the end: {3}; never-opening messages handed over inconclusive {4} times and conclusive {5} times)",
-            run.Fetches, run.TimesInconclusive, run.HandedOverAs, run.Remembered, run.NeverOpeningInconclusive, run.NeverOpeningConclusive);
+        run.Opened.Should().BeFalse("left queued, the sixteen the filter turned away are opened again at every fetch and keep it from its turn");
+        run.Elapsed.Should().Be(Horizon);
+        run.Fetches.Should().Be(240, "two fetches per lease: one that brings the delivery, one that finds everything leased");
+        run.TimesInconclusive.Should().Be(120, "once per delivery");
+        run.HandedOverAs.Should().Be("inconclusive, before its turn came");
+        run.HostCallsForTheMessage.Should().Be(0);
+        run.Remembered.Should().Be(0, "a message that opens is forgotten, and nothing here had its whole budget");
+        run.NeverOpeningInconclusive.Should().Be(neverOpeningInconclusive, "started later than the start allowance at every delivery");
+        run.NeverOpeningConclusive.Should().Be(0);
+        run.Discarded.Should().Be(0);
+        run.TakenWithoutTheFilter.Should().Be(0);
+        run.StillQueued.Should().Be(stillQueued, "nothing was settled");
     }
 
     /// <summary>
-    /// Held: the same queues under the same filter, for a host that discards a failed item unless
-    /// it is inconclusive, what the filter turned away included: the message behind is returned
-    /// opened, after the simulated time given. (That host has then deleted sixteen messages that
-    /// opened for another of its DIDs.)
+    /// The contract's second way, done every so often: the host fetches under the filter, and once
+    /// the given number of deliveries have handed it something the filter turned away, its next
+    /// fetch is without the filter. That fetch returns the sixteen opened (they are the host's, for
+    /// another of its DIDs) and acknowledges them, and the message behind is returned opened after
+    /// the simulated time given: at the delivery after they are gone, or, in the second row, after
+    /// the sixteen that never open have had their whole budget once more and were discarded.
+    /// </summary>
+    [Theory]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidLate, 1, 120)]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidLate, 5, 360)]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidThenSixteenThatNeverOpen, 1, 180)]
+    [InlineData(InFront.SixteenThatOpenForAnotherDidThenSixteenThatNeverOpen, 5, 420)]
+    public async Task Under_a_filter_a_host_that_takes_what_the_filter_turned_away_with_a_fetch_without_the_filter_every_so_often_receives_the_message(InFront inFront, int afterDeliveries, int seconds)
+    {
+        var run = await RunAsync(inFront, Host.TakesWhatTheFilterTurnedAwayWithoutTheFilter, filtered: true, afterDeliveries);
+
+        run.Opened.Should().BeTrue("the sixteen were taken with a fetch without the filter (fetches: {0}; handed over as: {1})", run.Fetches, run.HandedOverAs);
+        run.TakenWithoutTheFilter.Should().Be(AtOnce, "the fetch without the filter returned each of the sixteen opened");
+        run.Elapsed.Should().Be(TimeSpan.FromSeconds(seconds));
+        run.StillQueued.Should().Be(0, "the sixteen were acknowledged when they were taken, and so was the message");
+    }
+
+    /// <summary>
+    /// The contract's first way: the same queues under the same filter, for a host that discards a
+    /// failed item unless it is inconclusive, what the filter turned away included. The message
+    /// behind is returned opened, after the simulated time given. (That host has then deleted
+    /// sixteen messages that opened for another of its DIDs.)
     /// </summary>
     [Theory]
     [InlineData(InFront.SixteenThatOpenForAnotherDidLate, 60)]
@@ -85,7 +136,7 @@ public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// Held: the same queues fetched without a filter, the remedy the documentation names. The
+    /// The contract's second way, done throughout: the same queues fetched without a filter. The
     /// sixteen in front open and are acknowledged, and the message behind is returned opened, after
     /// the simulated time given. In the second row the sixteen that never open are inconclusive once
     /// (started late, behind the sixteen that opened) and remembered at the delivery after.
@@ -106,9 +157,11 @@ public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
         }
     }
 
-    private sealed record Run(bool Opened, TimeSpan Elapsed, int Fetches, int TimesInconclusive, string HandedOverAs, int Remembered, int NeverOpeningInconclusive, int NeverOpeningConclusive, int Discarded);
+    private sealed record Run(bool Opened, TimeSpan Elapsed, int Fetches, int TimesInconclusive, string HandedOverAs, int Remembered, int NeverOpeningInconclusive, int NeverOpeningConclusive, int Discarded, int TakenWithoutTheFilter, int StillQueued, int HostCallsForTheMessage);
 
-    private async Task<Run> RunAsync(InFront inFront, Host host, bool filtered)
+    // `afterDeliveries`: for the host that takes what the filter turned away, how many deliveries
+    // under the filter hand it such an item before its next fetch is without the filter.
+    private async Task<Run> RunAsync(InFront inFront, Host host, bool filtered, int afterDeliveries = 1)
     {
         using var floor = new PoolFloor(parked: 2);
         var forAnother = inFront == InFront.SixteenThatOpenForAnotherDidLate
@@ -134,14 +187,25 @@ public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
         var filter = filtered ? FakePickupExchange.L : null;
         var start = exchange.Clock.TrueNow;
         var handed = new List<string>();
-        int fetches = 0, timesInconclusive = 0, neverInconclusive = 0, neverConclusive = 0, discarded = 0;
+        int fetches = 0, timesInconclusive = 0, neverInconclusive = 0, neverConclusive = 0, discarded = 0, taken = 0, deliveriesWithSomethingTurnedAway = 0;
         var opened = false;
         while (!opened && exchange.Clock.TrueNow - start < Horizon)
         {
             // The lookups of the delivery before have ended before the next one is opened.
             Qa1.LookupsEnded(exchange.Unpacker);
-            var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100, filter));
+            var withoutTheFilter = host == Host.TakesWhatTheFilterTurnedAwayWithoutTheFilter && deliveriesWithSomethingTurnedAway >= afterDeliveries;
+            var batch = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100, withoutTheFilter ? null : filter));
             fetches++;
+            if (batch.Items.Count > 0)
+            {
+                // A fetch without the filter that brought a delivery has taken them; one that found
+                // everything leased is made again when the lease has ended.
+                if (withoutTheFilter)
+                    deliveriesWithSomethingTurnedAway = 0;
+                else if (batch.Items.Any(i => i.Error is not null && i.Error.Message.Contains("for another of your DIDs")))
+                    deliveriesWithSomethingTurnedAway++;
+            }
+            taken += batch.Items.Count(i => i.Unpacked is not null && i.Id.StartsWith("other-", StringComparison.Ordinal));
             var discard = new List<string>();
             foreach (var item in batch.Items)
             {
@@ -181,8 +245,8 @@ public sealed class InconclusiveUnderAFilterRt4Tests(ITestOutputHelper output)
             }
         }
 
-        var run = new Run(opened, exchange.Clock.TrueNow - start, fetches, timesInconclusive, string.Join(" / ", handed), exchange.Unpacker.Memory.Count, neverInconclusive, neverConclusive, discarded);
-        output.WriteLine($"{inFront}, host {host}, filter {(filtered ? "on" : "off")}: returned opened: {run.Opened} after {run.Elapsed} simulated and {run.Fetches} fetches; handed over inconclusive {run.TimesInconclusive} times, as: {run.HandedOverAs}; host calls: {exchange.Host.Calls.Count} (for the message: {exchange.Host.Calls.Labels.Count(l => l == "honest")}); remembered at the end: {run.Remembered}; never-opening messages handed over inconclusive {run.NeverOpeningInconclusive} times, conclusive (not held back) {run.NeverOpeningConclusive} times; discarded by the host: {run.Discarded}; still queued: {mediator.Count}");
+        var run = new Run(opened, exchange.Clock.TrueNow - start, fetches, timesInconclusive, string.Join(" / ", handed), exchange.Unpacker.Memory.Count, neverInconclusive, neverConclusive, discarded, taken, mediator.Count, exchange.Host.Calls.Labels.Count(l => l == "honest"));
+        output.WriteLine($"{inFront}, host {host}{(host == Host.TakesWhatTheFilterTurnedAwayWithoutTheFilter ? $" after {afterDeliveries} deliveries" : string.Empty)}, filter {(filtered ? "on" : "off")}: returned opened: {run.Opened} after {run.Elapsed} simulated and {run.Fetches} fetches; taken with a fetch without the filter: {run.TakenWithoutTheFilter}; handed over inconclusive {run.TimesInconclusive} times, as: {run.HandedOverAs}; host calls: {exchange.Host.Calls.Count} (for the message: {exchange.Host.Calls.Labels.Count(l => l == "honest")}); remembered at the end: {run.Remembered}; never-opening messages handed over inconclusive {run.NeverOpeningInconclusive} times, conclusive (not held back) {run.NeverOpeningConclusive} times; discarded by the host: {run.Discarded}; still queued: {mediator.Count}");
         return run;
     }
 }
