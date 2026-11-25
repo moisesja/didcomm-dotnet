@@ -10,7 +10,7 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// Hosts that discard the failed items a live stream yields (<see cref="PickupClient.AckAsync"/>),
 /// through the stream itself (#111): the careful host, which discards a failed item unless its
-/// <see cref="PickupItem.NotAttempted"/> is true, and a host that discards every failed item. The
+/// <see cref="PickupItem.Inconclusive"/> is true, and a host that discards every failed item. The
 /// stream runs over a real unpacker and its memory on a simulated clock (<see cref="SimExchange"/>),
 /// against a mediator that leases what it delivers; the host handles each item before it asks for
 /// the next. Nothing sleeps, and real time is only a hang guard.
@@ -23,7 +23,7 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
     /// The careful host on a live stream with N messages that never open queued in front of one
     /// that does: the last message is yielded to it opened after the simulated time given. A drain
     /// round brings at most ten messages, fewer than are opened at once, so every message of a
-    /// round is started and no item is yielded as not attempted.
+    /// round is started with its budget and no item is yielded as inconclusive.
     /// </summary>
     [Theory]
     [InlineData(4, 20)]
@@ -31,7 +31,7 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
     [InlineData(17, 40)]
     [InlineData(99, 200)]
     [InlineData(300, 600)]
-    public async Task On_a_live_stream_a_host_that_discards_only_what_was_tried_receives_the_message_behind_N_that_never_open(int inFront, int seconds)
+    public async Task On_a_live_stream_a_host_that_discards_a_failed_item_unless_it_is_inconclusive_receives_the_message_behind_N_that_never_open(int inFront, int seconds)
     {
         LiveDeliveryStream.MaxPerDelivery.Should().BeLessThanOrEqualTo(DeliveredMessageUnpacker.FetchConcurrency);
         var exchange = new SimExchange();
@@ -40,15 +40,15 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
         for (var i = 0; i < inFront; i++)
             mediator.Enqueue($"never-{i}", $"stall:never-{i}");
         mediator.Enqueue("honest", "ok:honest");
-        await using var host = new HostedStream(exchange, Qa1Discard.WhatWasTried);
+        await using var host = new HostedStream(exchange, Qa1Discard.UnlessInconclusive);
 
         await host.RunAsync(() => host.Opened("honest") is not null, until: TimeSpan.FromHours(1));
 
-        output.WriteLine($"{inFront} in front: yielded opened at {(host.Opened("honest") is { } at ? at.ToString() : "never")} of {exchange.Clock.Now} simulated; {exchange.Loads.Count} deliveries opened, {exchange.HostCalls} host calls, {host.Items.Count(i => i.Item.NotAttempted)} items yielded as not attempted, {host.Discarded.Count} discarded; ended with {host.EndedWith?.GetType().Name ?? "nothing"}");
+        output.WriteLine($"{inFront} in front: yielded opened at {(host.Opened("honest") is { } at ? at.ToString() : "never")} of {exchange.Clock.Now} simulated; {exchange.Loads.Count} deliveries opened, {exchange.HostCalls} host calls, {host.Items.Count(i => i.Item.Inconclusive)} items yielded as inconclusive, {host.Discarded.Count} discarded; ended with {host.EndedWith?.GetType().Name ?? "nothing"}");
         host.EndedWith.Should().BeNull();
         host.Opened("honest").Should().Be(TimeSpan.FromSeconds(seconds));
-        host.Items.Should().NotContain(i => i.Item.NotAttempted, "every message of a drain round is started");
-        host.Discarded.Should().HaveCount(inFront, "each message in front was tried once, yielded as a failure and discarded");
+        host.Items.Should().NotContain(i => i.Item.Inconclusive, "every message of a drain round is started with its budget");
+        host.Discarded.Should().HaveCount(inFront, "each message in front had the whole budget once, was yielded as a conclusive failure and discarded");
         exchange.HostCalls.Should().Be(inFront + 1, "each message was handed to host code once");
     }
 
@@ -56,13 +56,13 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
     /// Messages refused for capacity, on a live stream: two messages that would open are queued
     /// while the mailbox's bound for messages naming no sender is held (as sixteen lookups of earlier
     /// deliveries that have not ended hold it; the test takes those reservations itself). In each
-    /// cycle while it is held the stream yields both as failed items that were not attempted, once
+    /// cycle while it is held the stream yields both as failed items that are inconclusive, once
     /// per cycle, and calls no host code for them. The careful host leaves them queued, and the
     /// first cycle after the bound is free yields both opened. A host that discards every failed
     /// item deleted them in the first cycle, and never receives them.
     /// </summary>
     [Theory]
-    [InlineData(Qa1Discard.WhatWasTried, true)]
+    [InlineData(Qa1Discard.UnlessInconclusive, true)]
     [InlineData(Qa1Discard.EveryFailure, false)]
     public async Task On_a_live_stream_messages_refused_for_capacity_are_not_attempted_until_it_is_free_and_only_a_host_that_left_them_queued_receives_them(Qa1Discard discard, bool received)
     {
@@ -79,13 +79,13 @@ public sealed class LiveStreamDiscardingHostTests(ITestOutputHelper output)
         await using var host = new HostedStream(exchange, discard);
         var cyclesWhileHeld = received ? 2 : 1;
 
-        // While the bound is held: each cycle yields the two as not attempted (the host that
+        // While the bound is held: each cycle yields the two as inconclusive (the host that
         // discards every failure gets them once: its discard removes them).
         await host.RunAsync(() => host.Items.Count == 2 * cyclesWhileHeld, until: TimeSpan.FromMinutes(10));
 
         host.Items.Should().HaveCount(2 * cyclesWhileHeld);
         host.Items.Select(i => i.Item.Id).Should().Equal(Enumerable.Repeat(new[] { "m-1", "m-2" }, cyclesWhileHeld).SelectMany(ids => ids));
-        host.Items.Should().OnlyContain(i => i.Item.NotAttempted && i.Item.Error is TimeoutException && i.Item.Error.Message.Contains("capacity exhausted"));
+        host.Items.Should().OnlyContain(i => i.Item.Inconclusive && i.Item.Error is TimeoutException && i.Item.Error.Message.Contains("capacity exhausted"));
         host.Items.Select(i => i.At).Should().Equal(Enumerable.Range(0, cyclesWhileHeld).SelectMany(cycle => new[] { Lease * cycle, Lease * cycle }), "they are yielded once per cycle, a poll interval apart");
         exchange.HostCalls.Should().Be(0, "a refused message's host code does not start");
         mediator.Queued.Should().Equal(received ? new[] { "m-1", "m-2" } : Array.Empty<string>(), "only the host that left them queued still has them");

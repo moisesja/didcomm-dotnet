@@ -313,7 +313,7 @@ public sealed class SlowSenderFetchQa1Tests
     /// memory keeps (Q = 256), the memory cannot hold them all paused at once, and a fetch loop alone
     /// does not reach the message behind, even well past the bound for Q in front. The careful host,
     /// which discards the failures it is handed (<see cref="PickupClient.AckAsync"/>) except those
-    /// whose <see cref="PickupItem.NotAttempted"/> is true, reaches it.
+    /// whose <see cref="PickupItem.Inconclusive"/> is true, reaches it.
     /// </summary>
     [Theory]
     [InlineData(4, 270, 60)]
@@ -334,9 +334,9 @@ public sealed class SlowSenderFetchQa1Tests
 
         var (discarding, discardingMediator) = Setup(label => label == "honest" ? Qa1Step.Open : Qa1Step.Stall, lease);
         Queue(discardingMediator, junk: n, honestAt: n);
-        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discard: Qa1Discard.WhatWasTried);
+        var reach = await ReachAsync(discarding, discardingMediator, limit, cap: horizon, discard: Qa1Discard.UnlessInconclusive);
 
-        reach.Found.Should().BeTrue("discarding the failures it is handed that were tried empties the queue in front");
+        reach.Found.Should().BeTrue("discarding the failures it is handed that are not inconclusive empties the queue in front");
         discardingMediator.Holds("honest").Should().BeFalse("the honest message was acknowledged");
     }
 

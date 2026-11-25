@@ -547,6 +547,7 @@ public sealed class SlowMemoryFetchQa1Tests
         exchange.Clock.Throws = false;
 
         batch.Items.Should().HaveCount(slow + 1).And.OnlyContain(i => i.Error != null);
+        batch.Items.Should().OnlyContain(i => i.Inconclusive, "nothing was counted against any of them: the clock threw where each failure would have been struck, and the last one's turn did not come");
         batch.Items.Single(i => i.Id == "honest").Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("before its turn came");
         exchange.Host.Calls.Labels.Should().NotContain("honest", "it waited for a worker, and none came back from a failed reading");
         exchange.Unpacker.Memory.Count.Should().Be(0);

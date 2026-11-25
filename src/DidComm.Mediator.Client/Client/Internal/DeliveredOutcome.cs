@@ -10,13 +10,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// </summary>
 internal sealed class DeliveredOutcome
 {
-    private DeliveredOutcome(UnpackResult? unpacked, int layersOpened, UInt128 dedupeKey, Exception? error, bool notAttempted)
+    private DeliveredOutcome(UnpackResult? unpacked, int layersOpened, UInt128 dedupeKey, Exception? error, bool inconclusive)
     {
         Unpacked = unpacked;
         LayersOpened = layersOpened;
         DedupeKey = dedupeKey;
         Error = error;
-        NotAttempted = notAttempted;
+        Inconclusive = inconclusive;
     }
 
     /// <summary>The innermost unpack result (every re-wrap layer opened); <c>null</c> on failure.</summary>
@@ -32,13 +32,18 @@ internal sealed class DeliveredOutcome
     internal Exception? Error { get; }
 
     /// <summary>
-    /// Whether no attempt was made to open the message in this delivery, so that nothing was learned
-    /// about it (<see cref="PickupItem.NotAttempted"/>, which the fetch path and the live stream copy
-    /// from here). The unpacker sets it in two cases only: the delivery's budget ran out before the
-    /// message's turn came (its host call was never created), and the message was refused for
-    /// capacity. <c>false</c> on success and for every other failure.
+    /// Whether the message did not open and this delivery was not counted against it
+    /// (<see cref="PickupItem.Inconclusive"/>, which the fetch path and the live stream copy from
+    /// here). It says what the memory says: the unpacker sets it for a failed message exactly when it
+    /// neither struck the message in this delivery nor held it back, and the message is not
+    /// malformed. That is: the budget ran out before its turn came (no host call was created, the
+    /// start rule turned it away, or its call's code had not started); it was refused for capacity;
+    /// its code started later than the start allowance and was still running when the budget ended;
+    /// or the host's clock failed where the strike was decided or made. <c>false</c> on success, for
+    /// a failure of its own (S1), for a message that had the whole budget (S2), for a held-back one
+    /// and for a malformed one.
     /// </summary>
-    internal bool NotAttempted { get; }
+    internal bool Inconclusive { get; }
 
     /// <summary>Whether the message unpacked.</summary>
     internal bool Succeeded => Unpacked is not null;
@@ -50,15 +55,15 @@ internal sealed class DeliveredOutcome
     internal static DeliveredOutcome Success(UnpackResult unpacked, int layersOpened, UInt128 dedupeKey)
     {
         ArgumentNullException.ThrowIfNull(unpacked);
-        return new DeliveredOutcome(unpacked, layersOpened, dedupeKey, error: null, notAttempted: false);
+        return new DeliveredOutcome(unpacked, layersOpened, dedupeKey, error: null, inconclusive: false);
     }
 
     /// <summary>A message that did not unpack.</summary>
     /// <param name="error">Why.</param>
-    /// <param name="notAttempted">Whether no attempt was made to open it in this delivery (<see cref="NotAttempted"/>); <c>false</c> for a message that was tried, or that failed when it was tried before.</param>
-    internal static DeliveredOutcome Failure(Exception error, bool notAttempted = false)
+    /// <param name="inconclusive">Whether this delivery was not counted against the message (<see cref="Inconclusive"/>); <c>false</c> for a message that was struck in this delivery, that is held back, or that is malformed.</param>
+    internal static DeliveredOutcome Failure(Exception error, bool inconclusive = false)
     {
         ArgumentNullException.ThrowIfNull(error);
-        return new DeliveredOutcome(unpacked: null, layersOpened: 0, dedupeKey: default, error, notAttempted);
+        return new DeliveredOutcome(unpacked: null, layersOpened: 0, dedupeKey: default, error, inconclusive);
     }
 }
