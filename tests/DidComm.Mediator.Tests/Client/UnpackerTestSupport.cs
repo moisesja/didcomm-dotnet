@@ -186,13 +186,50 @@ internal sealed class HostCallLog
 /// counted <see cref="DidComm.TestSupport.ThreadPoolFloor"/>: put back when the last holder is done,
 /// and never undoing a raise made by another test meanwhile.
 /// </summary>
+/// <remarks>
+/// The floor asked for covers what every test holding a <see cref="PoolFloor"/> parks at that
+/// moment, not only this one. Test classes run side by side, and the counted floor keeps the highest
+/// request, it does not add them up: two tests that each park as many threads as the container's
+/// bound (256), each asking only for its own, leave the second waiting for threads the pool adds
+/// seconds apart, and every test beside them with it.
+/// </remarks>
 internal sealed class PoolFloor : IDisposable
 {
+    private static readonly object Gate = new();
+    private static int _parkedNow; // by every PoolFloor not yet disposed
+    private readonly int _parked;
     private readonly IDisposable _raise;
+    private int _disposed;
 
-    public PoolFloor(int parked) => _raise = DidComm.TestSupport.ThreadPoolFloor.Raise(Environment.ProcessorCount + parked + 8);
+    public PoolFloor(int parked)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(parked);
+        _parked = parked;
+        lock (Gate)
+        {
+            _parkedNow += parked;
+            _raise = DidComm.TestSupport.ThreadPoolFloor.Raise(Environment.ProcessorCount + _parkedNow + 8);
+        }
+    }
 
-    public void Dispose() => _raise.Dispose();
+    /// <summary>How many pool threads the tests holding a <see cref="PoolFloor"/> park now.</summary>
+    internal static int ParkedNow
+    {
+        get
+        {
+            lock (Gate)
+                return _parkedNow;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        lock (Gate)
+            _parkedNow -= _parked;
+        _raise.Dispose();
+    }
 }
 
 /// <summary>

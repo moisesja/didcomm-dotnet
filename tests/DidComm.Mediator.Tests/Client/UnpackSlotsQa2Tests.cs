@@ -24,7 +24,12 @@ public sealed class UnpackSlotsQa2Tests
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan Unreachable = TimeSpan.FromSeconds(3);
     private const int C = UnpackReservations.MaxReserved;
-    private const int Four = DeliveredMessageUnpacker.FetchConcurrency;
+
+    // As many messages of one delivery as are opened at the same time, a named sender's bound and
+    // the bound of a mailbox's messages without a named sender (sixteen each: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+    private const int PerSender = UnpackReservations.MaxPerSender;
+    private const int PerAnonymous = UnpackReservations.MaxPerAnonymous;
     private const string M1 = FakePickupExchange.M;
     private const string M2 = "did:example:other-mediator";
     private const string Bob = FakePickupExchange.L;
@@ -52,29 +57,34 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     /// <summary>
-    /// I-1, I-2 (ADV3-2 with 8, 16, C/4 and C/4 + 1 deliveries of four, opened at the same moment
-    /// from as many threads): every host call ignores its token and never ends. However the deliveries are spread
-    /// over mailboxes, mediators and senders, exactly the bound of the partitions they fall in is
-    /// reserved, never more than C; every other message is refused at once, for the bound that is
-    /// full, and never starts. Once the calls end, every reservation is given back.
+    /// I-1, I-2 (ADV3-2 with 4, 8, C/16 and C/16 + 1 deliveries of sixteen, as many messages as
+    /// are opened at once, opened at the same moment from as many threads): every host call ignores
+    /// its token and never ends. However the deliveries are spread over mailboxes, mediators and
+    /// senders, exactly the bound of the partitions they fall in is reserved, never more than C;
+    /// every other message is refused at once, for the bound that is full, and never starts. Once
+    /// the calls end, every reservation is given back.
     /// </summary>
     [Theory]
-    [InlineData(8, Layout.OwnMailboxEach, 32, 0, 0)]
-    [InlineData(16, Layout.OwnMailboxEach, 64, 0, 0)]
-    [InlineData(C / Four, Layout.OwnMailboxEach, C, 0, 0)]
-    [InlineData(C / Four + 1, Layout.OwnMailboxEach, C, 0, Four)]
-    [InlineData(C / Four, Layout.OwnMediatorEach, C, 0, 0)]
-    [InlineData(C / Four + 1, Layout.OwnMediatorEach, C, 0, Four)]
-    [InlineData(8, Layout.OneMailboxAnonymous, 16, 16, 0)]
-    [InlineData(16, Layout.OneMailboxAnonymous, 16, 48, 0)]
-    [InlineData(8, Layout.OneMailboxOneSender, 4, 28, 0)]
-    [InlineData(16, Layout.OneMailboxOneSender, 4, 60, 0)]
-    [InlineData(8, Layout.OneMailboxSenderEach, 32, 0, 0)]
-    [InlineData(16, Layout.OneMailboxSenderEach, 64, 0, 0)]
-    [InlineData(C / Four, Layout.OneMailboxSenderEach, C, 0, 0)]
-    [InlineData(C / Four + 1, Layout.OneMailboxSenderEach, C, 0, Four)]
+    [InlineData(4, Layout.OwnMailboxEach, 4 * AtOnce, 0, 0)]
+    [InlineData(8, Layout.OwnMailboxEach, 8 * AtOnce, 0, 0)]
+    [InlineData(C / AtOnce, Layout.OwnMailboxEach, C, 0, 0)]
+    [InlineData(C / AtOnce + 1, Layout.OwnMailboxEach, C, 0, AtOnce)]
+    [InlineData(C / AtOnce, Layout.OwnMediatorEach, C, 0, 0)]
+    [InlineData(C / AtOnce + 1, Layout.OwnMediatorEach, C, 0, AtOnce)]
+    [InlineData(4, Layout.OneMailboxAnonymous, PerAnonymous, 4 * AtOnce - PerAnonymous, 0)]
+    [InlineData(8, Layout.OneMailboxAnonymous, PerAnonymous, 8 * AtOnce - PerAnonymous, 0)]
+    [InlineData(4, Layout.OneMailboxOneSender, PerSender, 4 * AtOnce - PerSender, 0)]
+    [InlineData(8, Layout.OneMailboxOneSender, PerSender, 8 * AtOnce - PerSender, 0)]
+    [InlineData(4, Layout.OneMailboxSenderEach, 4 * AtOnce, 0, 0)]
+    [InlineData(8, Layout.OneMailboxSenderEach, 8 * AtOnce, 0, 0)]
+    [InlineData(C / AtOnce, Layout.OneMailboxSenderEach, C, 0, 0)]
+    [InlineData(C / AtOnce + 1, Layout.OneMailboxSenderEach, C, 0, AtOnce)]
     public async Task Deliveries_opened_together_reserve_exactly_the_bounds_of_their_partitions(int deliveries, Layout layout, int reserved, int partitionRefusals, int containerRefusals)
     {
+        // A delivery of sixteen from one sender, or of sixteen without a named sender, fits its
+        // partition's bound exactly: the rows above count on it.
+        PerSender.Should().Be(AtOnce);
+        PerAnonymous.Should().Be(AtOnce);
         var time = new ManualTimeProvider();
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = new HostCallLog();
@@ -129,7 +139,7 @@ public sealed class UnpackSlotsQa2Tests
             Layout.OwnMediatorEach => new DeliveryScope($"did:example:mediator-{d}", Bob),
             _ => new DeliveryScope(M1, Bob),
         };
-        var messages = Enumerable.Range(0, Four).Select(i =>
+        var messages = Enumerable.Range(0, AtOnce).Select(i =>
         {
             var label = $"m-{d}-{i}";
             var packed = layout switch
@@ -146,12 +156,13 @@ public sealed class UnpackSlotsQa2Tests
     // ---- ADV2-2: a resolver that ignores cancellation, across mailboxes and mediators -------------
 
     /// <summary>
-    /// I-2 (ADV2-2) across mailboxes and mediators: Mallory's four lookups that ignore their tokens
-    /// fill her partition in (M1, Bob) only. Her fifth message there is refused — whatever DID URL of
-    /// hers it names, since they all resolve her DID — while her messages to Carol's mailbox and
-    /// through another mediator open, and so do Alice's and an anonymous message in Bob's mailbox.
-    /// Then sixteen anonymous lookups fill Bob's anonymous partition at M1 only: an anonymous message
-    /// for Bob through another mediator, or for Carol, still opens.
+    /// I-2 (ADV2-2) across mailboxes and mediators: Mallory's sixteen lookups that ignore their
+    /// tokens (her bound) fill her partition in (M1, Bob) only. Her seventeenth message there is
+    /// refused — whatever DID URL of hers it names, since they all resolve her DID — while her
+    /// messages to Carol's mailbox and through another mediator open, and so do Alice's and an
+    /// anonymous message in Bob's mailbox. Then sixteen anonymous lookups fill Bob's anonymous
+    /// partition at M1 only: an anonymous message for Bob through another mediator, or for Carol,
+    /// still opens.
     /// </summary>
     [Fact]
     public async Task One_sender_fills_only_its_own_partition_and_the_anonymous_partition_is_per_mediator_and_mailbox()
@@ -160,8 +171,8 @@ public sealed class UnpackSlotsQa2Tests
         var bobAtM1 = new DeliveryScope(M1, Bob);
         try
         {
-            await FillAsync(unpacker, time, calls, bobAtM1, Enumerable.Range(0, 4).Select(i => Junk(TestJwe.Authcrypt("did:example:mallory#key-1", $"junk-m-{i}"))).ToArray());
-            unpacker.Reserved.Should().Be(4);
+            await FillAsync(unpacker, time, calls, bobAtM1, Enumerable.Range(0, PerSender).Select(i => Junk(TestJwe.Authcrypt("did:example:mallory#key-1", $"junk-m-{i}"))).ToArray());
+            unpacker.Reserved.Should().Be(PerSender);
 
             var refused = await Open(unpacker, bobAtM1,
                 TestJwe.Authcrypt("did:example:mallory#key-2", "mallory-other-fragment"),
@@ -174,8 +185,8 @@ public sealed class UnpackSlotsQa2Tests
             (await Open(unpacker, new DeliveryScope(M2, Bob), TestJwe.Authcrypt("did:example:mallory#key-1", "mallory-via-m2"))).Single().Succeeded.Should().BeTrue("another mediator's partitions are its own");
             (await Open(unpacker, bobAtM1, TestJwe.Authcrypt("did:example:alice#key-1", "alice"), TestJwe.Anoncrypt("anonymous"))).Should().OnlyContain(o => o.Succeeded, "another sender and the anonymous partition are not full");
 
-            await FillAsync(unpacker, time, calls, bobAtM1, Enumerable.Range(0, 16).Select(i => Junk(TestJwe.Anoncrypt($"junk-a-{i}"))).ToArray());
-            unpacker.Reserved.Should().Be(20);
+            await FillAsync(unpacker, time, calls, bobAtM1, Enumerable.Range(0, PerAnonymous).Select(i => Junk(TestJwe.Anoncrypt($"junk-a-{i}"))).ToArray());
+            unpacker.Reserved.Should().Be(PerSender + PerAnonymous);
 
             (await Open(unpacker, bobAtM1, TestJwe.Anoncrypt("anonymous-2"), TestJwe.EcdhEsWithSkid("did:example:alice#key-1", "es-with-skid"), TestJwe.AuthcryptApuOnly("did:example:alice#key-1", "apu-only")))
                 .Should().OnlyContain(o => IsRefusal(o, "for its sender"), "anoncrypt, ECDH-ES with a skid and apu-only all share Bob's anonymous partition at M1");
@@ -184,7 +195,7 @@ public sealed class UnpackSlotsQa2Tests
             (await Open(unpacker, bobAtM1, TestJwe.Authcrypt("did:example:alice#key-1", "alice-2"))).Single().Succeeded.Should().BeTrue("a named sender is not in the anonymous partition");
 
             calls.Labels.Should().NotContain(new[] { "mallory-other-fragment", "mallory-query", "mallory-path", "mallory-bare", "anonymous-2", "es-with-skid", "apu-only" }, "a refused message never starts");
-            unpacker.Reserved.Should().Be(20, "the stalled lookups keep their reservations, and nothing else holds one");
+            unpacker.Reserved.Should().Be(PerSender + PerAnonymous, "the stalled lookups keep their reservations, and nothing else holds one");
         }
         finally
         {
@@ -195,17 +206,18 @@ public sealed class UnpackSlotsQa2Tests
     }
 
     /// <summary>
-    /// R-1 (the residual, pinned): C/4 + 1, C/4 + 4 and C/2 named senders, each with four lookups that ignore
-    /// their tokens, opened at the same moment in one mailbox. Exactly C calls are reserved, never
-    /// more; the rest are refused for the container. While those calls run, every partition is
-    /// refused at once — a new sender, the anonymous partition, another mailbox, another mediator —
-    /// with no host call. When one sender's four calls end, four messages of anyone open again; when
-    /// all end, nothing is reserved.
+    /// R-1 (the residual, pinned): C/16 + 1, C/16 + 4 and C/8 named senders (one, four and sixteen
+    /// more than fill the container), each with sixteen lookups that ignore their tokens, opened at
+    /// the same moment in one mailbox. Exactly C calls are reserved, never more; the rest are
+    /// refused for the container. While those calls run, every partition is refused at once — a new
+    /// sender, the anonymous partition, another mailbox, another mediator — with no host call. When
+    /// one sender's calls end, as many messages of anyone open again; when all end, nothing is
+    /// reserved.
     /// </summary>
     [Theory]
-    [InlineData(C / Four + 1)]
-    [InlineData(C / Four + 4)]
-    [InlineData(C / 2)]
+    [InlineData(C / AtOnce + 1)]
+    [InlineData(C / AtOnce + 4)]
+    [InlineData(2 * C / AtOnce)]
     public async Task Named_senders_enough_to_fill_the_container_hold_exactly_C_and_then_every_partition_is_refused_at_once(int senders)
     {
         var time = new ManualTimeProvider();
@@ -224,13 +236,14 @@ public sealed class UnpackSlotsQa2Tests
             var batches = new Task<IReadOnlyList<DeliveredOutcome>>[senders];
             Parallel.For(0, senders, new ParallelOptions { MaxDegreeOfParallelism = senders }, s =>
                 batches[s] = unpacker.UnpackAllAsync(bob,
-                    Enumerable.Range(0, Four).Select(i => Junk(TestJwe.Authcrypt($"did:example:sender-{s}#key-1", $"sender-{s}-{i}"))).ToArray(),
+                    Enumerable.Range(0, AtOnce).Select(i => Junk(TestJwe.Authcrypt($"did:example:sender-{s}#key-1", $"sender-{s}-{i}"))).ToArray(),
                     $"request-{s}", default));
             unpacker.Reserved.Should().Be(C, "exactly C calls are reserved, never more");
             await calls.WaitForAsync(C, RealTime);
             time.Advance(Budget);
             var outcomes = (await Task.WhenAll(batches).WaitAsync(RealTime)).SelectMany(o => o).ToArray();
-            outcomes.Count(o => IsRefusal(o, "all mailboxes together")).Should().Be(senders * Four - C);
+            outcomes.Count(o => IsRefusal(o, "all mailboxes together")).Should().Be(senders * AtOnce - C);
+            outcomes.Should().NotContain(o => IsRefusal(o, "for its sender"), "no sender has more messages than its bound");
             calls.Count.Should().Be(C);
 
             var everyPartition = new (DeliveryScope Scope, string Packed)[]
@@ -249,15 +262,22 @@ public sealed class UnpackSlotsQa2Tests
             calls.Count.Should().Be(C, "no refused message started");
             unpacker.Reserved.Should().Be(C);
 
-            // One sender's lookups end (as many as started for it, one to four): that many reservations
-            // come back, and that many messages of anyone open.
+            // One sender's lookups end (as many as started for it, one to sixteen): that many
+            // reservations come back, and that many messages of anyone open.
             var first = calls.Labels.First();
             var sender = first[..first.LastIndexOf('-')];
             var released = calls.Labels.Count(l => l.StartsWith(sender + "-", StringComparison.Ordinal));
+            released.Should().BeInRange(1, AtOnce);
             LookupOf(sender).TrySetResult(UnpackFakes.Opened("late"));
             SpinWait.SpinUntil(() => unpacker.Reserved == C - released, RealTime).Should().BeTrue("{0} reservations came back", released);
-            var anyone = new[] { TestJwe.Anoncrypt("after-1"), TestJwe.Authcrypt("did:example:newcomer#key-1", "after-2"), TestJwe.Anoncrypt("after-3"), TestJwe.Authcrypt("did:example:alice#key-1", "after-4") };
-            (await Open(unpacker, bob, anyone.Take(released).ToArray())).Should().OnlyContain(o => o.Succeeded);
+            var anyone = Enumerable.Range(0, released).Select(i => (i % 4) switch
+            {
+                0 => TestJwe.Anoncrypt($"after-{i}"),
+                1 => TestJwe.Authcrypt("did:example:newcomer#key-1", $"after-{i}"),
+                2 => TestJwe.Authcrypt("did:example:alice#key-1", $"after-{i}"),
+                _ => TestJwe.Authcrypt($"did:example:other-{i}#key-1", $"after-{i}"),
+            }).ToArray();
+            (await Open(unpacker, bob, anyone)).Should().HaveCount(released).And.OnlyContain(o => o.Succeeded);
         }
         finally
         {
@@ -347,7 +367,9 @@ public sealed class UnpackSlotsQa2Tests
                 var batches = new List<Task<IReadOnlyList<DeliveredOutcome>>>();
                 for (var d = 0; d < 8; d++)
                 {
-                    var messages = Enumerable.Range(0, random.Next(1, 11)).Select(_ =>
+                    // Up to two and a half times as many messages as are opened at once, so in the
+                    // larger deliveries messages wait for a worker and are taken once one is free.
+                    var messages = Enumerable.Range(0, random.Next(1, 5 * AtOnce / 2 + 1)).Select(_ =>
                     {
                         var label = $"{kinds[random.Next(kinds.Length)]}-{random.Next(1_000_000)}"; // new ids: nothing is held back
                         var sender = senders[random.Next(senders.Length)];
@@ -413,7 +435,7 @@ public sealed class UnpackSlotsQa2Tests
         reservations.Partitions.Should().Be(0);
         Volatile.Read(ref min).Should().BeGreaterThanOrEqualTo(0, "a reservation is never given back twice");
         Volatile.Read(ref max).Should().BeLessThanOrEqualTo(C);
-        Volatile.Read(ref max).Should().BeGreaterThan(Four, "the run held many calls at once");
+        Volatile.Read(ref max).Should().BeGreaterThan(AtOnce, "the run held many calls at once");
         deliveries.Should().Be(2000);
         ended.Should().OnlyContain(e => e.Value > 0, "every way a call ends happened: {0}", string.Join(", ", ended.Select(e => $"{e.Key} {e.Value}")));
     }
@@ -747,8 +769,9 @@ public sealed class UnpackSlotsQa2Tests
     /// R-2 and D-13, pinned: messages that name a sender only in <c>apu</c> count against the
     /// mailbox's anonymous partition, not that sender's, although Core resolves that sender for them
     /// (<see cref="SenderPartitionCoreQa2Tests"/>). So with lookups that ignore their tokens, Sam's
-    /// own partition holds four of them and the anonymous partition sixteen more: twenty lookups of
-    /// Sam's DID run at once in one mailbox, and the twenty-first message naming Sam is refused.
+    /// own partition holds sixteen of them and the anonymous partition sixteen more: thirty-two
+    /// lookups of Sam's DID run at once in one mailbox, and the thirty-third message naming Sam is
+    /// refused, in whichever of the two partitions it counts.
     /// </summary>
     [Fact]
     public async Task Lookups_of_one_senders_DID_can_run_in_its_partition_and_the_anonymous_one_at_once()
@@ -757,13 +780,14 @@ public sealed class UnpackSlotsQa2Tests
         var bob = new DeliveryScope(M1, Bob);
         try
         {
-            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, 4).Select(i => Junk(TestJwe.Authcrypt("did:example:sam#key-1", $"junk-skid-{i}"))).ToArray());
-            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, 16).Select(i => Junk(TestJwe.AuthcryptApuOnly("did:example:sam#key-1", $"junk-apu-{i}"))).ToArray());
+            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, PerSender).Select(i => Junk(TestJwe.Authcrypt("did:example:sam#key-1", $"junk-skid-{i}"))).ToArray());
+            await FillAsync(unpacker, time, calls, bob, Enumerable.Range(0, PerAnonymous).Select(i => Junk(TestJwe.AuthcryptApuOnly("did:example:sam#key-1", $"junk-apu-{i}"))).ToArray());
 
-            unpacker.Reserved.Should().Be(20, "four in Sam's partition and sixteen in the anonymous one, all naming Sam");
-            calls.Count.Should().Be(20);
-            (await Open(unpacker, bob, TestJwe.Authcrypt("did:example:sam#key-1", "junk-skid-4"), TestJwe.AuthcryptApuOnly("did:example:sam#key-1", "junk-apu-16")))
+            unpacker.Reserved.Should().Be(PerSender + PerAnonymous, "sixteen in Sam's partition and sixteen in the anonymous one, all naming Sam");
+            calls.Count.Should().Be(PerSender + PerAnonymous);
+            (await Open(unpacker, bob, TestJwe.Authcrypt("did:example:sam#key-1", "junk-skid-refused"), TestJwe.AuthcryptApuOnly("did:example:sam#key-1", "junk-apu-refused")))
                 .Should().OnlyContain(o => IsRefusal(o, "for its sender"), "both partitions are full");
+            calls.Labels.Should().NotContain(new[] { "junk-skid-refused", "junk-apu-refused" }, "a refused message never starts");
         }
         finally
         {
@@ -820,7 +844,9 @@ public sealed class UnpackSlotsQa2Tests
                         return new DeliveredInput(label, TestJwe.Bytes(sender is null ? TestJwe.Anoncrypt(label) : TestJwe.Authcrypt(sender, label)));
                     }).ToArray(),
                     $"request-{d}", default));
-            // Per mailbox (eight deliveries): 4 senders × 4 + 16 anonymous = 32; ten mailboxes could take 320, C caps them at 256.
+            // Per mailbox (eight deliveries of ten): sixteen messages of each of four senders and
+            // sixteen anonymous, each within its bound of sixteen: 80; ten mailboxes could take 800,
+            // C caps them at 256.
             await calls.WaitForAsync(C, RealTime);
             SpinWait.SpinUntil(() => blocked.Count == C, RealTime).Should().BeTrue("C calls are blocked on their threads");
             time.Advance(Budget);
@@ -851,11 +877,12 @@ public sealed class UnpackSlotsQa2Tests
     private static Task<IReadOnlyList<DeliveredOutcome>> Open(DeliveredMessageUnpacker unpacker, DeliveryScope scope, params string[] packed)
         => unpacker.UnpackAllAsync(scope, packed.Select(Junk).ToArray(), "request-open", default).WaitAsync(RealTime);
 
-    // Open junk that never ends in deliveries of four and let the budgets go: its reservations stay.
+    // Open junk that never ends in deliveries of at most as many as are opened at once, and let the
+    // budgets go: its reservations stay.
     private static async Task FillAsync(DeliveredMessageUnpacker unpacker, ManualTimeProvider time, HostCallLog calls, DeliveryScope scope, DeliveredInput[] junk)
     {
         var before = calls.Count;
-        var batches = junk.Chunk(Four).Select(chunk => unpacker.UnpackAllAsync(scope, chunk, "request-junk", default)).ToArray();
+        var batches = junk.Chunk(AtOnce).Select(chunk => unpacker.UnpackAllAsync(scope, chunk, "request-junk", default)).ToArray();
         await calls.WaitForAsync(before + junk.Length, RealTime);
         time.Advance(Budget);
         (await Task.WhenAll(batches).WaitAsync(RealTime)).SelectMany(o => o).Should().OnlyContain(o => !o.Succeeded);

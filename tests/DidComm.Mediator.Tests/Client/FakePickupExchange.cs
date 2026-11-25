@@ -135,7 +135,8 @@ internal sealed class FakePickupExchange : IMediatorExchange
     /// <summary>
     /// When set (<see cref="UseBudget"/>), batches go through the real <see cref="DeliveredMessageUnpacker"/>
     /// on <see cref="Clock"/>, its unpack step being <see cref="Unpacker"/>: one budget per delivery,
-    /// four at a time. Otherwise a batch is opened one message after the other, without a budget.
+    /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> (sixteen) at a time. Otherwise
+    /// a batch is opened one message after the other, without a budget.
     /// </summary>
     public DeliveredMessageUnpacker? Budgeted { get; private set; }
 

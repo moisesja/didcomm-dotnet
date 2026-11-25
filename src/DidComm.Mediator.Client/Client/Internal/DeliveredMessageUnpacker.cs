@@ -98,7 +98,13 @@ namespace DidComm.Mediator.Client.Internal;
 /// </remarks>
 internal sealed class DeliveredMessageUnpacker
 {
-    /// <summary>How many messages of one delivery are opened at the same time.</summary>
+    /// <summary>
+    /// How many messages of one delivery are opened at the same time: 16 (#111, owner decision G).
+    /// Each message taken reserves one host call in its sender's partition, so a delivery can ask
+    /// one partition for this many at once: <see cref="UnpackReservations.MaxPerSender"/> and
+    /// <see cref="UnpackReservations.MaxPerAnonymous"/> are not below it, and the two change
+    /// together. With a lower bound, messages of one sender are refused inside one delivery.
+    /// </summary>
     internal const int FetchConcurrency = 16;
 
     // T0 = 30·B (D-2) and Cap = Q·B (QA1-1): with the longest pause as long as Q budgets, the

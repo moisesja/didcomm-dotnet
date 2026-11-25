@@ -39,17 +39,19 @@ public sealed class DeliveredUnpackFix3Tests : IAsyncLifetime
     // ---- ADV3-4 -------------------------------------------------------------------------------
 
     /// <summary>
-    /// Four resolvers that block their threads: the caller of <c>UnpackAllAsync</c> gets its task
-    /// back at once, none of the unpacks ran on its stack, the budget decides all four outcomes while
-    /// they still block, and each keeps its reservation until its thread comes back.
+    /// Sixteen resolvers (as many as a delivery opens at once) that block their threads: the caller
+    /// of <c>UnpackAllAsync</c> gets its task back at once, none of the unpacks ran on its stack, the
+    /// budget decides all sixteen outcomes while they still block, and each keeps its reservation
+    /// until its thread comes back.
     /// </summary>
     [Fact]
     public async Task Unpacks_run_off_the_callers_stack_and_ones_that_block_their_threads_keep_their_slots_until_they_return()
     {
-        // The four unpacks below park four pool threads until this test lets them go. Without a
-        // higher floor that is the whole pool of a 4-vCPU runner (the test host holds threads of its
-        // own), and on a busy machine new threads come seconds apart: every test running beside
-        // this one stalled for 10 s and one timed out on windows CI (#98).
+        // The sixteen unpacks below park sixteen pool threads until this test lets them go. Without
+        // a higher floor that is more than the whole pool of a 4-vCPU runner (the test host holds
+        // threads of its own), and on a busy machine new threads come seconds apart: when four were
+        // parked, every test running beside this one stalled for 10 s and one timed out on windows
+        // CI (#98).
         using var floor = MessagePickupLive.RaiseThreadPoolFloor(DeliveredMessageUnpacker.FetchConcurrency);
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);

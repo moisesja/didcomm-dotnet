@@ -70,10 +70,11 @@ public sealed class SlowSenderFetchQa1Tests
     }
 
     /// <summary>
-    /// ADV3-2 through fetches: twenty mailboxes each fetch four messages whose lookups ignore their
-    /// token, all at once. Exactly 64 host calls start (the container's bound) and exactly sixteen
-    /// messages are refused for the container; none of them is remembered or acknowledged. When the
-    /// lookups end, every reservation comes back.
+    /// ADV3-2 through fetches: twenty mailboxes each fetch sixteen messages (as many as are opened
+    /// at once) whose lookups ignore their token, all at once: 320 messages. Exactly C = 256 host
+    /// calls start (the container's bound) and exactly 64 messages are refused for the container;
+    /// none of them is remembered or acknowledged. When the lookups end, every reservation comes
+    /// back.
     /// </summary>
     [Fact]
     public async Task ADV3_2_fetches_from_twenty_mailboxes_reserve_exactly_the_containers_bound()
@@ -84,27 +85,29 @@ public sealed class SlowSenderFetchQa1Tests
         var exchange = new Qa1Exchange(clock, host);
         var mediator = new Qa1Mediator(clock, Qa1.Lease);
         mediator.Install(exchange.Wire);
-        const int mailboxes = UnpackReservations.MaxReserved / DeliveredMessageUnpacker.FetchConcurrency + 4;
+        const int each = DeliveredMessageUnpacker.FetchConcurrency;
+        const int mailboxes = UnpackReservations.MaxReserved / each + 4;
         var dids = Enumerable.Range(0, mailboxes).Select(m => $"did:example:local-{m}").ToArray();
         foreach (var did in dids)
         {
-            for (var i = 0; i < 4; i++)
+            for (var i = 0; i < each; i++)
                 mediator.Enqueue($"{did}-{i}".Replace(':', '-'), Qa1.Anon($"{did}-{i}"), mailbox: did);
         }
         var client = exchange.Client();
         try
         {
-            var fetches = dids.Select(did => client.FetchAsync(FakePickupExchange.M, did, limit: 4)).ToArray();
+            var fetches = dids.Select(did => client.FetchAsync(FakePickupExchange.M, did, limit: each)).ToArray();
             await host.Calls.WaitForAsync(UnpackReservations.MaxReserved, Qa1Exchange.Guard);
             clock.Inner.Advance(B);
             var batches = await Task.WhenAll(fetches).WaitAsync(Qa1Exchange.Guard);
 
             var items = batches.SelectMany(b => b.Items).ToArray();
-            items.Count(i => i.Error is TimeoutException t && t.Message.Contains("all mailboxes together")).Should().Be(mailboxes * 4 - UnpackReservations.MaxReserved);
+            items.Should().HaveCount(mailboxes * each);
+            items.Count(i => i.Error is TimeoutException t && t.Message.Contains("all mailboxes together")).Should().Be(mailboxes * each - UnpackReservations.MaxReserved);
             host.Calls.Count.Should().Be(UnpackReservations.MaxReserved);
             host.Calls.MaxRunning.Should().Be(UnpackReservations.MaxReserved);
             exchange.Unpacker.Reserved.Should().Be(UnpackReservations.MaxReserved);
-            exchange.Unpacker.Memory.Count.Should().Be(UnpackReservations.MaxReserved, "only the 64 that ran are remembered, not the refused");
+            exchange.Unpacker.Memory.Count.Should().Be(UnpackReservations.MaxReserved, "only the {0} that ran are remembered, not the refused", UnpackReservations.MaxReserved);
             exchange.Wire.AcknowledgedIds.Should().BeEmpty();
         }
         finally
@@ -155,10 +158,11 @@ public sealed class SlowSenderFetchQa1Tests
     }
 
     /// <summary>
-    /// ADV2-2 through fetches, at a mediator that does not lease: Mallory's four lookups ignore
-    /// their token and are let go at the budget. In the next fetch her fifth message is refused for her partition without starting,
-    /// while Alice's message in the same fetch opens; the refused message is neither acknowledged
-    /// nor remembered. Once Mallory's lookups end, her next message starts.
+    /// ADV2-2 through fetches, at a mediator that does not lease: Mallory's sixteen lookups (her
+    /// bound, <see cref="UnpackReservations.MaxPerSender"/>) ignore their token and are let go at
+    /// the budget. In the next fetch her seventeenth message is refused for her partition without
+    /// starting, while Alice's message in the same fetch opens; the refused message is neither
+    /// acknowledged nor remembered. Once Mallory's lookups end, her next message starts.
     /// </summary>
     [Fact]
     public async Task ADV2_2_a_senders_lookups_that_ignore_their_token_fill_only_its_partition_on_the_fetch_path()
@@ -168,37 +172,44 @@ public sealed class SlowSenderFetchQa1Tests
         var exchange = new Qa1Exchange(clock, host);
         var mediator = new Qa1Mediator(clock, lease: null);
         mediator.Install(exchange.Wire);
-        for (var i = 0; i < 5; i++)
+        const int bound = UnpackReservations.MaxPerSender;
+        bound.Should().BeLessThanOrEqualTo(DeliveredMessageUnpacker.FetchConcurrency, "the first fetch starts all of its messages at once");
+        var seventeenth = "mallory-" + bound; // the first of hers beyond her bound
+        for (var i = 0; i <= bound; i++)
             mediator.Enqueue("mallory-" + i, Qa1.From(MalloryKid, "mallory-" + i));
         mediator.Enqueue("alice-1", Qa1.From(AliceKid, "alice-1"));
         var client = exchange.Client();
         try
         {
-            var first = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 4);
-            await host.Calls.WaitForAsync(4, Qa1Exchange.Guard);
+            var first = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: bound);
+            await host.Calls.WaitForAsync(bound, Qa1Exchange.Guard);
             clock.Inner.Advance(B);
-            (await first.WaitAsync(Qa1Exchange.Guard)).Items.Should().OnlyContain(i => i.Error is TimeoutException);
+            (await first.WaitAsync(Qa1Exchange.Guard)).Items.Should().HaveCount(bound).And.OnlyContain(i => i.Error is TimeoutException);
+            exchange.Unpacker.Reserved.Should().Be(bound, "her lookups still run and keep their reservations");
 
-            var second = await client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 10).WaitAsync(Qa1Exchange.Guard);
+            // The mediator does not lease: this fetch is handed her first sixteen again (held back
+            // now), then her seventeenth and Alice's.
+            var second = await client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: bound + 2).WaitAsync(Qa1Exchange.Guard);
 
-            second.Items.Single(i => i.Id == "mallory-4").Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted").And.Contain("for its sender");
+            second.Items.Should().HaveCount(bound + 2);
+            second.Items.Single(i => i.Id == seventeenth).Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted").And.Contain("for its sender");
             second.Items.Single(i => i.Id == "alice-1").Unpacked.Should().NotBeNull();
-            host.Calls.Labels.Should().NotContain("mallory-4");
+            host.Calls.Labels.Should().NotContain(seventeenth);
             exchange.Wire.AcknowledgedIds.Should().Equal("alice-1");
-            exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { "mallory-4" }).Single().Should().BeFalse("a refusal is not remembered");
+            exchange.Unpacker.Memory.HeldBack(Qa1.Bob, new[] { seventeenth }).Single().Should().BeFalse("a refusal is not remembered");
         }
         finally
         {
             host.ReleaseIgnored();
         }
         SpinWait.SpinUntil(() => exchange.Unpacker.Reserved == 0, Qa1Exchange.Guard).Should().BeTrue();
-        var third = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 10);
-        await host.Calls.WaitForAsync(6, Qa1Exchange.Guard);
+        var third = client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: bound + 2);
+        await host.Calls.WaitForAsync(bound + 2, Qa1Exchange.Guard); // her sixteen, Alice's, and now her seventeenth
         clock.Inner.Advance(B);
         await third.WaitAsync(Qa1Exchange.Guard);
         host.ReleaseIgnored();
 
-        host.Calls.Labels.Should().Contain("mallory-4", "her partition is free again");
+        host.Calls.Labels.Should().Contain(seventeenth, "her partition is free again");
     }
 
     // ---- where the message behind is reached -----------------------------------------------------
@@ -269,9 +280,10 @@ public sealed class SlowSenderFetchQa1Tests
 
     /// <summary>
     /// QA1-2, against the restated bound: at limits above 16 a delivery starts at most 16 of its
-    /// messages (four rounds of the floor), so each delivery-sized chunk of the queue takes
-    /// ceil(limit / 16) passes, and a pass may wait out a lease. A fetch loop reaches the message
-    /// behind N ≤ Q messages that never open within <see cref="RestatedBound"/>.
+    /// messages (sixteen are opened at once, and those that never open keep their workers until the
+    /// budget ends), so each delivery-sized chunk of the queue takes ceil(limit / 16) passes, and a
+    /// pass may wait out a lease. A fetch loop reaches the message behind N ≤ Q messages that never
+    /// open within <see cref="RestatedBound"/>.
     /// </summary>
     [Theory]
     [InlineData(17, 99, 60)]
@@ -330,17 +342,20 @@ public sealed class SlowSenderFetchQa1Tests
     // ---- deliveries that mix honest and failing messages -------------------------------------------
 
     /// <summary>
-    /// Honest senders whose lookups take 2 s among messages that fail at once, in one fetch of 100:
-    /// with 25 honest every one opens; with 50 those that do not open fail only before their turn
-    /// (out of budget), never while being opened. No honest message is remembered either way; the
-    /// failures are.
+    /// Honest senders whose lookups are slow among messages that fail at once, in one fetch of 100.
+    /// With lookups of 2 s, every one of 25 and of 50 honest opens (sixteen are opened at once, so
+    /// 50 take four rounds, 8 s). With 50 honest whose lookups take 6 s, three rounds of sixteen
+    /// start while the floor is left (at 0, 6 and 12 s): 48 open, and the two that do not open
+    /// fail only before their turn (out of budget), never while being opened. No honest message is
+    /// remembered either way; the failures are.
     /// </summary>
     [Theory]
-    [InlineData(25)]
-    [InlineData(50)]
-    public async Task Honest_two_second_senders_among_fast_failures_never_fail_while_budget_is_left_and_are_never_remembered(int honest)
+    [InlineData(25, 2, 25)]
+    [InlineData(50, 2, 50)]
+    [InlineData(50, 6, 48)]
+    public async Task Honest_slow_senders_among_fast_failures_never_fail_while_budget_is_left_and_are_never_remembered(int honest, int lookupSeconds, int opens)
     {
-        var (exchange, mediator) = Setup(label => label.StartsWith("honest", StringComparison.Ordinal) ? Qa1Step.OpenAfter(TimeSpan.FromSeconds(2)) : Qa1Step.FailAfter(TimeSpan.Zero), Qa1.Lease);
+        var (exchange, mediator) = Setup(label => label.StartsWith("honest", StringComparison.Ordinal) ? Qa1Step.OpenAfter(TimeSpan.FromSeconds(lookupSeconds)) : Qa1Step.FailAfter(TimeSpan.Zero), Qa1.Lease);
         var every = 100 / honest;
         for (var i = 0; i < 100; i++)
         {
@@ -354,33 +369,47 @@ public sealed class SlowSenderFetchQa1Tests
         var honestItems = batch.Items.Where(i => i.Id.StartsWith("honest", StringComparison.Ordinal)).ToArray();
         honestItems.Should().HaveCount(honest);
         honestItems.Should().OnlyContain(i => i.Unpacked != null || (i.Error is TimeoutException && i.Error.Message.Contains("before its turn came")));
-        if (honest == 25)
-            honestItems.Should().OnlyContain(i => i.Unpacked != null);
+        honestItems.Count(i => i.Unpacked != null).Should().Be(opens, "{0} honest senders whose lookups take {1} s, {2} opened at once", honest, lookupSeconds, DeliveredMessageUnpacker.FetchConcurrency);
+        honestItems.Take(opens).Should().OnlyContain(i => i.Unpacked != null, "the ones that do not get their turn are the last");
         exchange.Unpacker.Memory.HeldBack(Qa1.Bob, honestItems.Select(i => (string?)i.Id).ToArray()).Should().OnlyContain(h => !h, "an honest message that opened is forgotten, and one that did not start is never remembered");
         exchange.Unpacker.Memory.Count.Should().Be(batch.Items.Count(i => i.Error is CryptoException), "every failure is remembered");
     }
 
     /// <summary>
-    /// A delivery of 100 honest senders whose lookups take 2 s: the first ones open, the rest fail
-    /// before their turn, and none is remembered, so the next fetch opens the next ones.
+    /// A delivery of 100 honest senders (each a sender of its own) whose lookups take 2 s or 4 s:
+    /// the first ones open, the rest fail before their turn, and none is remembered, so the next
+    /// fetch opens the next ones. Rounds of sixteen (as many as are opened at once) start one
+    /// lookup apart while at least the floor's 5 s is left of the 20 s budget. With 4 s: at 0, 4, 8
+    /// and 12 s, so 64 open and 36 are left for the next fetch, which opens them all. With 2 s (as
+    /// this test had it when four were opened at once, and 32 opened): at 0, 2, ..., 14 s, which
+    /// covers all of a fetch's 100, the most a fetch takes, and nothing is left.
     /// </summary>
-    [Fact]
-    public async Task A_fetch_of_one_hundred_honest_two_second_senders_opens_the_first_and_remembers_none()
+    [Theory]
+    [InlineData(4, 4, 64)]
+    [InlineData(2, 8, 100)]
+    public async Task A_fetch_of_one_hundred_honest_slow_senders_opens_the_first_and_remembers_none(int lookupSeconds, int rounds, int opens)
     {
-        var (exchange, mediator) = Setup(_ => Qa1Step.OpenAfter(TimeSpan.FromSeconds(2)), lease: null);
+        var lookup = TimeSpan.FromSeconds(lookupSeconds);
+        var (exchange, mediator) = Setup(_ => Qa1Step.OpenAfter(lookup), lease: null);
         for (var i = 0; i < 100; i++)
             mediator.Enqueue("honest-" + i, Qa1.From($"did:example:sender-{i}#key-1", "honest-" + i));
         var client = exchange.Client();
+        // A round starts while at least the floor is left.
+        ((int)((B - exchange.Unpacker.Floor).Ticks / lookup.Ticks) + 1).Should().Be(rounds);
+        Math.Min(100, rounds * DeliveredMessageUnpacker.FetchConcurrency).Should().Be(opens);
 
         var first = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100));
         var opened = first.Items.Count(i => i.Unpacked != null);
         var second = await exchange.DriveAsync(() => client.FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100));
 
-        opened.Should().Be(32, "rounds of four start every 2 s until the floor's 5 s are all that is left");
-        first.Items.Where(i => i.Unpacked == null).Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("before its turn came"));
+        opened.Should().Be(opens, "rounds of {0} start every {1} s until the floor's 5 s are all that is left", DeliveredMessageUnpacker.FetchConcurrency, lookupSeconds);
+        first.Items.Should().HaveCount(100);
+        first.Items.Take(opens).Should().OnlyContain(i => i.Unpacked != null, "the first ones are the ones opened");
+        first.Items.Skip(opens).Should().OnlyContain(i => i.Error is TimeoutException && i.Error.Message.Contains("before its turn came"));
+        first.Items.Should().NotContain(i => i.Error != null && i.Error.Message.Contains("capacity exhausted"), "nothing is refused");
         exchange.Unpacker.Memory.Count.Should().Be(0, "a message that did not start is never remembered");
-        second.Items.Should().HaveCount(100 - 32);
-        second.Items.Take(32).Should().OnlyContain(i => i.Unpacked != null, "none is held back");
+        second.Items.Should().HaveCount(100 - opens);
+        second.Items.Should().OnlyContain(i => i.Unpacked != null, "none is held back, and all of the {0} left get their turn", 100 - opens);
     }
 
     /// <summary>
@@ -495,6 +524,47 @@ public sealed class SlowSenderFetchQa1Tests
         reach.Found.Should().BeTrue();
         reach.Elapsed.Should().BeLessThanOrEqualTo(Bound(samAt, 16) + B);
         reach.Batches.SelectMany(b => b.Items).Where(i => i.Id == "sam").Should().NotContain(i => i.Error is TimeoutException && i.Error.Message.Contains("capacity exhausted"));
+    }
+
+    /// <summary>
+    /// D-13 beyond a sender's bound: forty messages naming Sam's key (more than twice Sam's bound of
+    /// sixteen, which is also how many are opened at once) whose lookups take 2 s and then fail, and
+    /// Sam's real message in front of them, among them or behind them, in one fetch of 100. Rounds
+    /// of sixteen fill Sam's partition; each worker gives its finished lookup's reservation back
+    /// before it takes the next message, so nothing of the fetch is refused, and Sam's message opens
+    /// in that fetch.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(20)]
+    [InlineData(40)]
+    public async Task D13_a_slow_honest_senders_message_among_more_messages_naming_its_key_than_its_bound_opens_in_the_same_fetch_and_nothing_is_refused(int samAt)
+    {
+        const int junk = 40;
+        junk.Should().BeGreaterThan(2 * UnpackReservations.MaxPerSender);
+        var lookup = TimeSpan.FromSeconds(2);
+        var (exchange, mediator) = Setup(label => label == "sam" ? Qa1Step.OpenAfter(lookup) : Qa1Step.FailAfter(lookup), Qa1.Lease);
+        for (int i = 0, j = 0; i <= junk; i++)
+        {
+            if (i == samAt)
+                mediator.Enqueue("sam", Qa1.From(SamKid, "sam"));
+            else
+            {
+                mediator.Enqueue("junk-" + j, Qa1.From(SamKid, "junk-" + j));
+                j++;
+            }
+        }
+        var start = exchange.Clock.TrueNow;
+
+        var batch = await exchange.DriveAsync(() => exchange.Client().FetchAsync(FakePickupExchange.M, FakePickupExchange.L, limit: 100));
+
+        batch.Items.Should().HaveCount(junk + 1);
+        batch.Items.Should().NotContain(i => i.Error is TimeoutException, "nothing was refused or ran out of time");
+        batch.Items.Single(i => i.Id == "sam").Unpacked.Should().NotBeNull();
+        batch.Items.Where(i => i.Id != "sam").Should().OnlyContain(i => i.Error is CryptoException);
+        // Forty-one lookups of 2 s, sixteen at a time: three rounds.
+        (exchange.Clock.TrueNow - start).Should().Be(3 * lookup);
+        exchange.Host.Calls.MaxRunning.Should().Be(DeliveredMessageUnpacker.FetchConcurrency);
     }
 
     // ---- helpers ---------------------------------------------------------------------------------

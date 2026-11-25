@@ -28,6 +28,9 @@ public sealed class DeliveredUnpackTokenStateTests
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
     private static readonly DeliveryScope Bob = new(FakePickupExchange.M, FakePickupExchange.L);
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     // ---- a failure reported after the delivery's token was cancelled --------------------------------
 
     /// <summary>
@@ -141,10 +144,12 @@ public sealed class DeliveredUnpackTokenStateTests
     // ---- the caller's cancellation and the shutdown ---------------------------------------------------
 
     /// <summary>
-    /// The caller's cancellation and the owner's shutdown, 10 s into a delivery of five whose first
-    /// four messages have been opening since its start: the result is cancelled with that token,
-    /// nothing is remembered, and the fifth message never starts; whatever the lookups do when
-    /// their token is cancelled. A lookup still running keeps its reservation until it ends.
+    /// The caller's cancellation and the owner's shutdown, 10 s into a delivery of seventeen (one
+    /// more than are opened at once) whose first sixteen messages have been opening since its
+    /// start: the result is cancelled with that token, nothing is remembered, and the seventeenth
+    /// message never starts; whatever the lookups do when their token is cancelled. A lookup still
+    /// running keeps its reservation until it ends. (Each message names a sender of its own, so no
+    /// partition's bound stands between the seventeenth and a worker: it waits for a worker only.)
     /// </summary>
     [Theory]
     [InlineData(false, WhenCancelled.Ends)]
@@ -163,22 +168,23 @@ public sealed class DeliveredUnpackTokenStateTests
         using var shutdown = new CancellationTokenSource();
         var host = NeverOpens.Lookup(whenCancelled, calls, register, never.Task);
         var unpacker = new DeliveredMessageUnpacker(host, Budget, time, shutdown.Token);
-        var ids = new[] { "alice-1", "alice-2", "alice-3", "alice-4", "alice-5" };
+        var ids = Enumerable.Range(1, AtOnce + 1).Select(i => "alice-" + i).ToArray();
         try
         {
-            var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Message).ToArray(), "request-1", caller.Token);
-            await register.OpenAsync(whenCancelled == WhenCancelled.ReportsAFailure ? DeliveredMessageUnpacker.FetchConcurrency : 0, RealTime);
-            await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
+            var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(FromItsOwnSender).ToArray(), "request-1", caller.Token);
+            await register.OpenAsync(whenCancelled == WhenCancelled.ReportsAFailure ? AtOnce : 0, RealTime);
+            await calls.WaitForAsync(AtOnce, RealTime);
             time.Advance(TimeSpan.FromSeconds(10));
             await Task.Run((byShutdown ? shutdown : caller).Cancel).WaitAsync(RealTime);
 
             var cancelled = (await FluentActions.Awaiting(() => delivery.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>()).Which;
             cancelled.CancellationToken.Should().Be(byShutdown ? shutdown.Token : caller.Token);
             unpacker.Memory.Count.Should().Be(0, "neither the caller's cancellation nor the shutdown says anything about a message");
-            calls.Count.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "the fifth message never started");
+            calls.Count.Should().Be(AtOnce, "the seventeenth message never started");
+            calls.Labels.Should().NotContain(ids[^1]);
             calls.Tokens.Should().OnlyContain(t => t.IsCancellationRequested, "the host code opening the delivery is told to stop");
             if (whenCancelled == WhenCancelled.RunsOn)
-                unpacker.Reserved.Should().Be(DeliveredMessageUnpacker.FetchConcurrency, "a lookup still running keeps its reservation");
+                unpacker.Reserved.Should().Be(AtOnce, "a lookup still running keeps its reservation");
         }
         finally
         {
@@ -194,11 +200,12 @@ public sealed class DeliveredUnpackTokenStateTests
     /// from inside a cancellation callback, so its worker records the success while the delivery is
     /// still open: when the budget ends (the callback is on the token the lookup was handed), and
     /// when the caller cancels (the callback is on the caller's own token, which runs before the
-    /// delivery's token is cancelled). The fifth message, not valid UTF-8, was waiting for a worker;
-    /// a worker that took it would record it as malformed at once. No worker takes it: one outcome
-    /// was recorded by a worker, and the fifth message is out of time before its turn. (The callback
-    /// stays inside the cancellation until that success is recorded, so the delivery is still open
-    /// then, whichever thread the worker runs on.)
+    /// delivery's token is cancelled). The seventeenth message (one more than are opened at once),
+    /// not valid UTF-8, was waiting for a worker; a worker that took it would record it as
+    /// malformed at once. No worker takes it: one outcome was recorded by a worker, and the
+    /// seventeenth message is out of time before its turn. (The callback stays inside the
+    /// cancellation until that success is recorded, so the delivery is still open then, whichever
+    /// thread the worker runs on.)
     /// </summary>
     [Theory]
     [InlineData(false)]
@@ -219,13 +226,15 @@ public sealed class DeliveredUnpackTokenStateTests
             using (calls.Enter(label, ct))
                 return await UnpackFakes.StallUntilCancelled(ct).ConfigureAwait(false);
         }, Budget, time);
-        var messages = new[] { "opens-0", "stall-1", "stall-2", "stall-3" }.Select(Message)
-            .Append(new DeliveredInput("not-utf8-4", new byte[] { 0xC3, 0x28, 0xFF }))
+        // opens-0 and fifteen that stall hold the sixteen workers; the one that is not valid UTF-8 waits.
+        var messages = Enumerable.Range(1, AtOnce - 1).Select(i => "stall-" + i).Prepend("opens-0").Select(Message)
+            .Append(new DeliveredInput("not-utf8", new byte[] { 0xC3, 0x28, 0xFF }))
             .ToArray();
+        messages.Should().HaveCount(AtOnce + 1);
 
         var delivery = unpacker.UnpackAllAsync(Bob, messages, "request-1", caller.Token);
         await register.OpenAsync(1, RealTime);
-        await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
+        await calls.WaitForAsync(AtOnce, RealTime);
         await Task.Run(() =>
         {
             if (byTheCaller)
@@ -244,8 +253,8 @@ public sealed class DeliveredUnpackTokenStateTests
         {
             var outcomes = await delivery;
             outcomes[0].Succeeded.Should().BeTrue("it opened inside the budget's cancellation, before the delivery was closed");
-            outcomes[4].Error.Should().BeOfType<TimeoutException>("no worker took it once the delivery's token was cancelled").Which.Message.Should().Contain("before its turn came");
-            outcomes.Skip(1).Take(3).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+            outcomes[AtOnce].Error.Should().BeOfType<TimeoutException>("no worker took it once the delivery's token was cancelled").Which.Message.Should().Contain("before its turn came");
+            outcomes.Skip(1).Take(AtOnce - 1).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
         }
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && unpacker.Opening == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
@@ -292,6 +301,9 @@ public sealed class DeliveredUnpackTokenStateTests
     // ---- helpers ----------------------------------------------------------------------------------
 
     private static DeliveredInput Message(string id) => new(id, TestJwe.Bytes(TestJwe.Anoncrypt(id)));
+
+    // A message naming a sender no other message names: it has a partition to itself.
+    private static DeliveredInput FromItsOwnSender(string id) => new(id, TestJwe.Bytes(TestJwe.Authcrypt($"did:example:sender-of-{id}#key-1", id)));
 
     // What a delivery that did not end cancelled ended with, for a failing assertion's text.
     private static string Describe(Task<IReadOnlyList<DeliveredOutcome>> delivery, DeliveredMessageUnpacker unpacker)

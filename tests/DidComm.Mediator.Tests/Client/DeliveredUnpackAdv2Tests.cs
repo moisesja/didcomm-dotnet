@@ -18,17 +18,21 @@ public sealed class DeliveredUnpackAdv2Tests
     private static readonly TimeSpan UnpackTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     /// <summary>
-    /// ADV2-1 (fails: defect). Property broken — <see cref="Client.PickupClient.FetchAsync"/> remarks:
+    /// ADV2-1, as it was found in #96 (a defect then). Property broken — <see cref="Client.PickupClient.FetchAsync"/> remarks:
     /// "a loop that fetches until drained gets past failures to what is behind them". Attack: a sender
     /// (any outsider who can address the recipient through its mediator) sends ten messages whose
-    /// sender DID resolves only when cancelled (a did:webvh host that holds the connection). One
-    /// fetch of limit 10 unpacks them four at a time, each until <c>UnpackTimeout</c>, so the batch
-    /// needs three waves (90 s by default) — longer than this library's mediator lease
-    /// (<see cref="MessagePickupOptions.LeaseTimeout"/>, 60 s). Every lease has ended before the
-    /// fetch returns, so the next fetch is handed the same ten failures again, and the messages
-    /// queued behind them are never reached. The test asserts the claimed property: the batch is
-    /// done by the time the lease ends.
+    /// sender DID resolves only when cancelled (a did:webvh host that holds the connection). When it
+    /// was found, one fetch of limit 10 unpacked them four at a time, each until <c>UnpackTimeout</c>,
+    /// so the batch needed three waves (90 s by default) — longer than this library's mediator lease
+    /// (<see cref="MessagePickupOptions.LeaseTimeout"/>, 60 s). Every lease had ended before the
+    /// fetch returned, so the next fetch was handed the same ten failures again, and the messages
+    /// queued behind them were never reached. Since then one budget covers a delivery, and since
+    /// #111 (owner decision G) up to sixteen of its messages are opened at once. The test asserts
+    /// the claimed property: the batch is done by the time the lease ends.
     /// </summary>
     [Fact]
     public async Task ADV2_1_a_batch_of_stalling_senders_outlasts_the_mediators_lease()
@@ -68,42 +72,80 @@ public sealed class DeliveredUnpackAdv2Tests
     }
 
     /// <summary>
-    /// ADV2-1 companion, updated to owner decision E for #111 (one budget per delivery and no time
-    /// limit per message). Ten stalling messages under a 30 s budget: the first four are being
-    /// opened until the budget ends, and the six behind them are out of time before their turn.
-    /// Every message has failed when the budget ends, none later. (Before fix round 2 of #111 each
-    /// message had a share of the budget, and all ten had their turn.)
+    /// ADV2-1 companion, under owner decisions E and G for #111 (one budget per delivery, no time
+    /// limit per message, sixteen opened at once). Ten stalling messages under a 30 s budget, as
+    /// many as this library's mediator delivers at once: all ten are being opened until the budget
+    /// ends. Every message has failed when the budget ends, none later, and none was left without
+    /// its turn (as before fix round 2 of #111, when each message had a share of the budget; with
+    /// four opened at once and no shares, six of the ten were out of time before their turn).
     /// </summary>
     [Fact]
     public async Task ADV2_1_ten_stalling_messages_all_fail_within_one_delivery_budget()
     {
         var time = new ManualTimeProvider();
-        var unpacker = new DeliveredMessageUnpacker(StallUntilCancelled, UnpackTimeout, time);
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
+        {
+            using (calls.Enter(text, ct))
+                return await StallUntilCancelled(text, ct);
+        }, UnpackTimeout, time);
         var payloads = Enumerable.Range(0, 10).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes("stall-" + i)).ToArray();
 
         var batch = unpacker.UnpackAllAsync(payloads, default);
-        await time.WaitForScheduledTimersAsync(1, RealTime); // the budget
+        await calls.WaitForAsync(10, RealTime); // every one of the ten is being opened
         time.Advance(UnpackTimeout - TimeSpan.FromTicks(1));
         batch.IsCompleted.Should().BeFalse("the delivery is not decided before its budget ends");
         time.Advance(TimeSpan.FromTicks(1));
         var outcomes = await batch.WaitAsync(RealTime);
 
         outcomes.Should().HaveCount(10).And.OnlyContain(o => !o.Succeeded && o.Error is TimeoutException);
-        outcomes.Take(4).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"));
-        outcomes.Skip(4).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
+        outcomes.Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"), "every message got its turn");
         SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("an unpack that honours cancellation gives its reservation back");
     }
 
     /// <summary>
-    /// ADV2-1 follow-on (same-delivery starvation), updated to owner decision E for #111. Four
-    /// senders whose DIDs never resolve are first in a delivery of ten. With no time limit per
-    /// message they keep the four workers for the whole budget, and the six honest messages behind
-    /// them are out of time before their turn in that delivery. The four are remembered when the
-    /// budget ends, so the next delivery of the same ten holds them back and opens the six: they are
-    /// not starved at every redelivery while the four stay at the front of the queue.
+    /// ADV2-1 companion beyond what is opened at once (owner decision E for #111: no time limit per
+    /// message). Twenty-two stalling messages under a 30 s budget: the first sixteen are being
+    /// opened until the budget ends, and the six behind them are out of time before their turn.
+    /// Every message has failed when the budget ends, none later.
     /// </summary>
     [Fact]
-    public async Task ADV2_1_four_stalling_senders_first_in_a_delivery_keep_it_for_one_budget_and_the_six_behind_them_open_in_the_next()
+    public async Task ADV2_1_twenty_two_stalling_messages_all_fail_within_one_delivery_budget_the_six_behind_the_first_sixteen_before_their_turn()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
+        {
+            using (calls.Enter(text, ct))
+                return await StallUntilCancelled(text, ct);
+        }, UnpackTimeout, time);
+        var payloads = Enumerable.Range(0, AtOnce + 6).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes("stall-" + i)).ToArray();
+
+        var batch = unpacker.UnpackAllAsync(payloads, default);
+        await calls.WaitForAsync(AtOnce, RealTime);
+        time.Advance(UnpackTimeout - TimeSpan.FromTicks(1));
+        batch.IsCompleted.Should().BeFalse("the delivery is not decided before its budget ends");
+        calls.Count.Should().Be(AtOnce, "the six behind the first {0} wait for a worker", AtOnce);
+        time.Advance(TimeSpan.FromTicks(1));
+        var outcomes = await batch.WaitAsync(RealTime);
+
+        outcomes.Should().HaveCount(AtOnce + 6).And.OnlyContain(o => !o.Succeeded && o.Error is TimeoutException);
+        outcomes.Take(AtOnce).Should().OnlyContain(o => o.Error!.Message.Contains("while it was being opened"));
+        outcomes.Skip(AtOnce).Should().OnlyContain(o => o.Error!.Message.Contains("before its turn came"));
+        calls.Count.Should().Be(AtOnce, "the six never started");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("an unpack that honours cancellation gives its reservation back");
+    }
+
+    /// <summary>
+    /// ADV2-1 follow-on (same-delivery starvation) in a delivery of ten, as this library's mediator
+    /// delivers: four senders whose DIDs never resolve are first, six honest messages behind them.
+    /// With sixteen opened at once (#111, owner decision G) all ten start together: the six open at
+    /// once, in the same delivery, while the four are still being opened, and the four end with the
+    /// budget. (With four opened at once and no time limit per message, the four kept every worker
+    /// and the six were out of time before their turn.)
+    /// </summary>
+    [Fact]
+    public async Task ADV2_1_four_stalling_senders_first_in_a_delivery_of_ten_do_not_starve_the_six_behind_them()
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
@@ -116,19 +158,58 @@ public sealed class DeliveredUnpackAdv2Tests
         var messages = Enumerable.Range(0, 4).Select(i => "stall-" + i).Concat(Enumerable.Range(0, 6).Select(i => "ok-" + i))
             .Select(t => new DeliveredInput(t, Encoding.UTF8.GetBytes(t))).ToArray();
 
+        var delivery = unpacker.UnpackAllAsync(scope, messages, "request-7", default);
+        SpinWait.SpinUntil(() => unpacker.Settled == 6, RealTime).Should().BeTrue("the six honest messages opened before the clock moved, while the four in front were being opened");
+        delivery.IsCompleted.Should().BeFalse("the four in front are still being opened");
+        await calls.WaitForAsync(10, RealTime);
+        time.Advance(UnpackTimeout);
+        var outcomes = await delivery.WaitAsync(RealTime);
+
+        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+        outcomes.Skip(4).Should().OnlyContain(o => o.Succeeded, "the honest messages behind the stalling ones are opened in the same delivery");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// ADV2-1 follow-on (same-delivery starvation) beyond what is opened at once, under owner
+    /// decision E for #111. Sixteen senders whose DIDs never resolve are first in a delivery of
+    /// twenty-two. With no time limit per message they keep the sixteen workers for the whole
+    /// budget, and the six honest messages behind them are out of time before their turn in that
+    /// delivery. The sixteen are remembered when the budget ends, so the next delivery of the same
+    /// twenty-two holds them back and opens the six: they are not starved at every redelivery while
+    /// the sixteen stay at the front of the queue.
+    /// </summary>
+    [Fact]
+    public async Task ADV2_1_sixteen_stalling_senders_first_in_a_delivery_keep_it_for_one_budget_and_the_six_behind_them_open_in_the_next()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
+        {
+            using (calls.Enter(text, ct))
+                return text.StartsWith("stall-", StringComparison.Ordinal) ? await StallUntilCancelled(text, ct) : Opened(text);
+        }, UnpackTimeout, time);
+        var scope = new DeliveryScope(FakePickupExchange.M, FakePickupExchange.L);
+        var messages = Enumerable.Range(0, AtOnce).Select(i => "stall-" + i).Concat(Enumerable.Range(0, 6).Select(i => "ok-" + i))
+            .Select(t => new DeliveredInput(t, Encoding.UTF8.GetBytes(t))).ToArray();
+
         var first = unpacker.UnpackAllAsync(scope, messages, "request-7", default);
-        await calls.WaitForAsync(DeliveredMessageUnpacker.FetchConcurrency, RealTime);
+        await calls.WaitForAsync(AtOnce, RealTime);
         time.Advance(UnpackTimeout);
         var outcomes = await first.WaitAsync(RealTime);
 
-        outcomes.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
-        outcomes.Skip(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("before its turn came"), "the four in front kept every worker for the whole budget");
+        outcomes.Take(AtOnce).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+        outcomes.Skip(AtOnce).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("before its turn came"), "the {0} in front kept every worker for the whole budget", AtOnce);
+        // The sixteen lookups have ended (they honour their token) and given their reservations
+        // back: without a named sender they filled the mailbox's partition for such messages, which
+        // the six honest ones are counted in too.
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
 
         var again = await unpacker.UnpackAllAsync(scope, messages, "request-8", default).WaitAsync(RealTime);
 
-        again.Take(4).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
-        again.Skip(4).Should().OnlyContain(o => o.Succeeded, "the four are held back, so the honest messages behind them are opened");
-        calls.Count.Should().Be(10, "no stalling message was opened twice");
+        again.Take(AtOnce).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("did not open when it was delivered before"));
+        again.Skip(AtOnce).Should().OnlyContain(o => o.Succeeded, "the {0} are held back, so the honest messages behind them are opened", AtOnce);
+        calls.Count.Should().Be(AtOnce + 6, "no stalling message was opened twice");
         SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue();
     }
 
@@ -141,10 +222,11 @@ public sealed class DeliveredUnpackAdv2Tests
 
     /// <summary>
     /// ADV2-2 (Low), inverted by #111 (I-2, D-1): host unpack calls are reserved per sender, so a
-    /// sender whose DID lookup ignores cancellation fills only its own partition. Mallory's four such
-    /// messages are let go at their budgets and keep their reservations; her fifth is refused at once
-    /// for her partition, without starting, while Alice's message in the same delivery opens. When the
-    /// stalled lookups end, Mallory's partition is free again.
+    /// sender whose DID lookup ignores cancellation fills only its own partition. Mallory's sixteen
+    /// such messages (her bound, <see cref="UnpackReservations.MaxPerSender"/>) are let go at their
+    /// budgets and keep their reservations; her seventeenth is refused at once for her partition,
+    /// without starting, while Alice's message in the same delivery opens. When the stalled lookups
+    /// end, Mallory's partition is free again.
     /// </summary>
     [Fact]
     public async Task ADV2_2_a_lookup_that_ignores_cancellation_fills_only_its_senders_partition_and_another_senders_message_opens()
@@ -172,20 +254,22 @@ public sealed class DeliveredUnpackAdv2Tests
                 (await delivery.WaitAsync(RealTime)).Single().Succeeded.Should().BeFalse();
             unpacker.Reserved.Should().Be(UnpackReservations.MaxPerSender, "each lookup still running keeps its reservation");
 
+            const string refused = "mallory-refused"; // her seventeenth
             var mixed = await unpacker.UnpackAllAsync(scope, new[]
             {
-                Message(TestJwe.Authcrypt(MalloryKid, "mallory-4"), "mallory-4"),
+                Message(TestJwe.Authcrypt(MalloryKid, refused), refused),
                 Message(TestJwe.Authcrypt(AliceKid, "alice-1"), "alice-1"),
-            }, "request-4", default).WaitAsync(RealTime);
+            }, "request-mixed", default).WaitAsync(RealTime);
 
             mixed[0].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("capacity exhausted").And.Contain("for its sender");
             mixed[1].Succeeded.Should().BeTrue("another sender's partition is not full");
-            calls.Labels.Should().NotContain("mallory-4", "the refused message never started");
+            calls.Labels.Should().NotContain(refused, "the refused message never started");
+            calls.Count.Should().Be(UnpackReservations.MaxPerSender + 1, "her {0} lookups and Alice's", UnpackReservations.MaxPerSender);
 
             never.TrySetCanceled();
             SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("each reservation is given back when its lookup ends");
-            await unpacker.UnpackAllAsync(scope, new[] { Message(TestJwe.Authcrypt(MalloryKid, "mallory-5"), "mallory-5") }, "request-5", default).WaitAsync(RealTime);
-            calls.Labels.Should().Contain("mallory-5", "Mallory's partition is free again, so her next message starts");
+            await unpacker.UnpackAllAsync(scope, new[] { Message(TestJwe.Authcrypt(MalloryKid, "mallory-after"), "mallory-after") }, "request-after", default).WaitAsync(RealTime);
+            calls.Labels.Should().Contain("mallory-after", "Mallory's partition is free again, so her next message starts");
         }
         finally
         {
@@ -194,9 +278,10 @@ public sealed class DeliveredUnpackAdv2Tests
     }
 
     /// <summary>
-    /// ADV2-2 residual R-1 (#111): sixteen senders, each with four lookups that ignore cancellation,
-    /// hold all 64 of the container's reservations; a seventeenth sender's message is then refused
-    /// for the container until those lookups end.
+    /// ADV2-2 residual R-1 (#111): sixteen senders, each with sixteen lookups that ignore
+    /// cancellation (C / <see cref="UnpackReservations.MaxPerSender"/> senders at their bound), hold
+    /// all 256 of the container's reservations; a seventeenth sender's message is then refused for
+    /// the container until those lookups end.
     /// </summary>
     [Fact]
     public async Task ADV2_2_residual_many_senders_fill_the_container()

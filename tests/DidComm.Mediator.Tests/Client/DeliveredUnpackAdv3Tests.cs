@@ -22,12 +22,15 @@ public sealed class DeliveredUnpackAdv3Tests
     private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout;
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     /// <summary>
     /// ADV3-2 (fixed by #111, I-1): the bound on host unpack calls is a reservation, taken with its
-    /// check in one step before the call exists. Twenty deliveries of four messages whose lookups
-    /// ignore cancellation are opened together, each from its own mailbox (so no partition bound
-    /// refuses anything): exactly 64 calls start and stay reserved, exactly 16 messages are refused
-    /// for the container, and never more than 64 calls run.
+    /// check in one step before the call exists. Twenty deliveries of sixteen messages whose lookups
+    /// ignore cancellation are opened together (320 messages), each from its own mailbox (so no
+    /// partition bound refuses anything): exactly C = 256 calls start and stay reserved, exactly 64
+    /// messages are refused for the container, and never more than 256 calls run.
     /// </summary>
     [Fact]
     public async Task ADV3_2_deliveries_opened_together_reserve_at_most_the_containers_bound()
@@ -187,9 +190,11 @@ public sealed class DeliveredUnpackAdv3Tests
     /// <summary>
     /// Held (passes): a host callback on the call's token completes the unpack <em>successfully</em>
     /// inside the budget's own <c>Cancel()</c>. Whichever comes first, that result or the delivery's
-    /// end, each message has exactly one outcome; the message that waited for a worker is not
-    /// started; and no reservation or timer is left behind (the budget may be disposed inside its
-    /// own <c>Cancel()</c>).
+    /// end, each message has exactly one outcome; the message that waited for a worker (the
+    /// seventeenth: one more than are opened at once) is not started; and no reservation or timer
+    /// is left behind (the budget may be disposed inside its own <c>Cancel()</c>). Each message
+    /// names a sender of its own, so no partition's bound stands between the seventeenth and a
+    /// worker: it waits for a worker only.
     /// </summary>
     [Fact]
     public async Task An_unpack_that_completes_inside_the_budgets_cancel_is_recorded_once_and_leaves_nothing_behind()
@@ -197,9 +202,10 @@ public sealed class DeliveredUnpackAdv3Tests
         var time = new ManualTimeProvider();
         using var registered = new SemaphoreSlim(0);
         var started = 0;
-        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
+        var unpacker = new DeliveredMessageUnpacker((packed, ct) =>
         {
             Interlocked.Increment(ref started);
+            var text = TestJwe.LabelOf(packed);
             var done = new TaskCompletionSource<DeliveredUnpack>();
             // Completes synchronously, on the budget's timer thread, when the budget runs out.
             _ = Task.Run(async () =>
@@ -210,20 +216,23 @@ public sealed class DeliveredUnpackAdv3Tests
             });
             return done.Task;
         }, Budget, time);
-        var payloads = Payloads(5, "m-"); // four at once; the fifth waits for a worker
+        // Sixteen at once; the seventeenth waits for a worker.
+        var payloads = Enumerable.Range(0, AtOnce + 1)
+            .Select(i => TestJwe.Bytes(TestJwe.Authcrypt($"did:example:sender-{i}#key-1", "m-" + i)))
+            .ToArray();
         var batch = unpacker.UnpackAllAsync(payloads, "request-1", default);
 
-        for (var i = 0; i < 4; i++)
+        for (var i = 0; i < AtOnce; i++)
             (await registered.WaitAsync(RealTime)).Should().BeTrue("each host call registered its callback");
         time.ScheduledTimers.Should().Be(1, "the budget");
         time.Advance(Budget);
         var outcomes = await batch.WaitAsync(RealTime);
 
-        outcomes.Should().HaveCount(5);
+        outcomes.Should().HaveCount(AtOnce + 1);
         // Whichever won (the late result or the budget), each message has exactly one outcome.
         outcomes.Should().OnlyContain(o => o.Succeeded || o.Error is TimeoutException);
-        outcomes[4].Error.Should().BeOfType<TimeoutException>("the delivery's token was cancelled before a worker was free for it");
-        Volatile.Read(ref started).Should().Be(4);
+        outcomes[AtOnce].Error.Should().BeOfType<TimeoutException>("the delivery's token was cancelled before a worker was free for it");
+        Volatile.Read(ref started).Should().Be(AtOnce);
         SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
@@ -231,7 +240,8 @@ public sealed class DeliveredUnpackAdv3Tests
     /// Held (passes): thousands of deliveries with every kind of message — opens at once, fails at
     /// once, throws synchronously, honours its token, ignores its token and ends later, plus callers
     /// that cancel mid-delivery — leave the reserved count at exactly zero once the late unpacks
-    /// end (it never drifts up or down), and no timer scheduled.
+    /// end (it never drifts up or down), and no timer scheduled. A delivery has up to three times as
+    /// many messages as are opened at once, so in the larger ones messages wait for a worker.
     /// </summary>
     [Fact]
     public async Task Thousands_of_mixed_deliveries_leave_no_reservation_and_no_timer()
@@ -259,7 +269,7 @@ public sealed class DeliveredUnpackAdv3Tests
             var batches = new List<(Task<IReadOnlyList<DeliveredOutcome>> Task, bool Cancelled)>();
             for (var d = 0; d < 6; d++)
             {
-                var count = random.Next(1, 13);
+                var count = random.Next(1, 3 * AtOnce + 1);
                 var payloads = Enumerable.Range(0, count).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(kinds[random.Next(kinds.Length)] + "-" + round + "-" + d + "-" + i)).ToArray();
                 var cancelled = d == 5;
                 batches.Add((unpacker.UnpackAllAsync(payloads, "request", cancelled ? cancel.Token : default), cancelled));

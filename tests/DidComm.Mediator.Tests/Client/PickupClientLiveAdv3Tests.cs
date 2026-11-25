@@ -225,13 +225,21 @@ public sealed class PickupClientLiveAdv3Tests
     /// <summary>
     /// Held (passes): the consumer's cancellation while a delivery is being opened ends the stream
     /// with nothing of that delivery acknowledged or remembered, the budget's timer gone, and the
-    /// mailbox closed.
+    /// mailbox closed. The push is as large as the stream reads from one delivery (ten). With
+    /// sixteen opened at once (#111, owner decision G) all ten are being opened when the consumer
+    /// cancels: a message of a live delivery no longer waits for a worker, as the fifth of five
+    /// did when four were opened at once.
     /// </summary>
     [Fact]
     public async Task Cancelled_while_a_push_is_opened_leaves_no_timer_no_registration_and_nothing_remembered()
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
+        var ids = Enumerable.Range(1, LiveDeliveryStream.MaxPerDelivery).Select(i => "p" + i).ToArray();
+        // How many of the push's messages are opened at once: all of them, a live delivery holding
+        // no more than are opened at once.
+        var opening = Math.Min(ids.Length, DeliveredMessageUnpacker.FetchConcurrency);
+        opening.Should().Be(ids.Length, "every message of a live delivery is opened at once");
         // Every worker signals once its message's opening has started (the delivery's budget exists
         // then); the next cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no
         // rendezvous (#111).
@@ -239,7 +247,7 @@ public sealed class PickupClientLiveAdv3Tests
         var allEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         exchange.Unpacker = async (text, ct) =>
         {
-            if (Interlocked.Increment(ref entered) == DeliveredMessageUnpacker.FetchConcurrency)
+            if (Interlocked.Increment(ref entered) == opening)
                 allEntered.TrySetResult();
             await Task.Delay(Timeout.InfiniteTimeSpan, ct);
             return DefaultOutcome(text);
@@ -247,7 +255,7 @@ public sealed class PickupClientLiveAdv3Tests
         exchange.On(MessagePickup.LiveDeliveryChangeType, r =>
         {
             if (r.Live)
-                exchange.Registration!.TryPush(Push(("p1", "ok:p1"), ("p2", "ok:p2"), ("p3", "ok:p3"), ("p4", "ok:p4"), ("p5", "ok:p5")));
+                exchange.Registration!.TryPush(Push(ids.Select(id => (id, "ok:" + id)).ToArray()));
             return Status(r, live: r.Live);
         });
         using var cts = new CancellationTokenSource();
@@ -257,8 +265,9 @@ public sealed class PickupClientLiveAdv3Tests
 
         await StopAsync(stream, move, cts);
 
+        Volatile.Read(ref entered).Should().Be(ids.Length, "all ten were being opened when the consumer cancelled");
         exchange.AcknowledgedIds.Should().BeEmpty();
-        foreach (var id in new[] { "p1", "p2", "p3", "p4", "p5" })
+        foreach (var id in ids)
             exchange.Duplicates.Contains(L, DefaultOutcome($"ok:{id}").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
         SpinWait.SpinUntil(() => exchange.Clock.ScheduledTimers == 0 && exchange.Budgeted!.Reserved == 0, PickupTest.Timeout)

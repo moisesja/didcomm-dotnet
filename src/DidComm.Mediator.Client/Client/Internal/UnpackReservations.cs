@@ -35,10 +35,21 @@ namespace DidComm.Mediator.Client.Internal;
 /// </remarks>
 internal sealed class UnpackReservations
 {
-    /// <summary>C: host unpack calls started and not yet ended in one container, all mailboxes and senders together (256, owner decision D: so 64 mailboxes each with four slow lookups are needed to hold it all).</summary>
+    /// <summary>
+    /// C: host unpack calls started and not yet ended in one container, all mailboxes and senders
+    /// together: 256 (#111, owner decision D). One sender at its bound of
+    /// <see cref="MaxPerSender"/> in a mailbox needs 256 / 16 = 16 mailboxes to hold it all, and so
+    /// do 16 senders at their bound in one mailbox.
+    /// </summary>
     internal const int MaxReserved = 256;
 
-    /// <summary>P for a named sender: host unpack calls started and not yet ended per (mediator, mailbox, sender DID).</summary>
+    /// <summary>
+    /// P for a named sender: host unpack calls started and not yet ended per (mediator, mailbox,
+    /// sender DID): 16 (#111, owner decision G). Not below
+    /// <see cref="DeliveredMessageUnpacker.FetchConcurrency"/>, how many messages one delivery opens
+    /// at once, and the two change together: with a lower bound, messages of one sender are refused
+    /// inside one delivery.
+    /// </summary>
     internal const int MaxPerSender = 16;
 
     /// <summary>P for the anonymous partition: host unpack calls started and not yet ended per (mediator, mailbox) for messages without a named sender.</summary>

@@ -25,13 +25,17 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
     private static readonly DeliveryScope Carol = new(FakePickupExchange.M, "did:example:carol");
     private const string SamKid = "did:example:sam#key-x25519-1";
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     /// <summary>
-    /// RT2A-1, restated. Six messages: the first never ends and ignores its token, the second needs
-    /// 12 s and opens, the third fails at once (its worker takes the fifth), the fourth and the fifth
-    /// never open, and the sixth waits for a worker. Before, the first two had half the budget each,
-    /// their shares ended together at 10 s with the sixth waiting, and both were cut. Now no message
-    /// has a limit of its own: at 10 s nothing is cut, the second opens at 12 s, its worker takes
-    /// the sixth, which opens, and the three that never open end with the budget.
+    /// RT2A-1, restated. Two more messages than are opened at once (eighteen): the first never ends
+    /// and ignores its token, the second needs 12 s and opens, the third fails at once (its worker
+    /// takes the seventeenth), the fourth to the seventeenth never open, and the eighteenth waits
+    /// for a worker. Before, each message had a share of the budget, the shares of the first ones
+    /// ended together at 10 s with a message waiting, and they were cut. Now no message has a limit
+    /// of its own: at 10 s nothing is cut, the second opens at 12 s, its worker takes the
+    /// eighteenth, which opens, and the fifteen that never open end with the budget.
     /// </summary>
     [Fact]
     public async Task RT2A_1_a_message_that_needs_twelve_seconds_opens_whatever_waits_behind_it()
@@ -54,7 +58,7 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
                     return UnpackFakes.Opened(label);
                 case "fast-2":
                     throw new CryptoException("JWE could not be decrypted.");
-                case "open-5":
+                case "open-last":
                     using (calls.Enter(label, ct))
                         return UnpackFakes.Opened(label);
                 default:
@@ -62,30 +66,36 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
                         return await UnpackFakes.StallUntilCancelled(ct).ConfigureAwait(false);
             }
         }, Budget, time);
-        var labels = new[] { "x-0", "slow-1", "fast-2", "stall-3", "stall-4", "open-5" };
+        // x-0, slow-1, fast-2, then AtOnce − 2 stalling (the last of them is taken by fast-2's
+        // worker), then the one that waits for a worker.
+        var stalling = Enumerable.Range(3, AtOnce - 2).Select(i => "stall-" + i).ToArray();
+        var labels = new[] { "x-0", "slow-1", "fast-2" }.Concat(stalling).Append("open-last").ToArray();
+        labels.Should().HaveCount(AtOnce + 2);
+        var last = labels.Length - 1;
         var messages = labels.Select(l => new DeliveredInput(l, TestJwe.Bytes(TestJwe.Anoncrypt(l)))).ToArray();
         try
         {
             var batch = unpacker.UnpackAllAsync(Bob, messages, "request-1", default);
-            await calls.WaitForAsync(4, RealTime); // x-0, slow-1, stall-3, and stall-4 taken after fast-2 failed
-            calls.Labels.Should().BeEquivalentTo(new[] { "x-0", "slow-1", "stall-3", "stall-4" }, "only the sixth waits for a worker");
+            await calls.WaitForAsync(AtOnce, RealTime); // x-0, slow-1 and the stalling ones, the last of them taken after fast-2 failed
+            calls.Labels.Should().BeEquivalentTo(new[] { "x-0", "slow-1" }.Concat(stalling), "only the last message waits for a worker");
 
             time.Advance(TimeSpan.FromSeconds(10));
-            calls.Tokens.Should().OnlyContain(t => !t.IsCancellationRequested, "no message has a time limit of its own: at 10 s, with the sixth waiting, nothing is cut");
-            calls.Count.Should().Be(4, "the sixth still waits");
+            calls.Tokens.Should().OnlyContain(t => !t.IsCancellationRequested, "no message has a time limit of its own: at 10 s, with the last one waiting, nothing is cut");
+            calls.Count.Should().Be(AtOnce, "the last one still waits");
 
             time.Advance(TimeSpan.FromSeconds(2)); // 12 s: slow-1's lookup ends
-            await calls.WaitForAsync(5, RealTime);
-            SpinWait.SpinUntil(() => unpacker.Settled == 3, RealTime).Should().BeTrue("fast-2 failed, slow-1 opened and the sixth opened");
-            time.Advance(Budget); // the budget's end, for x-0, stall-3 and stall-4
+            await calls.WaitForAsync(AtOnce + 1, RealTime);
+            SpinWait.SpinUntil(() => unpacker.Settled == 3, RealTime).Should().BeTrue("fast-2 failed, slow-1 opened and the last one opened");
+            time.Advance(Budget); // the budget's end, for x-0 and the stalling ones
             var outcomes = await batch.WaitAsync(RealTime);
 
             outcomes[1].Succeeded.Should().BeTrue("it needed 12 s of the 20 s budget");
-            outcomes[5].Succeeded.Should().BeTrue("it got the worker slow-1 gave back");
+            outcomes[last].Succeeded.Should().BeTrue("it got the worker slow-1 gave back");
             outcomes[2].Error.Should().BeOfType<CryptoException>();
-            new[] { outcomes[0], outcomes[3], outcomes[4] }.Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
-            unpacker.Memory.HeldBack(Bob, labels).Should().Equal(new[] { true, false, true, true, true, false },
-                "the two that opened are not remembered; fast-2 failed on its own; the three that never opened started with the budget");
+            outcomes.Where((_, i) => i == 0 || (i >= 3 && i < last)).Should().HaveCount(AtOnce - 1)
+                .And.OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"));
+            unpacker.Memory.HeldBack(Bob, labels).Should().Equal(labels.Select(l => l != "slow-1" && l != "open-last"),
+                "the two that opened are not remembered; fast-2 failed on its own; the {0} that never opened started with the budget", AtOnce - 1);
         }
         finally
         {
@@ -97,9 +107,10 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
     /// <summary>
     /// A take refused for a running message's partition does not end that message (A1's refusal cut,
     /// restated). Sam's first message never opens and four that fail at once are behind it, so from
-    /// then on nothing of its delivery waits. Ten seconds in, a second delivery brings four more
-    /// messages naming Sam: three take the rest of Sam's partition and the fourth is refused. Sam's
-    /// first message keeps running; it ends with its delivery's budget, and is remembered then.
+    /// then on nothing of its delivery waits. Ten seconds in, a second delivery brings sixteen more
+    /// messages naming Sam (as many as Sam's bound, <see cref="UnpackReservations.MaxPerSender"/>):
+    /// fifteen take the rest of Sam's partition and the sixteenth is refused. Sam's first message
+    /// keeps running; it ends with its delivery's budget, and is remembered then.
     /// </summary>
     [Fact]
     public async Task A_take_refused_for_a_running_messages_partition_does_not_end_it()
@@ -109,9 +120,13 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
         {
             var first = await StartAloneAsync(unpacker, time, calls, "sam-0", TestJwe.Authcrypt(SamKid, "sam-0"));
 
-            var second = unpacker.UnpackAllAsync(Bob, Enumerable.Range(1, 4).Select(i => Message(TestJwe.Authcrypt(SamKid, "sam-" + i), "sam-" + i)).ToArray(), "request-2", default);
-            await calls.WaitForAsync(4, RealTime); // sam-0 and sam-1..3: Sam's partition is full, sam-4 is refused
+            const int bound = UnpackReservations.MaxPerSender;
+            bound.Should().BeLessThanOrEqualTo(AtOnce, "every message of the second delivery is taken at once, so the last of them is the one refused");
+            var second = unpacker.UnpackAllAsync(Bob, Enumerable.Range(1, bound).Select(i => Message(TestJwe.Authcrypt(SamKid, "sam-" + i), "sam-" + i)).ToArray(), "request-2", default);
+            await calls.WaitForAsync(bound, RealTime); // sam-0 and fifteen more: Sam's partition is full, the sixteenth of the second delivery is refused
             SpinWait.SpinUntil(() => unpacker.Settled == 5, RealTime).Should().BeTrue("the four that failed at once, and the refusal");
+            unpacker.Reserved.Should().Be(bound, "Sam's partition is full");
+            calls.Labels.Should().NotContain("sam-" + bound, "the refused message never started");
             TokenOf(calls, "sam-0").IsCancellationRequested.Should().BeFalse("a refusal ends no running message");
             first.IsCompleted.Should().BeFalse();
 
@@ -121,7 +136,9 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
             unpacker.Memory.HeldBack(Bob, new[] { "sam-0" }).Single().Should().BeTrue("it started with its delivery's budget and had not opened when the budget ended");
 
             time.Advance(Budget);
-            (await second.WaitAsync(RealTime))[3].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("for its sender");
+            var refused = await second.WaitAsync(RealTime);
+            refused[bound - 1].Error.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain("for its sender");
+            refused.Take(bound - 1).Should().OnlyContain(o => o.Error is TimeoutException && o.Error.Message.Contains("ran out while it was being opened"), "the fifteen in front of it were not refused");
         }
         finally
         {
@@ -142,12 +159,12 @@ public sealed class DeliveredUnpackNoPerMessageLimitTests
         try
         {
             var first = await StartAloneAsync(unpacker, time, calls, "x-0", TestJwe.Anoncrypt("x-0"));
-            // Then C - 1 lookups that ignore their token, in other mailboxes (deliveries of four, the
-            // last of three): the container is full.
-            const int mailboxes = UnpackReservations.MaxReserved / DeliveredMessageUnpacker.FetchConcurrency;
+            // Then C - 1 lookups that ignore their token, in other mailboxes (deliveries of sixteen,
+            // as many as are opened at once, the last of fifteen): the container is full.
+            const int mailboxes = UnpackReservations.MaxReserved / AtOnce;
             var others = Enumerable.Range(0, mailboxes)
                 .Select(m => unpacker.UnpackAllAsync(new DeliveryScope(FakePickupExchange.M, $"did:example:tenant-{m}"),
-                    Enumerable.Range(0, m == mailboxes - 1 ? 3 : 4).Select(i => Message(TestJwe.Anoncrypt($"junk-{m}-{i}"), $"junk-{m}-{i}")).ToArray(), "request-t" + m, default))
+                    Enumerable.Range(0, m == mailboxes - 1 ? AtOnce - 1 : AtOnce).Select(i => Message(TestJwe.Anoncrypt($"junk-{m}-{i}"), $"junk-{m}-{i}")).ToArray(), "request-t" + m, default))
                 .ToArray();
             await calls.WaitForAsync(UnpackReservations.MaxReserved, RealTime);
             unpacker.Reserved.Should().Be(UnpackReservations.MaxReserved);
