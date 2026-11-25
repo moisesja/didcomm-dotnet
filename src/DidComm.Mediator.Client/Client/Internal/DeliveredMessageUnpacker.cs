@@ -37,7 +37,7 @@ namespace DidComm.Mediator.Client.Internal;
 /// </list>
 /// <para>
 /// <strong>The outcome of a call</strong> is one of three, decided by whether the delivery is being
-/// ended when the worker observes it, never by the type of what was thrown:
+/// ended when the worker observes it, never by the type of what was thrown (I-22):
 /// </para>
 /// <list type="bullet">
 /// <item><description><em>Opened:</em> its reservation is given back, the success is recorded and the message is forgotten.</description></item>
@@ -46,9 +46,21 @@ namespace DidComm.Mediator.Client.Internal;
 /// </list>
 /// <para>
 /// A worker takes no further message once the delivery is being ended. The cost of having no limit
-/// per message: messages at the front that never open keep all <see cref="FetchConcurrency"/>
+/// per message (R-3): messages at the front that never open keep all <see cref="FetchConcurrency"/>
 /// workers for one whole budget, and the messages behind them fail as out of time before their turn;
-/// those at the front are remembered then, so the next delivery holds them back.
+/// those at the front are remembered then, so the next delivery holds them back
+/// (<c>DeliveredUnpackSixteenAtOnceTests.Sixteen_never_opening_messages_of_one_sender_hold_every_worker_for_the_budget_and_the_message_behind_them_gets_its_turn_in_the_next_delivery</c>).
+/// Only a delivery of more than <see cref="FetchConcurrency"/> messages has messages behind that
+/// many.
+/// </para>
+/// <para>
+/// <strong>The tokens the unpacker reads (R-16).</strong> It reads the delivery's own token, the
+/// token the delivery was opened with and the owner's shutdown, and no other. Host code should watch
+/// the token it is handed. Host code that watches another token instead (one of two that a caller
+/// combined into the token it passed, for example) and reports that token's cancellation as a
+/// failure of its own may do so before any token the unpacker reads is cancelled: the failure is
+/// then the message's own, and the message is remembered
+/// (<c>DeliveredUnpackTokenStateRt3Tests.A_failure_reported_from_one_of_two_combined_caller_tokens_is_the_messages_own_and_one_from_the_token_handed_ends_the_delivery_cancelled</c>).
 /// </para>
 /// <para>
 /// <strong>The end of a delivery (I-5).</strong> The first of "every message ended" and "the budget
@@ -61,8 +73,24 @@ namespace DidComm.Mediator.Client.Internal;
 /// continuations run asynchronously.
 /// </para>
 /// <para>
-/// <strong>What is remembered (I-9; owner decision C, "every failure, fair to late starts", under
-/// owner decision E).</strong> A message whose host call ran (its code started:
+/// <strong>The delivery after one whose budget ended (R-13).</strong> A lookup that has been
+/// cancelled keeps its reservation until it ends. If the next delivery arrives before that, messages
+/// of the same partition (the same sender's or, without a named sender, the mailbox's) beyond the
+/// reservations still free are refused at once, are not remembered, and come again; other
+/// partitions' messages are not affected. With a lookup that ends as soon as it is cancelled this is
+/// rare; with one that takes even a millisecond to end and a delivery that follows immediately it
+/// is the usual outcome. Pinned: with sixteen lookups still ending, all sixteen messages of the next
+/// delivery are refused; with ten, six start and four are refused; with four, none is refused
+/// (<c>DeliveredUnpackNextDeliveryRt3Tests.While_the_lookups_of_the_delivery_before_are_still_ending_the_next_delivery_starts_what_the_bound_of_sixteen_leaves_free_and_refuses_the_rest</c>);
+/// through a fetch loop, the message behind is returned at 80 s instead of 40 s
+/// (<c>SlowSenderFetchMatrixTests.A_fetch_that_arrives_while_the_lookups_of_the_fetch_before_are_still_ending_refuses_what_the_bound_does_not_leave_free_and_the_message_is_returned_a_lease_later</c>).
+/// So every bound for reaching a message is stated on the condition that the lookups of one
+/// delivery have ended when the next one starts; a delivery that starts earlier refuses, takes no
+/// time, and those messages wait for their next delivery, at most one lease.
+/// </para>
+/// <para>
+/// <strong>What is remembered (I-9; owner decision C, "Every failure, fair to late starts
+/// (Recommended)", under owner decision E).</strong> A message whose host call ran (its code started:
 /// <c>HostCall.Run</c> records the clock's reading as its first action) and did not open is struck
 /// in two cases only:
 /// </para>
@@ -86,7 +114,10 @@ namespace DidComm.Mediator.Client.Internal;
 /// or of a timer. So the caller always gets its task back, and the budget decides the outcome, even
 /// when a resolver blocks its thread. The lookup is host code and may outlive its delivery: its
 /// reservation is held until it returns, so at most <see cref="UnpackReservations.MaxReserved"/> such
-/// calls run per container (R-8).
+/// calls run per container (R-8). A resolver that blocks its thread holds a thread-pool thread for
+/// each lookup, up to <see cref="FetchConcurrency"/> per delivery. With such a resolver a message's
+/// code can start later than <see cref="StartAllowance"/>, and the message is then not remembered at
+/// the budget's end (S2); and the budget's own timer can be delayed.
 /// </para>
 /// <para>
 /// <strong>What host code can reach (I-4).</strong> Host code holds the budget's token. While the
@@ -99,7 +130,7 @@ namespace DidComm.Mediator.Client.Internal;
 internal sealed class DeliveredMessageUnpacker
 {
     /// <summary>
-    /// How many messages of one delivery are opened at the same time: 16 (#111, owner decision G).
+    /// How many messages of one delivery are opened at the same time: 16 (#111, owner decision G; I-23).
     /// Each message taken reserves one host call in its sender's partition, so a delivery can ask
     /// one partition for this many at once: <see cref="UnpackReservations.MaxPerSender"/> and
     /// <see cref="UnpackReservations.MaxPerAnonymous"/> are not below it, and the two change
