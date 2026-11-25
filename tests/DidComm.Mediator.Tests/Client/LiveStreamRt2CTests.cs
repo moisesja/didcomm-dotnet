@@ -122,6 +122,34 @@ public sealed class LiveStreamRt2CTests(ITestOutputHelper output)
     }
 
     /// <summary>
+    /// I-18 with I-19 at a mediator that does not set delivered messages aside: its queue's head is a
+    /// message that never opens. Each cycle's first drain round is answered with it, already yielded as
+    /// a failure by the previous cycle; the second round gets no answer. Nothing new reaches the
+    /// stream, so the run's back-off should grow (1 s doubling to 30 s): the same failure is handed
+    /// to the consumer at most once per back-off step, at most 24 times in ten minutes.
+    /// </summary>
+    [Fact(Skip = "RT2 defect: a round that brings back only a failure reported in the previous cycle restarts the back-off")]
+    public async Task A_round_that_brings_back_only_the_previous_cycles_failure_does_not_restart_the_back_off()
+    {
+        var exchange = new SimExchange();
+        var rounds = 0;
+        exchange.Inner.On(MessagePickup.LiveDeliveryChangeType, r =>
+        {
+            rounds = 0;
+            return Status(r, live: r.Live);
+        });
+        exchange.Inner.On(MessagePickup.DeliveryRequestType, r => ++rounds == 1 ? Delivery(r, ("j", "bad:j")) : throw new TimeoutException("no answer (test)"));
+        await using var driver = new StreamDriver(exchange);
+        await driver.RunAsync(() => false, TenMinutes);
+
+        var liveOns = exchange.Log.Count(r => r.At <= TenMinutes && r.Type == LiveOn);
+        var handed = driver.Items.Count(i => i.Item.Id == "j" && i.At <= TenMinutes);
+        output.WriteLine($"{liveOns} live-on, {exchange.Log.Count(r => r.At <= TenMinutes)} requests in 10 min; the same failure handed {handed} times; host calls {exchange.HostCalls}");
+        handed.Should().BeLessThanOrEqualTo(BackoffSteps(TenMinutes), "nothing new arrived, so the back-off grows");
+        liveOns.Should().BeLessThanOrEqualTo(BackoffSteps(TenMinutes));
+    }
+
+    /// <summary>
     /// I-19 (QA2-3) held: the per-drain set at its stated bound. A mediator mints a new id for the
     /// same bytes at every round (so every round is new and the drain runs its fifty rounds), and a
     /// push of ten new messages waits at every turn. What the drain remembers stays within
