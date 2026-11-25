@@ -42,9 +42,11 @@ namespace DidComm.Mediator.Client;
 /// <see cref="MediatorClientOptions.DedupeCapacity"/>). <see cref="UnpackResult.RecipientKid"/>
 /// names the first of those DIDs the envelope lists: its key opened every copy. A fetch filtered on
 /// another of those DIDs reports that DID's copy as a failed item, "for another of your DIDs",
-/// because a filter accepts only what one of the filter DID's own keys opened; that copy stays
-/// queued until you fetch it without a filter, discard it with <see cref="PickupClient.AckAsync"/>,
-/// or it ages out at the mediator.
+/// because a filter accepts only what one of the filter DID's own keys opened. That copy is yours
+/// to settle: take it with a fetch without the filter, or discard it with
+/// <see cref="PickupClient.AckAsync"/>. Do not leave it queued: while it is queued it is opened
+/// again at every fetch under the filter, and it stays in front of what came after it (see
+/// <see cref="PickupClient.FetchAsync"/>, "The <c>recipientDid</c> filter").
 /// </para>
 /// </remarks>
 public sealed class PickupItem
@@ -125,7 +127,10 @@ public sealed class PickupItem
     /// <para>
     /// These are exactly the failed messages the client does not remember as "did not open" (see
     /// <see cref="PickupClient.FetchAsync"/>, "Messages that did not open"): the flag and that memory
-    /// are one decision. One more case follows from that, for a host that passes a clock of its own:
+    /// are one decision. That is exact for one delivery. When two deliveries of the same message
+    /// overlap (a fetch and a live stream on one mailbox, for example), each item says whether that
+    /// delivery gave the message the whole time, and the message is remembered once. One more case
+    /// follows from the one decision, for a host that passes a clock of its own:
     /// if that clock throws at the moment the client would record that a message did not open,
     /// nothing is recorded, and the item is inconclusive whatever its error.
     /// </para>
@@ -136,18 +141,29 @@ public sealed class PickupItem
     /// opened again because it did not open when it was delivered before (the client holds it back
     /// for a pause); it is not a message this client opens at all (malformed, or not a DIDComm
     /// message in encrypted form); or a <c>recipientDid</c> filter turned it away. <c>false</c>
-    /// alone is not a reason to discard an item. The message a filter turned away is the example: it
-    /// opened, for another of your DIDs, and a fetch without the filter returns it. Discard a failed
-    /// item when you have given up on its message, and never while this is <c>true</c>.
+    /// alone is not a reason to discard an item. When the delivery counted against the message (the
+    /// first three cases), the client tries the message again after its pause, and giving up on it
+    /// is your decision. A message a <c>recipientDid</c> filter turned away is a case of its own: it
+    /// opened, for another of your DIDs, and it is yours to settle, by taking it with a fetch
+    /// without the filter or by discarding it with <see cref="PickupClient.AckAsync"/>; do not leave
+    /// it queued (see <see cref="PickupClient.FetchAsync"/>, "The <c>recipientDid</c> filter").
+    /// Discard a failed item when you have given up on its message, and never while this is
+    /// <c>true</c>.
     /// </para>
     /// <para>
     /// <strong>What happens to an inconclusive message.</strong> The mediator keeps it and delivers
     /// it again (after its lease, 60 seconds at this library's mediator; a mediator that does not
     /// set delivered messages aside delivers it again at the next fetch), and the client starts on
     /// it again then, once what was in its way is gone. For a message whose turn did not come, or
-    /// that was started late: once the messages that were in front of it have opened, are held
-    /// back, or were discarded by you, and a thread is free for it in time (while your resolvers
-    /// keep the thread pool busy, it can come back inconclusive again). For a message refused for
+    /// that was started late: once the messages that were in front of it have been opened and
+    /// acknowledged, are held back, or were discarded by you, and a thread is free for it in time
+    /// (while your resolvers keep the thread pool busy, it can come back inconclusive again). One
+    /// kind of message in front is none of the three while you leave it queued: a message a
+    /// <c>recipientDid</c> filter turned away opened, but it is not acknowledged and not held back,
+    /// so it is opened again at every fetch under the filter. Where a fetch brings more than
+    /// sixteen messages, sixteen of those
+    /// that are slow to open keep a message behind them inconclusive at every fetch, until you take
+    /// them with a fetch without the filter or discard them. For a message refused for
     /// capacity: once the openings that were in its way have ended (a DID resolver that ignores
     /// cancellation can keep them running; until they end, the message comes back inconclusive
     /// again). Discarding an inconclusive item deletes a message that was not given its chance,

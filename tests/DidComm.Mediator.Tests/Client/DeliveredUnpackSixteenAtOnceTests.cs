@@ -9,7 +9,7 @@ using Xunit.Abstractions;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// Owner decision G for #111, "open 16 at once": up to sixteen messages of a delivery are opened at
+/// Owner decision G for #111, "Open 16 at once (Recommended)": up to sixteen messages of a delivery are opened at
 /// the same time (<see cref="DeliveredMessageUnpacker.FetchConcurrency"/>), and one named sender may
 /// have sixteen host calls running in a mailbox (<see cref="UnpackReservations.MaxPerSender"/>).
 /// The two bounds belong together: a delivery takes sixteen of its messages at once, so a sender
@@ -36,8 +36,8 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
     [Fact]
     public void Sixteen_messages_of_a_delivery_are_opened_at_once_and_one_sender_may_have_sixteen_host_calls()
     {
-        DeliveredMessageUnpacker.FetchConcurrency.Should().Be(16, "owner decision G: open 16 at once");
-        UnpackReservations.MaxPerSender.Should().Be(16, "owner decision G: one sender may have 16 open at once");
+        DeliveredMessageUnpacker.FetchConcurrency.Should().Be(16, "sixteen messages of a delivery are opened at once (owner decision G)");
+        UnpackReservations.MaxPerSender.Should().Be(16, "one sender may have sixteen host calls running at once (owner decision G)");
     }
 
     /// <summary>
@@ -57,7 +57,8 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
 
     /// <summary>
     /// The behaviour the relation protects: ten messages (what this library's mediator delivers at
-    /// once) and sixteen messages from one sender in one delivery, each taking one second to open.
+    /// once at its defaults) and sixteen messages from one sender in one delivery, each taking one
+    /// second to open.
     /// All of them open and none is refused; from a named sender, and without a named sender. The
     /// counts are printed, and are in the failure's text: with sixteen opened at once and a bound
     /// of four per sender, only four of the named sender's open and the others are refused.
@@ -105,7 +106,7 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
 
     /// <summary>
     /// The bound on one sender, across deliveries of ten (what this library's mediator delivers at
-    /// once): Mallory's lookups never end and ignore their token. Her first ten messages are let go
+    /// once at its defaults): Mallory's lookups never end and ignore their token. Her first ten messages are let go
     /// at their delivery's budget and still run. The next delivery brings eight more of hers and,
     /// behind them, a message of Alice's: six of Mallory's start, which makes sixteen running; her
     /// seventeenth and eighteenth are refused for her bound at once, without starting; and Alice's
@@ -160,8 +161,8 @@ public sealed class DeliveredUnpackSixteenAtOnceTests(ITestOutputHelper output)
     }
 
     /// <summary>
-    /// What one sender can hold in one delivery, the cost owner decision G accepts ("one sender
-    /// whose lookups hang can hold 16 per mailbox instead of 4"): seventeen messages of Mallory's
+    /// What one sender can hold in one delivery, sixteen host calls (the cost stated in the option
+    /// chosen as owner decision G): seventeen messages of Mallory's
     /// that never open, and a message of Alice's behind them, in one delivery. Sixteen of Mallory's
     /// start and keep all sixteen workers until the budget ends; her seventeenth and Alice's
     /// message do not get their turn in that delivery. One tick before the budget's end neither

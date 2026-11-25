@@ -10,8 +10,8 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// #111, the delivery that follows one whose budget ended, while the host calls of the first are
-/// still ending (the documented residual R-13, restated and re-measured with sixteen opened at once
-/// and sixteen per sender). A reservation is held until its host call ends, and a lookup that
+/// still ending (the documented residual R-13, measured with sixteen opened at once and sixteen
+/// per sender). A reservation is held until its host call ends, and a lookup that
 /// honours its token may end a moment after its delivery's result is set. The set-up: messages of
 /// one partition (one named sender's, or the mailbox's messages that name no sender) are opened in a
 /// first delivery and never open; their lookups stop when their token is cancelled and end only when
@@ -61,7 +61,7 @@ public sealed class DeliveredUnpackNextDeliveryRt3Tests(ITestOutputHelper output
     /// the same for a named sender and for the mailbox's messages that name no sender.
     /// <list type="bullet">
     /// <item><description>sixteen still ending, sixteen more: none starts, sixteen are refused, and the delivery ends without the clock;</description></item>
-    /// <item><description>ten still ending, ten more (the most this library's mediator delivers at once): six start, four are refused;</description></item>
+    /// <item><description>ten still ending, ten more (the most this library's mediator delivers at once at its defaults): six start, four are refused;</description></item>
     /// <item><description>four still ending, four more: all four start (they take four of the sixteen workers), none is refused.</description></item>
     /// </list>
     /// The ones that start never open, so that delivery lasts its whole budget, and they are

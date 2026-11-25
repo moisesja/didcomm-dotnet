@@ -108,8 +108,8 @@ public sealed class MediatorClientOptions
     /// Sixteen of them at the front of a delivery keep every place, and the messages behind them in
     /// that delivery run out of time before their turn and get it in the next delivery that brings
     /// them. Only a delivery of more than sixteen has messages behind sixteen; this library's
-    /// mediator delivers at most ten. A live stream opens a delivery before it yields any of its
-    /// items, so the time you spend on an item never counts against this.
+    /// mediator delivers at most ten at its defaults. A live stream opens a delivery before it yields
+    /// any of its items, so the time you spend on an item never counts against this.
     /// </para>
     /// <para>
     /// <strong>Messages that did not open are remembered</strong> (per mediator and mailbox): a
@@ -168,17 +168,18 @@ public sealed class MediatorClientOptions
     /// keeps its reservation until it returns. Each opening is reserved before it starts, and at most
     /// 16 are held at a time per sender, 16 per mailbox for messages whose outer envelope names no
     /// sender, and 256 per container; a message beyond a bound fails at once ("unpack capacity
-    /// exhausted") and comes back later. So one sender whose lookups do not return holds 16 openings
-    /// per mailbox. Measured at this library's mediator with thirty messages from such a sender in
-    /// front: sixteen were opened, fourteen were refused at once, and another sender's message behind
-    /// them was returned after 40 seconds at a fetch limit of 10 and after 80 seconds at a limit of
-    /// 4. With the same thirty and lookups that honour their token, all thirty were opened once,
-    /// none was refused, and the other sender's message was returned after 60 seconds at a limit of
-    /// 10 and after 160 seconds at a limit of 4. Many senders whose lookups ignore cancellation
-    /// (sixteen in one mailbox, or one in sixteen mailboxes) can still hold all 256, and until those
-    /// lookups end every delivered message fails at once, for every DID and tenant of the container;
-    /// a resolver that blocks its thread can hold up to 256 threads. Use a resolver that honours its
-    /// cancellation token.
+    /// exhausted") and comes back later. An opening counts toward its sender's 16 in the mailbox
+    /// until its lookup returns. Measured at this library's mediator with thirty messages in front
+    /// that name one sender whose lookups do not return: sixteen were opened, fourteen were refused
+    /// at once, and another sender's message behind them was returned after 40 seconds at a fetch
+    /// limit of 10 and after 80 seconds at a limit of 4. With the same thirty and lookups that honour
+    /// their token, all thirty were opened once, none was refused, and the other sender's message was
+    /// returned after 60 seconds at a limit of 10 and after 160 seconds at a limit of 4. The bound of
+    /// 256 is one for the whole container:
+    /// the openings of sixteen senders in one mailbox, or of one sender in sixteen mailboxes, add up
+    /// to it, and while 256 are held by lookups that have not returned every delivered message fails
+    /// at once, for every DID and tenant of the container; a resolver that blocks its thread can
+    /// hold up to 256 threads. Use a resolver that honours its cancellation token.
     /// </para>
     /// </remarks>
     public TimeSpan UnpackTimeout { get; set; } = TimeSpan.FromSeconds(20);

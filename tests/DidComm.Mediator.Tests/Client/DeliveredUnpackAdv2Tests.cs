@@ -74,7 +74,7 @@ public sealed class DeliveredUnpackAdv2Tests
     /// <summary>
     /// ADV2-1 companion, under owner decisions E and G for #111 (one budget per delivery, no time
     /// limit per message, sixteen opened at once). Ten stalling messages under a 30 s budget, as
-    /// many as this library's mediator delivers at once: all ten are being opened until the budget
+    /// many as this library's mediator delivers at once at its defaults: all ten are being opened until the budget
     /// ends. Every message has failed when the budget ends, none later, and none was left without
     /// its turn (as before fix round 2 of #111, when each message had a share of the budget; with
     /// four opened at once and no shares, six of the ten were out of time before their turn).

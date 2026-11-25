@@ -26,7 +26,7 @@ namespace DidComm.InteropTests.Mediator.Client;
 /// </summary>
 /// <remarks>
 /// The client opens up to sixteen messages of a delivery at once (#111, owner decision G), and this
-/// mediator delivers at most ten per fetch, so every message of a delivery here starts when the
+/// mediator delivers at most ten per fetch at its defaults, so every message of a delivery here starts when the
 /// delivery does: a delivery of messages that never open lasts one budget and all of them are
 /// remembered at its end.
 /// </remarks>
@@ -196,7 +196,7 @@ public sealed class PickupClientSlowSenderAcceptanceTests(ITestOutputHelper outp
     /// A3: Mallory sends thirty messages whose sender lookups never end and ignore their token, then
     /// Alice (another sender) sends hers. Mallory's bound is sixteen host calls
     /// (<see cref="UnpackReservations.MaxPerSender"/>): they are the only ones of hers that ever run.
-    /// This mediator delivers at most ten per fetch, so the bound is reached over several fetches:
+    /// This mediator delivers at most ten per fetch at its defaults, so the bound is reached over several fetches:
     /// each fetch that starts some of her lookups lasts one budget (a message has no time limit of
     /// its own: #111, owner decision E), and from the fetch that starts her sixteenth on, each of her
     /// further messages is refused at once, without host code, as "unpack capacity exhausted" for
