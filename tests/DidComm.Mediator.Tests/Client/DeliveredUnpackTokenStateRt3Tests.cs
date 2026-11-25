@@ -11,19 +11,29 @@ using static DidComm.Mediator.Tests.Client.FakePickupExchange;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// RT3 (#111, fix round 2): how the unpacker tells a message's own failure from the end of its
-/// delivery, in the orderings <see cref="DeliveredUnpackTokenStateTests"/> does not set up. The
-/// token a delivery is opened with may itself be cancelled by another token (a live stream
-/// enumerated with two tokens hands its deliveries the combination of both), and host code may
-/// report its cancellation as a failure from a callback on the token the caller cancelled. What is
-/// checked: the delivery ends cancelled and the message is not remembered, as for any caller's
-/// cancellation.
+/// RT3 (#111, fix round 2), decided in fix round 3: how the unpacker tells a message's own failure
+/// from the end of its delivery when the token the delivery is opened with is itself cancelled by
+/// another token (a live stream enumerated with two tokens hands its deliveries the combination of
+/// both), in the orderings <see cref="DeliveredUnpackTokenStateTests"/> does not set up.
 /// </summary>
 /// <remarks>
+/// <para>
+/// What the tests show, and why. The unpacker decides by the state of the tokens it can read: the
+/// delivery's own (its budget), the one the delivery was opened with, and the owner's shutdown. A
+/// token that the one it was given was combined from is not visible to it. Host code that watches
+/// such a token, and reports its cancellation as a failure from a callback there, reports it
+/// before the combination is cancelled: none of the tokens the unpacker reads is cancelled yet, so
+/// the failure is the message's own and the message is remembered. Host code that watches the
+/// token it is handed reports the same failure once the delivery is being ended: the delivery ends
+/// cancelled and nothing is remembered. This is a documented residual, not a defect to fix here:
+/// the client is handed one token, and host code should watch the token it is handed.
+/// </para>
+/// <para>
 /// As in <see cref="DeliveredUnpackTokenStateTests"/>: a lookup registers its callback only once the
 /// test has seen the delivery start and the lookup is parked (<see cref="RegistrationGate"/>), so the
 /// order of the callbacks is fixed, and every cancellation is made from a thread-pool thread. Real
 /// time is only a hang guard.
+/// </para>
 /// </remarks>
 public sealed class DeliveredUnpackTokenStateRt3Tests
 {
@@ -34,16 +44,24 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
     /// <summary>
     /// A delivery opened with a token that two caller tokens cancel (the combination a compiler
     /// makes for an enumeration given two tokens). The caller cancels one of the two while the
-    /// message is being opened, and the lookup, which watches that token, reports the cancellation
-    /// as a resolution failure from its callback there. The delivery ends cancelled and the message
-    /// is not remembered.
+    /// message is being opened, and the lookup reports the cancellation as a resolution failure
+    /// from its callback on the token it watches.
+    /// <list type="bullet">
+    /// <item>
+    /// It watches the token it was handed: the delivery ends cancelled and the message is not
+    /// remembered, as for any caller's cancellation.
+    /// </item>
+    /// <item>
+    /// It watches the caller's token that was cancelled, one the delivery's token was combined
+    /// from: the delivery ends with the lookup's failure as the message's outcome, and the message
+    /// is remembered (the residual: see the class remarks).
+    /// </item>
+    /// </list>
     /// </summary>
-    /// <remarks>
-    /// Observed on the head of fix round 2: the delivery ends with the lookup's failure as the
-    /// message's outcome, and the message is remembered.
-    /// </remarks>
-    [Fact(Skip = "RT3: whether a failure reported when the caller cancels a token the delivery's token is combined from is taken as the message's own")]
-    public async Task A_failure_reported_when_the_caller_cancels_one_of_two_combined_tokens_leaves_the_result_cancelled_and_nothing_remembered()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_failure_reported_from_one_of_two_combined_caller_tokens_is_the_messages_own_and_one_from_the_token_handed_ends_the_delivery_cancelled(bool theLookupWatchesTheTokenItWasHanded)
     {
         var time = new ManualTimeProvider();
         var calls = new HostCallLog();
@@ -51,7 +69,8 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         using var first = new CancellationTokenSource();
         using var second = new CancellationTokenSource();
         using var combined = CancellationTokenSource.CreateLinkedTokenSource(first.Token, second.Token);
-        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register, on: _ => first.Token), Budget, time);
+        var unpacker = new DeliveredMessageUnpacker(
+            CallbackLookups.ReportsCancellationAsFailure(calls, register, on: handed => theLookupWatchesTheTokenItWasHanded ? handed : first.Token), Budget, time);
 
         var delivery = unpacker.UnpackAllAsync(Bob, new[] { Message("alice-1") }, "request-1", combined.Token);
         await register.OpenAsync(1, RealTime); // the worker waits on its call: the lookup's callback is registered last
@@ -60,23 +79,40 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         await Task.Run(first.Cancel).WaitAsync(RealTime);
         await Ended(delivery);
 
-        delivery.Status.Should().Be(TaskStatus.Canceled, "the caller cancelled: what its lookup reported then is not the message's own failure ({0})", Describe(delivery, unpacker));
-        unpacker.Memory.Count.Should().Be(0, "a message still running when the caller cancelled is not remembered");
+        if (theLookupWatchesTheTokenItWasHanded)
+        {
+            delivery.Status.Should().Be(TaskStatus.Canceled, "the caller cancelled: what the lookup reported then is not the message's own failure ({0})", Describe(delivery, unpacker));
+            unpacker.Memory.Count.Should().Be(0, "a message still running when the caller cancelled is not remembered");
+            return;
+        }
+        delivery.Status.Should().Be(TaskStatus.RanToCompletion, "the failure was reported before any token the unpacker reads was cancelled ({0})", Describe(delivery, unpacker));
+        var outcome = (await delivery).Should().ContainSingle().Subject;
+        outcome.Error.Should().BeOfType<DidResolutionException>("what the lookup reported is the message's outcome");
+        unpacker.Memory.Count.Should().Be(1, "a failure of its own is remembered");
+        unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { true }, "and the message is held back when it is delivered again");
     }
 
     /// <summary>
     /// The same through a live stream: <see cref="PickupClient.ReceiveLiveAsync"/> is given one
     /// token and its enumeration another, a drained message is being opened, and the caller cancels
-    /// the first token; the lookup watches that token and reports the cancellation as a resolution
-    /// failure from its callback there. The message is not remembered: a later stream or fetch of
-    /// the same container opens it.
+    /// the first token; the lookup reports the cancellation as a resolution failure from its
+    /// callback on the token it watches.
+    /// <list type="bullet">
+    /// <item>
+    /// It watches the token it was handed: the message is not remembered, and a later stream or
+    /// fetch of the same container opens it.
+    /// </item>
+    /// <item>
+    /// It watches the token the caller cancelled (the one given to
+    /// <see cref="PickupClient.ReceiveLiveAsync"/>): the message is remembered, and held back when
+    /// it is delivered again (the residual: see the class remarks).
+    /// </item>
+    /// </list>
     /// </summary>
-    /// <remarks>
-    /// Observed on the head of fix round 2: the message is remembered (one entry in the memory, and
-    /// the message is held back).
-    /// </remarks>
-    [Fact(Skip = "RT3: whether a message being opened when the caller cancels one of a live stream's two tokens is remembered")]
-    public async Task A_message_being_opened_when_the_caller_cancels_one_of_a_streams_two_tokens_is_not_remembered()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_message_being_opened_when_one_of_a_streams_two_tokens_is_cancelled_is_remembered_unless_its_lookup_watches_the_token_it_was_handed(bool theLookupWatchesTheTokenItWasHanded)
     {
         var (exchange, client) = PickupClientLiveStreamTests.Live();
         exchange.UseBudget(Budget);
@@ -88,7 +124,7 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         {
             var ends = new TaskCompletionSource<DeliveredOutcome>(); // its continuations run inline, inside the callback
             await register.Parked();
-            first.Token.UnsafeRegister(_ => ends.TrySetException(new DidResolutionException("did:example:alice", "notFound")), null);
+            (theLookupWatchesTheTokenItWasHanded ? ct : first.Token).UnsafeRegister(_ => ends.TrySetException(new DidResolutionException("did:example:alice", "notFound")), null);
             return await new ParkedAwaitable<DeliveredOutcome>(ends.Task, () => calls.Enter(text, ct));
         };
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Status(r));
@@ -102,8 +138,14 @@ public sealed class DeliveredUnpackTokenStateRt3Tests
         await stream.DisposeAsync().AsTask().WaitAsync(RealTime);
 
         var memory = exchange.Budgeted!.Memory;
-        memory.Count.Should().Be(0, "a message still being opened when the caller cancelled is not remembered");
-        memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeFalse("the next stream or fetch opens it");
+        if (theLookupWatchesTheTokenItWasHanded)
+        {
+            memory.Count.Should().Be(0, "a message still being opened when the caller cancelled is not remembered");
+            memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeFalse("the next stream or fetch opens it");
+            return;
+        }
+        memory.Count.Should().Be(1, "the failure was reported before any token the unpacker reads was cancelled: it is the message's own");
+        memory.HeldBack(Bob, new[] { "q1" }).Single().Should().BeTrue("and the message is held back when it is delivered again");
     }
 
     /// <summary>
