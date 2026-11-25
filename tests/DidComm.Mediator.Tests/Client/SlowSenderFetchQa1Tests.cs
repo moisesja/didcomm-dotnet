@@ -467,8 +467,8 @@ public sealed class SlowSenderFetchQa1Tests
     }
 
     /// <summary>
-    /// D-13 at limit 16, where every share is the floor: Sam's lookups take 4.9 s, just under it;
-    /// twelve messages naming Sam's key take as long and fail. Sam's real message, in front of them,
+    /// D-13 at limit 16: Sam's lookups take 4.9 s, just under the floor; twelve messages naming
+    /// Sam's key take as long and fail. Sam's real message, in front of them,
     /// among them or behind them, reaches the app within the bound and is never refused.
     /// </summary>
     [Theory]

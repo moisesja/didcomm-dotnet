@@ -87,7 +87,7 @@ public sealed class PickupClientLiveAdv3Tests
 
             for (var i = 0; i < rounds; i++)
             {
-                // The push being opened: its budget and its message's share exist.
+                // The push being opened: its delivery's budget exists.
                 await Volatile.Read(ref stalled[0]).Task.WaitAsync(PickupTest.Timeout);
                 // The attacker's next message arrives while this one is still being opened.
                 exchange.Registration!.TryPush(Push(($"s{i + 1}", $"stall:s{i + 1}"))).Should().BeTrue();
@@ -224,15 +224,15 @@ public sealed class PickupClientLiveAdv3Tests
 
     /// <summary>
     /// Held (passes): the consumer's cancellation while a delivery is being opened ends the stream
-    /// with nothing of that delivery acknowledged or remembered, the budget's and the shares' timers
-    /// gone, and the mailbox closed.
+    /// with nothing of that delivery acknowledged or remembered, the budget's timer gone, and the
+    /// mailbox closed.
     /// </summary>
     [Fact]
     public async Task Cancelled_while_a_push_is_opened_leaves_no_timer_no_registration_and_nothing_remembered()
     {
         var (exchange, client) = Live(o => o.UnpackTimeout = Budget);
         exchange.UseBudget(Budget);
-        // Every worker signals once its message's opening has started (the budget and that share exist
+        // Every worker signals once its message's opening has started (the delivery's budget exists
         // then); the next cycle's alarm is scheduled meanwhile, so a count of scheduled timers is no
         // rendezvous (#111).
         var entered = 0;
@@ -262,7 +262,7 @@ public sealed class PickupClientLiveAdv3Tests
             exchange.Duplicates.Contains(L, DefaultOutcome($"ok:{id}").DedupeKey).Should().BeFalse();
         exchange.Registrations.Should().BeEmpty();
         SpinWait.SpinUntil(() => exchange.Clock.ScheduledTimers == 0 && exchange.Budgeted!.Reserved == 0, PickupTest.Timeout)
-            .Should().BeTrue("the budget's and the shares' timers are disposed and every unpack let its slot go");
+            .Should().BeTrue("the budget's timer is disposed and every unpack let its slot go");
     }
 
     /// <summary>

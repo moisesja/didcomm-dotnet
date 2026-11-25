@@ -178,7 +178,7 @@ internal sealed class SimClock : TimeProvider
 /// answers, live mailboxes) with its own clock (<see cref="SimClock"/>) and its own real
 /// <see cref="DeliveredMessageUnpacker"/> on that clock, slow memory included. Each batch is opened
 /// in simulated time: once every message the workers hold is waiting on the clock, the clock moves
-/// to its next timer (a share, the budget, an alarm), until the batch ends.
+/// to its next timer (the budget, an alarm), until the batch ends.
 /// </summary>
 /// <remarks>
 /// Payload texts: <c>ok:{id}</c> opens, <c>bad:{text}</c> fails at once, <c>stall:{text}</c> waits on
@@ -318,8 +318,8 @@ internal sealed class SimExchange : IMediatorExchange
         }
     }
 
-    // Host calls waiting on the clock: stalls whose token has not been cancelled. One whose share or
-    // budget just ended stops counting at once, before its worker has recorded it.
+    // Host calls waiting on the clock: stalls whose token has not been cancelled. One whose budget
+    // just ended stops counting at once, before its outcome has been recorded.
     private int Waiting => _stalls.Values.Count(token => !token.IsCancellationRequested);
 
     // Every message the workers took has entered its host call, every worker that can take one holds
