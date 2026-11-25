@@ -11,7 +11,8 @@ namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
 /// RT3 (#111, fix round 2): what a delivery leaves behind, whatever its messages do and whatever
-/// ends it. Deliveries of one to twelve messages of every kind the unpacker tells apart (opening or
+/// ends it. Deliveries of one to forty-eight messages (up to three times as many as are opened at
+/// once, so in the larger ones messages wait for a worker) of every kind the unpacker tells apart (opening or
 /// failing at once or later, never ending, ending from inside a cancellation callback as a failure
 /// or as a success, not valid UTF-8; from two named senders or none) are ended in each of four ways
 /// (on their own, by the budget, by the caller, by the owner's shutdown) at different moments. What
@@ -56,7 +57,7 @@ public sealed class DeliveredUnpackEndingsRt3Tests(ITestOutputHelper output)
             using var shutdown = new CancellationTokenSource();
             var calls = new HostCallLog();
             var unpacker = new DeliveredMessageUnpacker((packed, ct) => HostAsync(packed, ct, calls, release.Task), Budget, time, shutdown.Token);
-            var count = random.Next(1, 13);
+            var count = random.Next(1, 3 * DeliveredMessageUnpacker.FetchConcurrency + 1);
             var messages = new DeliveredInput[count];
             for (var i = 0; i < count; i++)
             {
