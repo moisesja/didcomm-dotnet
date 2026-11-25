@@ -113,6 +113,29 @@ public sealed class SlowMemoryClockStepTests
             "q1, the least recently seen, was evicted; q0 was seen by its repeat failure and is kept");
     }
 
+    /// <summary>
+    /// The same order for the other episode that adds no strike (RT1B-2): a failure reported while
+    /// the entry is inside its pause counts as seen too. In a full partition of four, the entry
+    /// struck first is struck again inside its pause; the next new entry evicts the least recently
+    /// seen of the others.
+    /// </summary>
+    [Fact]
+    public void A_strike_inside_the_pause_counts_as_seen()
+    {
+        var clock = new HandClock(Start);
+        var memory = new SlowMemory(clock, T0, Cap, q: 4, r: 4);
+        for (var i = 0; i < 4; i++)
+            memory.Strike(Bob, "q" + i);
+
+        clock.Now = Start + T0 / 2;
+        memory.Strike(Bob, "q0"); // the same episode, inside the pause: now the most recently seen
+        memory.Strike(Bob, "q4"); // one more than the partition keeps
+
+        memory.Count.Should().Be(4);
+        memory.HeldBack(Bob, new[] { "q0", "q1", "q2", "q3", "q4" }).Should().Equal(new[] { true, false, true, true, true },
+            "q1, the least recently seen, was evicted; q0 was seen by the strike inside its pause and is kept");
+    }
+
     // ---- clocks that keep going back ----
 
     /// <summary>
