@@ -71,6 +71,36 @@ public sealed class SlowMemoryRt2BTests
         unpacker.Memory.Count.Should().Be(0, "all four were running when the caller cancelled (the delivery ended {0})", delivery.Status);
     }
 
+    /// <summary>
+    /// The XML's promise on clocks (PickupClient.FetchAsync: "A clock that steps back never holds a
+    /// message back longer"): an honest message whose sender's DID host is unreachable from minute
+    /// 0 to minute 11 fails at minute 0 (paused 10 min) and at minute 10 (paused 20 min, so opened
+    /// again at minute 30, when it opens). With the host clock stepping back one minute at minute
+    /// 10.5, it is held back no longer than that: at minute 31 it is not held back.
+    /// </summary>
+    [Fact(Skip = "RT2 defect: a clock that steps back can hold a message back longer than without the step")]
+    public void A_clock_that_steps_back_never_holds_a_message_back_longer()
+    {
+        var clock = new Qa1Clock();
+        var memory = new SlowMemory(clock, TimeSpan.FromTicks(Budget.Ticks * 30), TimeSpan.FromTicks(Budget.Ticks * SlowMemory.EntriesPerPartition), SlowMemory.EntriesPerPartition, SlowMemory.MaxPartitions);
+        var id = new[] { "alice-1" };
+
+        memory.Strike(Bob, "alice-1"); // minute 0: it fails (its sender's host is unreachable)
+        clock.Inner.Advance(TimeSpan.FromMinutes(10));
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false }, "its first pause has ended");
+        memory.Strike(Bob, "alice-1"); // minute 10: it fails again, paused 20 min (until minute 30)
+        clock.Inner.Advance(TimeSpan.FromSeconds(30));
+        clock.Step(TimeSpan.FromMinutes(-1)); // minute 10.5: the host clock steps back one minute
+        var openedAgain = !memory.HeldBack(Bob, id)[0]; // a reading below the strike's is due (I-12)
+        if (openedAgain)
+            memory.Strike(Bob, "alice-1"); // opened once more, it fails (its sender's host is unreachable until minute 11)
+
+        clock.Inner.Advance(TimeSpan.FromMinutes(20.5)); // minute 31: without the step it was opened at minute 30
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false },
+            "without the step it is opened again at minute 30; with it (opened again at minute 10.5: {0}) it is held back until minute {1}",
+            openedAgain, 10.5 + memory.PauseAfter(3).TotalMinutes);
+    }
+
     private static DeliveredInput Alice(string id) => new(id, TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, id)));
 
     // A host lookup that ends when its token is cancelled and reports it as a resolution failure.
