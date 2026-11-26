@@ -1495,3 +1495,19 @@ Format per entry:
 - **How to apply:** When a docs agent is told to record the coordinator's rulings, say which are
   recorded in his words and which stay in the brief. Run the scan over `git log -p` of the branch
   before the hand-back that precedes the first push.
+
+## L-085 — When one parser pass becomes a pass per item, measure the path that skips an item, with many items and a large payload.
+
+- **Lesson:** A change that replaces one pass over an input by one pass for each item in it is
+  measured before the PR on the path where an item is skipped, with many items and a payload near
+  the receive limit, against the base. Allocated bytes of one call are enough to see it.
+- **Why:** #111 (PR #145, review round 1): to resolve signer keys asynchronously, the reader had
+  the JWS parser verify one signature at a time, and ran it also for a signature whose key was not
+  known. With 1,024 such signatures and a payload of about 256 kB one unpack allocated about 2 GB,
+  against about 5 MB on the base. The tests written with that change covered cancellation and the
+  order of lookups; none had more than a few signatures or a large payload, so all were green.
+- **How to apply:** For each loop that calls a parser, name the cases in which the call can be
+  left out and write one test that bounds the growth for each added item on that path (two sizes,
+  the same payload, a wide margin, the calling thread's allocation counter when the path does not
+  leave the thread). Measure the path that cannot leave the call out as well, and state its figure
+  beside the base's even when it is not changed. See [[L-080]].
