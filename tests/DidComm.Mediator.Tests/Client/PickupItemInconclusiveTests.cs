@@ -70,8 +70,9 @@ public sealed class PickupItemInconclusiveTests
 
     /// <summary>
     /// A fetch with a <c>recipientDid</c> filter: a message that opened with a key of another of the
-    /// host's DIDs is a failed item that is not inconclusive, and that is not a reason to discard
-    /// it: the same message, fetched without the filter, is returned opened.
+    /// host's DIDs is a failed item that is not inconclusive. It is the host's to settle, and the
+    /// first of the two ways works as its failure says: the same message, fetched without the
+    /// filter, is returned opened.
     /// </summary>
     [Fact]
     public async Task A_message_a_filter_turned_away_is_not_inconclusive_and_a_fetch_without_the_filter_returns_it_opened()
@@ -85,8 +86,41 @@ public sealed class PickupItemInconclusiveTests
 
         filtered.Items.Single(i => i.Id == "other").Error.Should().BeOfType<MediationProtocolException>().Which.Message.Should().Contain("for another of your DIDs");
         Flags(filtered.Items).Should().Equal(("other", false), ("inconclusive", true));
-        unfiltered.Items.Single(i => i.Id == "other").Unpacked.Should().NotBeNull("it opened: a failed item that is not inconclusive is not thereby one to discard");
+        unfiltered.Items.Single(i => i.Id == "other").Unpacked.Should().NotBeNull("a fetch without the filter takes it");
         exchange.AcknowledgedIds.Should().Equal(new[] { "other" }, "nothing was acknowledged under the filter");
+    }
+
+    /// <summary>
+    /// What the failure of a message a <c>recipientDid</c> filter turned away tells the host: the
+    /// two ways to settle it, a fetch without the filter and <see cref="PickupClient.AckAsync"/>,
+    /// and no third: it does not say that the message may be left to age out at the mediator. The
+    /// text names the request by our own id and nothing from the wire: no DID, and neither the
+    /// mediator's id for the message nor the message's own. The second way then removes it:
+    /// <c>AckAsync</c> with the item's id sends the acknowledgement.
+    /// </summary>
+    [Fact]
+    public async Task The_failure_of_a_message_a_filter_turned_away_names_the_two_ways_to_settle_it_and_does_not_offer_leaving_it_to_age_out()
+    {
+        var exchange = new FakePickupExchange { Unpacker = Unpack };
+        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q-other", "to:did:example:bob-two:m-other")));
+        var client = PickupTest.Client(exchange);
+
+        var filtered = await client.FetchAsync(M, L, limit: 10, recipientDid: L);
+
+        var item = filtered.Items.Should().ContainSingle().Which;
+        var text = item.Error.Should().BeOfType<MediationProtocolException>().Which.Message;
+        var requestId = exchange.SentOf(MessagePickup.DeliveryRequestType)[0].Request.Id;
+        text.Should().Be($"A message delivered for request '{requestId}' is for another of your DIDs: a key of another DID than the recipient_did filter's opened it. " +
+            "It was not acknowledged and stays queued until you settle it: take it with a fetch without the filter, or discard it with AckAsync.");
+        text.Should().Contain("take it with a fetch without the filter").And.Contain("discard it with AckAsync");
+        text.Should().NotContainAny(new[] { "ages out", "age out", "aged out" }, "leaving it queued is not offered");
+        text.Should().NotContainAny(new[] { "did:", "q-other", "m-other" }, "only our own request id is named");
+        item.Inconclusive.Should().BeFalse();
+        exchange.AcknowledgedIds.Should().BeEmpty("the fetch acknowledged nothing");
+
+        await client.AckAsync(M, L, new[] { item.Id });
+
+        exchange.AcknowledgedIds.Should().Equal("q-other");
     }
 
     /// <summary>

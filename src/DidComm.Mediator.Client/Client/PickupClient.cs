@@ -634,7 +634,7 @@ public sealed class PickupClient
                 mismatches++;
                 items.Add(new PickupItem(entry.Id, unpacked: null, new MediationProtocolException(
                     $"A message delivered for request '{request.Id}' is for another of your DIDs: a key of another DID than the recipient_did filter's opened it. " +
-                    "It was not acknowledged and stays queued: discard it with AckAsync, or it ages out at the mediator.", request.Id)));
+                    "It was not acknowledged and stays queued until you settle it: take it with a fetch without the filter, or discard it with AckAsync.", request.Id)));
                 continue;
             }
             if (Exchange.Duplicates.Contains(from, outcome.DedupeKey) || !seen.Add(outcome.DedupeKey))
