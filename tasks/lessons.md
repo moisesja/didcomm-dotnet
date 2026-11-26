@@ -1470,3 +1470,28 @@ Format per entry:
 - **How to apply:** One measuring run at a time; give each agent its turn for loops, and say in the
   report what else was running. A real-time guard that trips under load is re-run on a quiet machine
   before it is diagnosed; a wrong value is diagnosed at once. See [[L-065]].
+
+## L-083 — When the scope is closed, finish; every pass added after that costs the owner a round.
+
+- **Lesson:** Once the design is decided and the findings are settled, the remaining work is a fixed
+  list: merge, the sentences that depend on the last fix, the plan, the gate, the hand-back. A new
+  review pass, a new measurement or another wording round is proposed to the coordinator, not
+  started.
+- **Why:** #111: after the last decision, further passes kept being added (a second review pass on
+  the delta, follow-up attacks, re-measurements, wording rounds), each reasonable alone, and the
+  owner asked why it was taking so long. The coordinator closed the scope in so many words.
+- **How to apply:** At each hand-back, list what is left as a closed list and its order. Anything
+  seen on the way that is outside the list goes into the report as "seen, not verified, not
+  changed", with where it is. See [[L-063]].
+
+## L-084 — A wording rule is kept in the brief, and the scan before the first push reads the plan as well.
+
+- **Lesson:** A rule about how something is to be worded belongs in the brief the agents work from.
+  The plan records what was built and decided, in the wording the rule asks for, and does not
+  restate the rule. The scan before the first push covers the plan and every commit's diff, not only
+  the sources and the docs.
+- **Why:** #111: the plan restated one of the coordinator's wording rules next to a quotation of
+  his; the scan before the first push found it, and it was taken out at the head.
+- **How to apply:** When a docs agent is told to record the coordinator's rulings, say which are
+  recorded in his words and which stay in the brief. Run the scan over `git log -p` of the branch
+  before the hand-back that precedes the first push.
