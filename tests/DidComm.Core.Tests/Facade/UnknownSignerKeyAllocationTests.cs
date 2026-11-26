@@ -39,13 +39,16 @@ namespace DidComm.Tests.Facade;
 /// </para>
 /// <para>
 /// <strong>The counter:</strong> <see cref="GC.GetAllocatedBytesForCurrentThread"/>, read on the
-/// test's thread before and after the call. It counts that thread only, so tests running in
-/// parallel add nothing to it. It covers the whole unpack because the unpack runs on the calling
-/// thread from start to end: the resolver answers with completed tasks, so no <c>await</c> on the
-/// path suspends. Two assertions show that on every run: the task <c>UnpackAsync</c> returns is
-/// already complete when the call returns, and the resolver saw every lookup on the test's thread.
-/// Each input is unpacked once before it is measured, so what only a first use allocates (type
-/// initialisation, pooled buffers) is not in the figures. No time is measured.
+/// test's thread before and after the call. It counts that thread only, so what tests running in
+/// parallel allocate on their own threads is not in it. It covers the whole unpack because the
+/// unpack runs on the calling thread from start to end: the resolver answers with completed tasks,
+/// so no <c>await</c> on the path suspends. Two assertions show that on every run: the task
+/// <c>UnpackAsync</c> returns is already complete when the call returns, and the resolver saw every
+/// lookup on the test's thread. Each input is unpacked once before it is measured, so what only a
+/// first use allocates (type initialisation, pooled buffers) is not in the figures. What this
+/// thread itself allocates still varies a little while other tests run beside it: over 50 runs of
+/// the whole suite the growth measured was between about 3 kB and 5 kB for each added signature.
+/// The bound leaves room for that. No time is measured.
 /// </para>
 /// </remarks>
 public sealed class UnknownSignerKeyAllocationTests(ITestOutputHelper output)
