@@ -3218,7 +3218,12 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    holds our id, the static spec, the two DID subjects of the (mediator, local DID) pair and a start
    timestamp, never a wire value. Its outcome is one terminal compare-and-swap (Waiting → Completed,
    Abandoned or Failed), the Discover Features client's `PendingQuery` pattern, over a
-   `TaskCompletionSource` with `RunContinuationsAsynchronously`.
+   `TaskCompletionSource` with `RunContinuationsAsynchronously`. A container that was disposed as
+   the request was registered refuses it before anything is sent, and gives it up through that
+   compare-and-swap before the refusal is reported, so an answer naming it is not taken
+   (`MediatorClientChannelEndDecidedTests.An_answer_naming_a_request_refused_because_the_container_was_disposed_as_it_was_registered_is_not_taken`;
+   what the caller sees of the refusal:
+   `…A_request_refused_because_the_container_was_disposed_as_it_was_registered_ends_as_the_disposal_does_and_sends_nothing`).
 3. **Deadline** (`GuardedDeadline`): a timer on the injected `TimeProvider` at `RequestTimeout`, plus
    registrations of the caller's token and the channel's shutdown token. Each cancels inside a
    `try`, so a callback host code registered on the token cannot escape onto a timer thread or into
@@ -3242,6 +3247,12 @@ through a proxy names it there (`TrustedProxy`, FR-TRN-13).
    type only and never its text (`MediatorClientChannelTokenStateTests`,
    `MediatorClientChannelTokenStateRt3Tests.What_the_host_code_reported_while_its_call_was_being_ended_is_named_in_the_log`,
    `…No_log_line_carries_the_text_of_what_the_host_code_reported_while_its_call_was_being_ended`).
+   The request is decided there, where the call's end is, through its terminal compare-and-swap:
+   an answer that had already won is returned
+   (`MediatorClientChannelEndDecidedTests.An_answer_that_arrives_as_the_channel_begins_to_end_a_call_wins_and_is_returned`),
+   and otherwise the request is given up before the call's end leaves the channel, so an answer
+   that arrives afterwards is not taken
+   (`MediatorClientChannelAnswerAndSendRt4Tests.An_answer_that_arrives_while_the_end_of_a_call_is_on_its_way_to_its_caller_is_not_taken`).
    What is thrown while the call is not being ended is the request's own failure and is passed on
    as it is, with one exception: an answer that had already won holds (I-25). The request's
    terminal compare-and-swap decides between the failure and an answer, so an answer that won

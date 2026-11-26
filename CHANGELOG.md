@@ -175,6 +175,9 @@ listed as deferred to #111.
   fails once its call is being ended ends the call as what ended it (the disposal, the
   cancellation or the timeout), and a Debug line names the type of what was reported, never its
   text. An answer that had already arrived is still returned when the send then fails on its own.
+  A request is decided where its call's end is: an answer that had already arrived is returned,
+  and one that arrives once the call has been ended (cancelled, timed out, or the container
+  disposed, also when it was disposed as the request was registered) is not taken.
   Host code should watch the token it is handed: code that watches a different token, and reports
   that token's cancellation as a failure, has the failure taken as the message's or the request's
   own.
@@ -316,7 +319,8 @@ listed as deferred to #111.
   `SlowMemoryRt1BTests`, `LiveStreamSlowSenderRt1CTests`, `SlowMemoryRt2BTests`,
   `SlowSenderFetchRt2BTests`, `DeliveredUnpackEndingsRt3Tests`,
   `DeliveredUnpackTokenStateRt3Tests`, `SlowSenderSpacedDeliveriesRt3Tests`,
-  `MediatorClientChannelTokenStateRt3Tests`, `UnpackReservationsSixteenRt4Tests`); and every
+  `MediatorClientChannelTokenStateRt3Tests`, `MediatorClientChannelAnswerAndSendRt4Tests`,
+  `MediatorClientChannelEndDecidedTests`, `UnpackReservationsSixteenRt4Tests`); and every
   reproduction #96 skipped naming #111 now passes.
   Test support, one sentence each. In all three test projects, a test that raises the thread
   pool's floor puts it back when it ends, and never under another test that still holds a raise.
