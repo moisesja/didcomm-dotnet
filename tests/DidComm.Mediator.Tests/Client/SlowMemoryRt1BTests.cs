@@ -8,8 +8,8 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// #111 red-team pass 1, RT1-B: what the memory remembers (I-9, owner decision C: "every failure,
-/// fair to late starts", under owner decision E). A message the budget ends without opening is
+/// #111 red-team pass 1, RT1-B: what the memory remembers (I-9, owner decision C: "Every failure,
+/// fair to late starts (Recommended)", under owner decision E). A message the budget ends without opening is
 /// remembered only when its own code had the whole budget (S2); time its work item spent waiting
 /// for a pool thread before any host code ran is not the message's own.
 /// Every timing is driven by the injected <see cref="ManualTimeProvider"/>; real time is only a hang
