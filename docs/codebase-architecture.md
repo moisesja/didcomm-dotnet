@@ -216,7 +216,9 @@ that every grantee references its granter directly (pack pins direct references 
   `MediatorClientChannelTokenStateRt3Tests` and `UnpackReservationsSixteenRt4Tests`; the flag
   `PickupItem.Inconclusive` — which outcomes carry it `DeliveredUnpackInconclusiveTests`, that it
   says what the memory says `InconclusiveMatchesTheMemoryTests`, what it says when two deliveries
-  of one message overlap `InconclusiveOverlappingDeliveriesRt4Tests`, that a fetch and a live stream
+  of one message overlap `InconclusiveOverlappingDeliveriesRt4Tests`, what a host under a
+  `recipientDid` filter gets when it leaves or settles what the filter turned away
+  `InconclusiveUnderAFilterRt4Tests`, that a fetch and a live stream
   pass it on `PickupItemInconclusiveTests`, a host that discards a failed item unless it is
   inconclusive `SlowSenderDiscardingHostRt3Tests` and `LiveStreamDiscardingHostTests`, a late
   start `InconclusiveLateStartRt4Tests`, and a thread pool that gives a delivery no thread
@@ -3520,7 +3522,9 @@ asked about (as a DID subject). One present without a filter is refused too, as 
    delivery under the filter and stays in front of what came after it. Where a delivery brings
    more than sixteen messages, sixteen such messages that are slow to open keep the ones behind
    them from their turn at every fetch; those come back inconclusive each time (R-7 and R-14
-   under Documented limits). Decrypting with the filter DID's key first (option B) would change
+   under Documented limits). The failure's text names the two ways to settle it and does not offer
+   leaving it to age out
+   (`PickupItemInconclusiveTests.The_failure_of_a_message_a_filter_turned_away_names_the_two_ways_to_settle_it_and_does_not_offer_leaving_it_to_age_out`). Decrypting with the filter DID's key first (option B) would change
    Core's key choice; it is a candidate follow-up, not built.
 7. **Classify.** A key the duplicate filter remembers for this mailbox (`from`), or one already
    seen in this batch, is a repeat: acknowledged and left out. Otherwise it is new.
@@ -4614,6 +4618,23 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     flag is false), is not remembered and is not acknowledged. It is the host's to settle: the
     host takes it with a fetch without the filter, or discards it with `AckAsync`. Left queued, it
     is opened again at every delivery under the filter and stays in front of what came after it.
+    Pinned at a simulated mediator that delivers oldest first and leases for 60 s, with fetches
+    of 100 under the filter and two queues: sixteen messages that open for another of the host's
+    DIDs after a little more than 15 s; or sixteen that open so after 3 s, then sixteen that never
+    open; in each, a message that opens at once is last (`InconclusiveUnderAFilterRt4Tests`).
+    A host that leaves them queued does not receive that message: in two simulated hours and 240
+    fetches it is handed over 120 times as inconclusive ("before its turn came"), with no host
+    call for it and nothing remembered, and in the second queue the sixteen that never open are
+    handed over as inconclusive 1920 times and never as conclusive
+    (`…Under_a_filter_a_host_that_leaves_queued_what_the_filter_turned_away_does_not_receive_the_message_behind_sixteen_such_messages_which_is_inconclusive_at_every_fetch`).
+    A host that settles them receives it. One that discards a failed item unless it is
+    inconclusive: after 60 s, and 120 s in the second queue
+    (`…Under_a_filter_a_host_that_discards_unless_inconclusive_receives_the_message_behind_sixteen_that_the_filter_turned_away`).
+    One that takes them with a fetch without the filter: at the next delivery, after 120 s and
+    180 s; after five deliveries, after 360 s and 420 s; that fetch returns all sixteen opened
+    (`…Under_a_filter_a_host_that_takes_what_the_filter_turned_away_with_a_fetch_without_the_filter_every_so_often_receives_the_message`).
+    A host that uses no filter: after 60 s and 120 s
+    (`…Without_a_filter_the_message_behind_sixteen_that_open_for_another_of_the_hosts_dids_is_returned_opened`).
   - **R-8.** Up to 256 host calls per container may be held by host code that does not
     return. A resolver that blocks its thread holds a thread-pool thread per lookup: up to sixteen
     per delivery, which follows from sixteen being opened at once. With such a resolver: (a) messages can start later than the start allowance, and
@@ -4675,8 +4696,10 @@ keeps it. A failed query releases the registration and ends the enumeration at i
     it does not hold (the independent review's F5): a message behind sixteen of them that are
     slow to open stays inconclusive at every fetch (R-7). That case takes all of: a host that fetches under a filter and never
     without one; messages encrypted for another DID whose keys the host holds; and deliveries of
-    more than sixteen messages, which this library's mediator does not make at its defaults. What
-    a host does: it settles what the filter turned away (R-7).
+    more than sixteen messages, which this library's mediator does not make at its defaults.
+    Those three limits are the independent review's statement; they are not measured beyond the
+    two queues of the pin under R-7. What a host does: it settles what the filter turned away,
+    and then receives the message (the controls under R-7).
   - **R-15 (the coordinator's call: `StartAllowance` = F/2).** An honest message whose code
     started within the start allowance (2.5 s by default) and has not opened when the budget ends
     is remembered, and held back for its pause, also when a busy thread pool cost it part of that
