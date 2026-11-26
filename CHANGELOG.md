@@ -50,7 +50,13 @@ All notable changes to didcomm-dotnet are documented here. Format follows
   it is queued it is opened again at every delivery under the filter and stays in front of what
   came after it, and where a delivery brings more than sixteen messages, sixteen such messages
   that are slow to open keep the ones behind them from their turn at every fetch (those come back
-  inconclusive each time).
+  inconclusive each time). The failure's text now names the two ways to settle it and no longer
+  offers leaving it to age out. Measured at a simulated mediator that delivers oldest first and
+  leases for 60 seconds, with fetches of 100 under the filter and sixteen such messages in front:
+  a host that leaves them queued does not receive the message behind them (in two simulated hours
+  it is handed over 120 times as inconclusive); a host that discards a failed item unless it is
+  inconclusive, or that uses no filter, receives it after 60 seconds; one that takes them with a
+  fetch without the filter at the next delivery, after 120 seconds.
 - **When a fetch returns only inconclusive items, wait before you fetch again:** for the lease at
   a mediator that sets delivered messages aside, for the lookups still running otherwise. A fetch
   that brings only refused items takes no time and is not drained, so a loop that fetched again at
@@ -301,7 +307,10 @@ listed as deferred to #111.
   `InconclusiveMatchesTheMemoryTests`, `PickupItemInconclusiveTests`) and the host that discards a
   failed item unless it is inconclusive (`SlowSenderDiscardingHostRt3Tests`,
   `LiveStreamDiscardingHostTests`, `InconclusiveLateStartRt4Tests`,
-  `InconclusiveBusyPoolRt4Tests`); the QA and red-team passes (`SlowMemoryQa1Tests`,
+  `InconclusiveBusyPoolRt4Tests`); two overlapping deliveries of one message
+  (`InconclusiveOverlappingDeliveriesRt4Tests`); a host under a `recipientDid` filter that leaves
+  or settles what the filter turned away (`InconclusiveUnderAFilterRt4Tests`), and the text of
+  that failure (`PickupItemInconclusiveTests`); the QA and red-team passes (`SlowMemoryQa1Tests`,
   `SlowMemoryFetchQa1Tests`, `SlowSenderFetchQa1Tests`, `LiveStreamQa2Tests`,
   `SenderPartitionCoreQa2Tests`, `UnpackSlotsQa2Tests`, `ContainerSharingRt1ATests`,
   `SlowMemoryRt1BTests`, `LiveStreamSlowSenderRt1CTests`, `SlowMemoryRt2BTests`,
@@ -312,7 +321,9 @@ listed as deferred to #111.
   Test support, one sentence each. In all three test projects, a test that raises the thread
   pool's floor puts it back when it ends, and never under another test that still holds a raise.
   The floor of the unpacker's tests that park pool threads asks for what all the tests holding it
-  park together, not for the largest request (`PoolFloorTests`). Two mediator tests that failed
+  park together, not for the largest request, and its own test parks nothing
+  (`PoolFloorTests.A_holder_asks_for_what_every_holder_parks_at_that_moment_and_the_floor_is_at_least_that`).
+  Two mediator tests that failed
   once each under heavy load now wait for what they check. Before each push deadline,
   `DirectPushAdv110Pass3Tests.ADV_110_3a_2_…` waits until the operations abandoned at the earlier
   deadlines have settled, and checks that their lookups are still running. The QA store that holds
@@ -328,7 +339,18 @@ listed as deferred to #111.
   searches the refusal's text with our own request id taken out, since a random id could spell
   what the test looks for. The fetch-loop and live-stream harnesses that measure the figures above
   start a delivery only once the lookups of the delivery before have ended, and a test forces
-  that order both ways.
+  that order both ways. The simulated clock of the stream tests fires one timer per step, so the
+  driver sees the stream react to each alarm before the next one due at the same instant fires
+  (`LiveStreamQa2Tests.The_driver_lets_the_stream_react_to_each_alarm_before_the_next_one_due_at_the_same_instant_fires`);
+  a give-up alarm and a back-off alarm due at the same instant are both acted on, in either order
+  (`…The_give_up_alarm_and_the_back_off_alarm_due_at_the_same_instant_are_both_acted_on_in_either_order`).
+  Reading the stream driver's seams after the stream has ended says so and throws nothing
+  (`…Reading_the_drivers_seams_after_the_stream_has_ended_says_so_and_throws_nothing`). The gate
+  that holds a late-started message's work item in `SlowMemoryRt1BTests` is each test's own, where
+  one shared slot let a continuation left by one test take the gate of the next
+  (`SlowMemoryRt1BTests.A_continuation_an_earlier_delivery_left_to_run_does_not_take_the_gate_of_the_next`).
+  `InconclusiveMatchesTheMemoryTests` holds its sender's bound with sixteen lookups that ignore
+  their token, which the loop harness counts, where it took the reservations itself.
 
 ### Added — the mediator can push a stored message to the recipient's own endpoint (`MediatorOptions.DirectPush`, FR-PICK-09 step 3, #110; epic #88); the plain receiving endpoints open a message a mediator re-wrapped
 
