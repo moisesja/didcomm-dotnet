@@ -100,6 +100,7 @@ public sealed class MediatorClientChannelEndDecidedTests : IAsyncLifetime
         (await (Task<InboundMessageSnapshot?>)call).Should().BeSameAs(answer);
         channel.PendingCount.Should().Be(0, "the request's place was given back, once");
         time.ScheduledTimers.Should().Be(0, "the call's deadline was released");
+        channel.AsCorrelator().OnInbound(answer).Should().BeFalse("once the call has returned its answer no request waits for another");
         await channel.DisposeAsync();
     }
 
@@ -140,6 +141,7 @@ public sealed class MediatorClientChannelEndDecidedTests : IAsyncLifetime
         countedThen.Should().Be(1, "the set-up: the request was still registered when the answer arrived");
         taken.Should().BeFalse("the request was decided when it was refused");
         channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        channel.AsCorrelator().OnInbound(answer).Should().BeFalse("once the call has ended no request waits for the answer");
     }
 
     /// <summary>
@@ -363,8 +365,95 @@ public sealed class MediatorClientChannelEndDecidedTests : IAsyncLifetime
         countedThen.Should().Be(1, "the set-up: the request was still registered when the answer arrived");
         taken.Should().BeFalse("the request was decided where the call's end was");
         channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        channel.AsCorrelator().OnInbound(answer).Should().BeFalse("once the call has ended no request waits for the answer");
         await channel.DisposeAsync();
         time.ScheduledTimers.Should().Be(0, "no deadline is left scheduled");
+    }
+
+    /// <summary>What ends a call while its send still runs.</summary>
+    public enum DuringTheSend
+    {
+        /// <summary>The caller cancels.</summary>
+        TheCallerCancels,
+
+        /// <summary>The call's deadline passes.</summary>
+        TheDeadlinePasses,
+
+        /// <summary>The container is disposed.</summary>
+        TheContainerIsDisposed,
+
+        /// <summary>The send fails on its own.</summary>
+        TheSendFailsOnItsOwn,
+    }
+
+    /// <summary>
+    /// A call ends while its send still runs, in each of the four ways, and the answer naming its
+    /// request arrives after the call has ended. It is not taken, and no request is left counted.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(EveryKindEndedDuringItsSend))]
+    public async Task An_answer_that_arrives_after_a_call_ended_during_its_send_is_not_taken(Kind kind, DuringTheSend ending)
+    {
+        var time = new ManualTimeProvider();
+        var sends = new HeldSends();
+        using var caller = new CancellationTokenSource();
+        var channel = Create(_w, new FakeSend { Respond = sends.RunAsync }, time: time);
+        var (call, request) = Start(channel, kind, caller.Token);
+        await sends.EnteredAsync(request.Id);
+        var answer = await _w.SnapshotAsync(_w.Status(request.Id));
+        var failure = new TransportException("The connection was closed.");
+
+        await Task.Run(() =>
+        {
+            switch (ending)
+            {
+                case DuringTheSend.TheCallerCancels:
+                    caller.Cancel();
+                    break;
+                case DuringTheSend.TheDeadlinePasses:
+                    time.Advance(channel.Options.RequestTimeout);
+                    break;
+                case DuringTheSend.TheContainerIsDisposed:
+                    channel.Dispose();
+                    break;
+                default:
+                    sends.Fail(request.Id, failure);
+                    break;
+            }
+        }).WaitAsync(Guard);
+
+        var thrown = await Record.ExceptionAsync(() => call.WaitAsync(Guard));
+        switch (ending)
+        {
+            case DuringTheSend.TheCallerCancels:
+                thrown.Should().BeAssignableTo<OperationCanceledException>().Which.CancellationToken.Should().Be(caller.Token);
+                break;
+            case DuringTheSend.TheDeadlinePasses:
+                thrown.Should().BeOfType<TimeoutException>().Which.Message.Should().Contain(request.Id);
+                break;
+            case DuringTheSend.TheContainerIsDisposed:
+                thrown.Should().BeOfType<ObjectDisposedException>();
+                break;
+            default:
+                thrown.Should().BeSameAs(failure);
+                break;
+        }
+        channel.AsCorrelator().OnInbound(answer).Should().BeFalse("once the call has ended no request waits for the answer");
+        channel.PendingCount.Should().Be(0, "the request's place was given back, once");
+        await channel.DisposeAsync();
+        time.ScheduledTimers.Should().Be(0, "no deadline is left scheduled");
+    }
+
+    /// <summary>Each kind of request with each way a call ends while its send runs.</summary>
+    public static TheoryData<Kind, DuringTheSend> EveryKindEndedDuringItsSend()
+    {
+        var rows = new TheoryData<Kind, DuringTheSend>();
+        foreach (var kind in Enum.GetValues<Kind>())
+        {
+            foreach (var ending in Enum.GetValues<DuringTheSend>())
+                rows.Add(kind, ending);
+        }
+        return rows;
     }
 
     // ---- helpers ---------------------------------------------------------------------------------------
