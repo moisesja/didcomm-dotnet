@@ -96,7 +96,7 @@ internal sealed class RealClockExchange : IMediatorExchange
 /// <para>
 /// <strong>What it measures.</strong> Sixteen messages that never open are delivered in one
 /// delivery, under the default budget (20 s; the start allowance is then 2.5 s). Each lookup blocks
-/// its pool thread until its token is cancelled (a synchronous resolver waiting on the token). The
+/// its pool thread until its token is cancelled (a host resolver that blocks its thread and waits on the token). The
 /// pool's minimum worker threads is <c>min</c>. Per delivery of the sixteen: how many pool threads
 /// existed when it started, for how many messages host code started, how many of those within the
 /// start allowance, when the last one started, and how many are remembered afterwards; and at which
@@ -152,7 +152,7 @@ public sealed class RealClockBlockingLookups111Tests(ITestOutputHelper output)
                     return Task.FromResult(UnpackFakes.Opened("h"));
                 lock (starts)
                     starts.Add(sw.Elapsed);
-                ct.WaitHandle.WaitOne(); // a synchronous lookup: it blocks its thread until its token is cancelled
+                ct.WaitHandle.WaitOne(); // the host's lookup blocks its thread until its token is cancelled
                 throw new OperationCanceledException(ct);
             }, budget, TimeProvider.System);
             var sixteen = Enumerable.Range(0, 16).Select(i => new DeliveredInput($"n-{i}", TestJwe.Bytes(TestJwe.Anoncrypt($"n-{i}")))).ToArray();
