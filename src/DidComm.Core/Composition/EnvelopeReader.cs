@@ -756,17 +756,24 @@ internal static class EnvelopeReader
     /// verifies; a <c>null</c> answer skips the signature. This method keeps exactly that sequence of
     /// lookups. A first pass answers every request with <c>null</c>: the parser runs its structural
     /// checks (refusing a malformed JWS as before, before any lookup) and names every signature's kid
-    /// in order, without verifying anything. Then, signature by signature in that order, the kid is
-    /// checked against the FR-API-09 limits, its key is resolved, and the parser verifies that one
-    /// signature, answering from the resolved key. The first signature that verifies is the result.
-    /// So a kid is looked up only once every signature before it has failed, as before, and when none
-    /// verifies the last signature's failure is the one reported, as before.
+    /// in order, without verifying anything. It ends with the parser's own failure for a signature
+    /// that has no key, which is the last signature's; that failure is kept. Then, signature by
+    /// signature in that order, the kid is checked against the FR-API-09 limits and its key is
+    /// resolved. A signature whose key is not known is skipped, as the parser skips it: the parser is
+    /// not run for it again. A signature whose key is known is verified by the parser, answering from
+    /// the resolved key. The first signature that verifies is the result. So a kid is looked up only
+    /// once every signature before it has failed, as before, and when none verifies the last
+    /// signature's failure is the one reported, as before: the parser's failure for that signature
+    /// when its key was known, and the failure the first pass kept when it was not.
     /// </para>
     /// <para>
-    /// A JWS with one signature (what this library writes) is verified as it stands. With several,
-    /// each is verified inside a General JSON JWS of its own that carries the envelope's own
-    /// <c>payload</c> member and that signature's own entry, so the parser reads exactly the
-    /// protected header, unprotected header, signature and payload it would have read for it.
+    /// A JWS with one signature (what this library writes) whose key is known is verified as it
+    /// stands. With several, each signature whose key is known is verified inside a General JSON JWS
+    /// of its own that carries the envelope's own <c>payload</c> member and that signature's own
+    /// entry, so the parser reads exactly the protected header, unprotected header, signature and
+    /// payload it would have read for it. That is one parse of the payload for each signature whose
+    /// key is known, until one verifies, and none for a signature whose key is not known: the
+    /// <c>payload</c> member is not read out of the envelope until the first known key needs it.
     /// </para>
     /// </remarks>
     private static async Task<DpSig.JwsParseResult> VerifyJwsAsync(
@@ -776,6 +783,7 @@ internal static class EnvelopeReader
         CancellationToken ct)
     {
         var kids = new List<string>();
+        Exception? noKeyForTheLast = null;
         try
         {
             _ = DpSig.JwsParser.Parse(jws, kid =>
@@ -784,10 +792,12 @@ internal static class EnvelopeReader
                 return null;
             }, cryptoProvider);
         }
-        catch (DataProofsDotnet.Jose.JoseCryptoException) when (kids.Count > 0)
+        catch (DataProofsDotnet.Jose.JoseCryptoException ex) when (kids.Count > 0)
         {
             // Every signature was named and skipped: this is the parser's "no key" failure for the
-            // last one. A refusal before any key request is not caught and surfaces as before.
+            // last one, kept for when that signature's key turns out not to be known. A refusal
+            // before any key request is not caught and surfaces as before.
+            noKeyForTheLast = ex;
         }
 
         if (kids.Count == 0)
@@ -796,6 +806,8 @@ internal static class EnvelopeReader
         if (kids.Count == 1)
         {
             var key = await ResolveSignerKeyAsync(kids[0], signerLookup, ct).ConfigureAwait(false);
+            if (key is null)
+                throw NoKeyForTheLast(noKeyForTheLast);
             return DpSig.JwsParser.Parse(jws, AnswerFrom(kids[0], key), cryptoProvider);
         }
 
@@ -809,13 +821,22 @@ internal static class EnvelopeReader
             throw new InvalidOperationException("The JWS signatures do not match the signer keys the parser named.");
         }
 
-        var payloadMember = payload.GetRawText();
+        string? payloadMember = null;
         Exception? lastFailure = null;
         var index = 0;
         foreach (var entry in entries.EnumerateArray())
         {
             var kid = kids[index++];
             var key = await ResolveSignerKeyAsync(kid, signerLookup, ct).ConfigureAwait(false);
+            if (key is null)
+            {
+                // Skipped, as the parser skips it. Its failure is reported only when it is the last
+                // signature, and that failure is the one the first pass ended with.
+                lastFailure = null;
+                continue;
+            }
+
+            payloadMember ??= payload.GetRawText();
             var single = string.Concat("{\"payload\":", payloadMember, ",\"signatures\":[", entry.GetRawText(), "]}");
             try
             {
@@ -828,8 +849,16 @@ internal static class EnvelopeReader
         }
 
         // Every signature failed: report the last one's failure, as the parser itself does.
-        throw lastFailure!;
+        throw lastFailure ?? NoKeyForTheLast(noKeyForTheLast);
     }
+
+    /// <summary>
+    /// The failure to report when the last signature's key is not known: the one the parser's first
+    /// pass ended with. Fails closed if that pass reported none.
+    /// </summary>
+    private static Exception NoKeyForTheLast(Exception? firstPassFailure)
+        => firstPassFailure
+            ?? new InvalidOperationException("The JWS parser reported no failure for a signature that has no signer key.");
 
     /// <summary>
     /// The signer key for <paramref name="kid"/>: the kid is refused when over the FR-API-09 limits
