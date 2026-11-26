@@ -149,11 +149,20 @@ namespace DidComm.Mediator.Client.Internal;
 /// message inconclusive (F5): a message the filter turned away opened, so it is neither remembered
 /// nor acknowledged, is opened again at every delivery under the filter and stays in front (R-7),
 /// and sixteen such messages that are slow to open keep the ones behind them from their turn at
-/// every fetch. Its limits: the host fetches under the filter and never without it; the sender
-/// knows another DID whose keys the host holds; deliveries exceed sixteen (not this library's
-/// mediator at its defaults). The host's remedy is the contract of
-/// <see cref="PickupClient.FetchAsync"/>: take such a message with a fetch without the filter, or
-/// discard it.
+/// every fetch. Pinned: the message behind them is inconclusive at every fetch and is not returned
+/// (<c>InconclusiveUnderAFilterRt4Tests.Under_a_filter_a_host_that_leaves_queued_what_the_filter_turned_away_does_not_receive_the_message_behind_sixteen_such_messages_which_is_inconclusive_at_every_fetch</c>).
+/// Its limits, as the independent review states them and not measured beyond that pin's two queues:
+/// the host fetches under the filter and never without it; the sender knows another DID whose keys
+/// the host holds; deliveries exceed sixteen (not this library's mediator at its defaults). The
+/// host's remedy is the contract of <see cref="PickupClient.FetchAsync"/>: take such a message with
+/// a fetch without the filter, or discard it. Each way returns the message behind, as the pin's
+/// controls show
+/// (<c>…Under_a_filter_a_host_that_takes_what_the_filter_turned_away_with_a_fetch_without_the_filter_every_so_often_receives_the_message</c>,
+/// <c>…Under_a_filter_a_host_that_discards_unless_inconclusive_receives_the_message_behind_sixteen_that_the_filter_turned_away</c>),
+/// and so does fetching without a filter
+/// (<c>…Without_a_filter_the_message_behind_sixteen_that_open_for_another_of_the_hosts_dids_is_returned_opened</c>).
+/// The text of the failure names the two ways and does not offer leaving the message to age out
+/// (<c>PickupItemInconclusiveTests.The_failure_of_a_message_a_filter_turned_away_names_the_two_ways_to_settle_it_and_does_not_offer_leaving_it_to_age_out</c>).
 /// </para>
 /// <para>
 /// <strong>Host code never runs on the caller's stack (ADV3-4).</strong> Every host unpack call (the
