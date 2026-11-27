@@ -45,6 +45,14 @@ namespace DidComm.Tests.Facade;
 /// answer was complete when it was handed out. The kids looked up, their order, the result and the
 /// failure are the same in every mode.
 /// </para>
+/// <para>
+/// Some cases have a signature whose key is known and which the parser refuses from its protected
+/// header, before it checks the signature: <c>alg</c> "none", a <c>crit</c> member,
+/// <c>b64</c> false, or an <c>alg</c> that is not the key's curve's. When every lookup answers at
+/// once the parser reads the envelope as it stands, so its result there is the reference, and the
+/// same result in the other modes shows that what the reader does after a lookup had to be waited
+/// for reports what the parser reports.
+/// </para>
 /// </remarks>
 public sealed class SignerKeyLookupOrderTests
 {
@@ -92,6 +100,34 @@ public sealed class SignerKeyLookupOrderTests
         ThroughItsTask,
     }
 
+    /// <summary>Why the parser refuses a signature from its protected header, before it checks the signature.</summary>
+    public enum Refusal
+    {
+        /// <summary>The protected header has a <c>crit</c> member.</summary>
+        Crit,
+
+        /// <summary>The protected header says <c>b64</c> false.</summary>
+        B64False,
+
+        /// <summary>The protected header's <c>alg</c> is not the one of the key's curve.</summary>
+        AlgOfAnotherCurve,
+    }
+
+    /// <summary>Every receiver with every lookup mode and every <see cref="Refusal"/>.</summary>
+    public static TheoryData<Through, Lookups, Refusal> WaysToBeRefused()
+    {
+        var ways = new TheoryData<Through, Lookups, Refusal>();
+        foreach (var through in Enum.GetValues<Through>())
+        {
+            foreach (var lookups in Enum.GetValues<Lookups>())
+            {
+                foreach (var refusal in Enum.GetValues<Refusal>())
+                    ways.Add(through, lookups, refusal);
+            }
+        }
+        return ways;
+    }
+
     /// <summary>Every receiver with every lookup mode.</summary>
     public static TheoryData<Through, Lookups> Ways()
     {
@@ -130,6 +166,18 @@ public sealed class SignerKeyLookupOrderTests
 
         /// <summary>Another key is known for the kid: the signature does not verify.</summary>
         DoesNotVerify,
+
+        /// <summary>The signing key is known for the kid, and the entry's protected header says <c>alg</c> "none".</summary>
+        KnownWithAlgNone,
+
+        /// <summary>The signing key is known for the kid, and the entry's protected header has a <c>crit</c> member.</summary>
+        KnownWithCrit,
+
+        /// <summary>The signing key is known for the kid, and the entry's protected header says <c>b64</c> false.</summary>
+        KnownWithB64False,
+
+        /// <summary>The signing key (Ed25519) is known for the kid, and the entry's protected header says <c>alg</c> "ES256".</summary>
+        KnownWithAlgOfAnotherCurve,
     }
 
     [Theory]
@@ -210,6 +258,47 @@ public sealed class SignerKeyLookupOrderTests
     }
 
     [Theory]
+    [MemberData(nameof(Ways))]
+    public async Task A_known_key_whose_signature_says_alg_none_then_a_signature_that_verifies_opens_with_the_second(Through through, Lookups lookups)
+    {
+        var outcome = await Unpack(through, lookups, (Kid1, Key.KnownWithAlgNone), (Kid2, Key.Verifies));
+
+        outcome.Failure.Should().BeNull();
+        outcome.SignerKid.Should().Be(Kid2);
+        outcome.Asked.Should().Equal(Kid1, Kid2);
+    }
+
+    [Theory]
+    [MemberData(nameof(WaysToBeRefused))]
+    public async Task A_signature_refused_from_its_header_as_the_last_signature_reports_the_parsers_refusal(Through through, Lookups lookups, Refusal refusal)
+    {
+        var outcome = await Unpack(through, lookups, (Kid1, Key.Unknown), (Kid2, KeyRefusedFor(refusal)));
+
+        ShouldBeThe(refusal, outcome.Failure);
+        outcome.Asked.Should().Equal(Kid1, Kid2);
+    }
+
+    [Theory]
+    [MemberData(nameof(WaysToBeRefused))]
+    public async Task A_signature_refused_from_its_header_then_an_unknown_key_reports_the_no_key_failure_of_the_last_kid(Through through, Lookups lookups, Refusal refusal)
+    {
+        var outcome = await Unpack(through, lookups, (Kid1, KeyRefusedFor(refusal)), (Kid2, Key.Unknown));
+
+        outcome.Failure.Should().BeOfType<CryptoException>().Which.Message.Should().Be(NoKeyFor(Kid2));
+        outcome.Asked.Should().Equal(Kid1, Kid2);
+    }
+
+    [Theory]
+    [MemberData(nameof(Ways))]
+    public async Task A_signature_refused_from_its_header_between_two_that_do_not_verify_reports_the_last_as_not_verified(Through through, Lookups lookups)
+    {
+        var outcome = await Unpack(through, lookups, (Kid1, Key.DoesNotVerify), (Kid2, Key.KnownWithAlgNone), (Kid3, Key.DoesNotVerify));
+
+        outcome.Failure.Should().BeOfType<CryptoException>().Which.Message.Should().Be(DidNotVerifyFor(Kid3));
+        outcome.Asked.Should().Equal(Kid1, Kid2, Kid3);
+    }
+
+    [Theory]
     [MemberData(nameof(WaysToFail))]
     public async Task A_lookup_that_fails_with_an_exception_of_this_library_ends_the_unpack_with_that_exception_and_no_later_kid_is_looked_up(
         Through through, Lookups lookups, Throws throws)
@@ -245,6 +334,49 @@ public sealed class SignerKeyLookupOrderTests
 
     private static string DidNotVerifyFor(string kid) => $"JWS signature did not verify for kid '{kid}'.";
 
+    private static Key KeyRefusedFor(Refusal refusal) => refusal switch
+    {
+        Refusal.Crit => Key.KnownWithCrit,
+        Refusal.B64False => Key.KnownWithB64False,
+        Refusal.AlgOfAnotherCurve => Key.KnownWithAlgOfAnotherCurve,
+        _ => throw new ArgumentOutOfRangeException(nameof(refusal)),
+    };
+
+    /// <summary>Assert <paramref name="failure"/> is the parser's refusal for <paramref name="refusal"/>, as the unpack reports it.</summary>
+    private static void ShouldBeThe(Refusal refusal, Exception? failure)
+    {
+        switch (refusal)
+        {
+            case Refusal.Crit:
+                failure.Should().BeOfType<MalformedMessageException>().Which.Message.Should()
+                    .Be("JWS protected header marks an unsupported extension critical ('crit').");
+                break;
+            case Refusal.B64False:
+                failure.Should().BeOfType<MalformedMessageException>().Which.Message.Should()
+                    .Be("JWS with b64=false (unencoded payload, RFC 7797) is not supported.");
+                break;
+            case Refusal.AlgOfAnotherCurve:
+                failure.Should().BeOfType<CryptoException>().Which.Message.Should()
+                    .Be("JWS protected 'alg' (ES256) does not match the public key's curve (Ed25519).");
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(refusal));
+        }
+    }
+
+    /// <summary>
+    /// The protected header an entry is given in place of its own so that the parser refuses the
+    /// signature before it checks it, or <c>null</c> when the entry keeps its own.
+    /// </summary>
+    private static string? ProtectedHeaderRefusedFor(Key key) => key switch
+    {
+        Key.KnownWithAlgNone => """{"typ":"application/didcomm-signed+json","alg":"none"}""",
+        Key.KnownWithCrit => """{"typ":"application/didcomm-signed+json","alg":"EdDSA","crit":["exp"],"exp":1}""",
+        Key.KnownWithB64False => """{"typ":"application/didcomm-signed+json","alg":"EdDSA","b64":false}""",
+        Key.KnownWithAlgOfAnotherCurve => """{"typ":"application/didcomm-signed+json","alg":"ES256"}""",
+        _ => null,
+    };
+
     /// <summary>How an unpack ended, and every kid a signer key was asked for, in call order.</summary>
     private sealed record Outcome(string? SignerKid, Exception? Failure, IReadOnlyList<string> Asked);
 
@@ -269,10 +401,10 @@ public sealed class SignerKeyLookupOrderTests
         {
             var signing = TestKeyMaterial.Generate(KeyType.Ed25519, kid);
             signers.Add(signing.PrivateJwk.ToJwsSigner());
-            if (key == Key.Verifies)
-                known.Add(signing.PublicJwk);
-            else if (key == Key.DoesNotVerify)
+            if (key == Key.DoesNotVerify)
                 known.Add(TestKeyMaterial.Generate(KeyType.Ed25519, kid).PublicJwk);
+            else if (key != Key.Unknown)
+                known.Add(signing.PublicJwk);
         }
 
         var message = new MessageBuilder()
@@ -282,7 +414,18 @@ public sealed class SignerKeyLookupOrderTests
             .WithBody(new JsonObject { ["v"] = 1 })
             .Build();
         var packed = await EnvelopeWriter.PackSignedAsync(new PackSignedParameters(message, signers));
-        JsonNode.Parse(packed)!["signatures"]!.AsArray().Should().HaveCount(signatures.Length);
+        var envelope = JsonNode.Parse(packed)!;
+        var entries = envelope["signatures"]!.AsArray();
+        entries.Should().HaveCount(signatures.Length);
+        if (signatures.Any(signature => ProtectedHeaderRefusedFor(signature.Key) is not null))
+        {
+            for (var i = 0; i < signatures.Length; i++)
+            {
+                if (ProtectedHeaderRefusedFor(signatures[i].Key) is { } header)
+                    entries[i]!["protected"] = DataProofsDotnet.Jose.Base64Url.Encode(Encoding.UTF8.GetBytes(header));
+            }
+            packed = envelope.ToJsonString();
+        }
 
         var answers = new Answers(signatures.Select(signature => signature.Kid).ToArray(), lookups, failing);
         var outcome = through == Through.Reader
