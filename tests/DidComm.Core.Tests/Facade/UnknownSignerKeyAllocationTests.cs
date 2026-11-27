@@ -56,7 +56,7 @@ namespace DidComm.Tests.Facade;
 /// (<see cref="HeldLookups"/>). The test completes those tasks one at a time, on its own thread,
 /// while the unpack's task is not complete, and the unpack continues inside each completion, so the
 /// same counter still covers the whole unpack. It asserts in addition that every lookup was waited
-/// for. What each held lookup takes is in the figure; the growth measured is about 6 kB for each
+/// for. What each held lookup takes is in the figure; the growth measured is about 4.4 kB for each
 /// added signature, against the same bound.
 /// </para>
 /// </remarks>
@@ -128,13 +128,13 @@ public sealed class UnknownSignerKeyAllocationTests(ITestOutputHelper output)
 /// <strong>The figures behind the bound:</strong> to check one signature the JWS parser builds the
 /// signing input (the protected header, a dot and the payload's base64url text) as a string and as
 /// bytes, which takes about 4 times the payload's bytes. That is the growth when the envelope is
-/// parsed once and every signature is checked inside that parse: 1,056,066 bytes for each added
-/// signature, 4.03 times the payload, measured here; 1,055,923 bytes, 4.02 times, on the commit this
-/// branch started from (<c>667d1d3</c>), where the parser was always run once. When each signature
-/// whose key is known was handed to the parser in a JWS of its own, also when its lookup had
-/// answered at once (<c>bb5ff33</c>), each one took in addition a copy of the <c>payload</c>
-/// member, the payload's text and its decoded bytes: 3,071,133 bytes, 11.71 times. The bound, 7
-/// times, is about 1.7 times the first figure and the second is about 1.7 times the bound. The
+/// parsed once and every signature is checked inside that parse: about 1,056,000 bytes for each
+/// added signature, 4.03 times the payload, measured here; 4.02 times on the commit this branch
+/// started from (<c>667d1d3</c>), where the parser was always run once. When each signature whose
+/// key is known was handed to the parser in a JWS of its own, also when its lookup had answered at
+/// once (<c>bb5ff33</c>), each one took in addition a copy of the <c>payload</c> member, the
+/// payload's text and its decoded bytes: about 3,071,000 bytes, 11.71 times. The bound, 7 times,
+/// is about 1.7 times the first figure and the second is about 1.7 times the bound. The
 /// counter is the one <see cref="UnknownSignerKeyAllocationTests"/> describes, with lookups that
 /// answer at once. No time is measured.
 /// </para>
@@ -180,7 +180,8 @@ public sealed class KnownSignerKeyAllocationTests(ITestOutputHelper output)
 /// allocates for the input of <see cref="UnknownSignerKeyAllocationTests"/> with 64, 256 and 1,024
 /// signatures whose keys are unknown; with 64 signatures whose keys are known and none of which
 /// verifies; for the two 64-signature inputs again with lookups that have to be waited for; and
-/// with one signature that verifies. Skipped unless <c>DIDCOMM_111_SIGNER_KEY_FIGURES=1</c>.
+/// with one signature, whose key is known and verifies it or is not known, with a lookup that
+/// answers at once or has to be waited for. Skipped unless <c>DIDCOMM_111_SIGNER_KEY_FIGURES=1</c>.
 /// </summary>
 /// <remarks>
 /// Each input is unpacked once unmeasured and then three times measured. Every line gives the wire
@@ -236,6 +237,21 @@ public sealed class SignerKeyAllocationFigures(ITestOutputHelper output)
             {
                 run.Failure.Should().BeNull();
                 run.LookupsOnAnotherThread.Should().Be(0, "the lookups must run on the measuring thread");
+            });
+
+        Report("one signature, key known, verifies, every lookup waited for", signed.WithSignatures(1), signed.SignerDocumentWithTheSigningKey(), lookupsWait: true,
+            run =>
+            {
+                run.Failure.Should().BeNull();
+                run.LookupsOnAnotherThread.Should().Be(0, "the lookups must run on the measuring thread");
+                run.LookupsWaitedFor.Should().Be(run.Lookups);
+            });
+
+        Report("one signature, key unknown, lookup waited for", signed.WithSignatures(1), unknown, lookupsWait: true,
+            run =>
+            {
+                run.ShouldHaveLookedUpEveryKidAndFailedWith(RepeatedSignatureJws.NoKeyFor(1), 1);
+                run.LookupsWaitedFor.Should().Be(1);
             });
     }
 
