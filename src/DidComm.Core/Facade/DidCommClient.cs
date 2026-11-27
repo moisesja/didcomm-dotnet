@@ -1001,9 +1001,10 @@ public sealed partial class DidCommClient
         // ECDH key agreement through the KeyOperationResolver's opaque-or-extractable IEcdhKey
         // handles. DataProofs asks for the sender and signer public keys through synchronous
         // callbacks (IJweSenderKeyResolver / JwsParser), and the envelope layer never waits for a
-        // lookup inside one: the sender key is resolved before its callback runs, and a signer key
-        // is handed to the parser when its lookup answers at once and is otherwise awaited outside
-        // the parser (EnvelopeReader.ParseJweAsync / VerifyJwsAsync).
+        // lookup inside one: the sender key is resolved before its callback runs; signer keys are
+        // handed to the parser for as long as each lookup answers at once, and from the first that
+        // has to be waited for they are awaited outside the parser (EnvelopeReader.ParseJweAsync /
+        // VerifyJwsAsync).
         // The restricted shape supplies no sender or signer lookup: no DID a sender chose is resolved.
         var internalResult = await EnvelopeReader.UnpackAsync(
             packed, _keyOps,

@@ -22,9 +22,10 @@ namespace DidComm.Resolution;
 /// twice within one operation it receives the same JWK instance, resolved once — key material
 /// cannot shift mid-operation. Every lookup is made with the unpack's cancellation token, and none
 /// is ever waited for inside one of the JOSE layer's synchronous callbacks: a sender-key lookup is
-/// awaited before the JWE parser's callback runs, and a signer-key lookup either has its answer at
-/// once, which answers the JWS parser's callback, or is awaited outside the parser, whose callback
-/// then answers from the result (see <c>EnvelopeReader</c>).
+/// awaited before the JWE parser's callback runs; signer-key lookups answer the JWS parser's
+/// callback for as long as each has its answer at once, and from the first that has to be waited
+/// for they are awaited outside the parser, whose callback then answers from the result (see
+/// <c>EnvelopeReader</c>).
 /// </para>
 /// <para>
 /// When the key service lacks the capability, the lookups delegate to the legacy
