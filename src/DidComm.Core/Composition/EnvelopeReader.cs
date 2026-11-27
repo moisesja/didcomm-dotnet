@@ -781,18 +781,27 @@ internal static class EnvelopeReader
     /// The kept lookup is then awaited, once, outside the parser, and the verification goes on from
     /// its signature, one signature at a time and in order. Each later kid is checked against the
     /// limits and looked up when its turn comes, with the lookup awaited. A signature whose key is
-    /// not known is skipped, as the parser skips it: the parser is not run for it. A signature whose
-    /// key is known is verified by the parser, answering from the resolved key: a JWS with one
-    /// signature (what this library writes) as it stands, and each signature of a JWS with several
-    /// inside a General JSON JWS of its own that carries the envelope's own <c>payload</c> member and
-    /// that signature's own entry, so the parser reads exactly the protected header, unprotected
-    /// header, signature and payload it would have read for it. That is one parse of the payload for
-    /// each signature whose key is known, from the first whose lookup had to be waited for on, until
-    /// one verifies, and none for a signature whose key is not known: the <c>payload</c> member is
-    /// not read out of the envelope until the first such key needs it. The first signature
-    /// that verifies is the result. When none verifies the last signature's failure is the one
-    /// reported: the parser's failure for that signature when its key was known, and the failure the
-    /// pass ended with when it was not.
+    /// not known is skipped, as the parser skips it: the parser is not run for it. A JWS with one
+    /// signature (what this library writes) whose key is known is verified by the parser as it
+    /// stands, answering from the resolved key.
+    /// </para>
+    /// <para>
+    /// With several signatures, a signature whose key is known is first put to the parser alone,
+    /// without the payload (<see cref="RefusalBeforeTheSignatureCheck"/>). When the parser refuses
+    /// it from its protected header or its key, before it checks the signature, that refusal is the
+    /// signature's failure, and the payload is not copied or parsed for it. That first parse can
+    /// only refuse; it never accepts a signature. A signature the parser gets as far as checking is
+    /// then verified by the parser, answering from the resolved key, inside a General JSON JWS of
+    /// its own that carries the envelope's own <c>payload</c> member and that signature's own entry,
+    /// so the parser reads exactly the protected header, unprotected header, signature and payload
+    /// it would have read for it. That is one parse of the payload for each signature whose key is
+    /// known and which reaches the signature check, from the first whose lookup had to be waited
+    /// for on, until one verifies, and none for a signature whose key is not known or which the
+    /// parser refuses before the check: the <c>payload</c> member is not read out of the envelope
+    /// until the first such signature needs it. The first signature that verifies is the result.
+    /// When none verifies the last signature's failure is the one reported: the parser's failure
+    /// for that signature when its key was known, and the failure the pass ended with when it was
+    /// not.
     /// </para>
     /// <para>
     /// Either way a kid is looked up once, in signature order, and only once every signature before
@@ -872,11 +881,21 @@ internal static class EnvelopeReader
                 continue;
             }
 
+            var entryText = entry.GetRawText();
+            var answer = AnswerFrom(kid, key);
+            if (RefusalBeforeTheSignatureCheck(entryText, answer) is { } refusal)
+            {
+                // The parser refuses this signature without reading the payload: that is its
+                // failure, and the payload is not copied or parsed for it.
+                lastFailure = refusal;
+                continue;
+            }
+
             payloadMember ??= payload.GetRawText();
-            var single = string.Concat("{\"payload\":", payloadMember, ",\"signatures\":[", entry.GetRawText(), "]}");
+            var single = string.Concat("{\"payload\":", payloadMember, ",\"signatures\":[", entryText, "]}");
             try
             {
-                return DpSig.JwsParser.Parse(single, AnswerFrom(kid, key), cryptoProvider);
+                return DpSig.JwsParser.Parse(single, answer, cryptoProvider);
             }
             catch (Exception ex) when (ex is DataProofsDotnet.Jose.JoseCryptoException or DataProofsDotnet.Jose.MalformedJoseException)
             {
@@ -886,6 +905,47 @@ internal static class EnvelopeReader
 
         // Every signature failed: report the last one's failure, as the parser itself does.
         throw lastFailure ?? noKeyForTheLast;
+    }
+
+    /// <summary>
+    /// The parser's failure for one signature whose key is known, when the parser refuses the
+    /// signature before it checks it against the payload; <c>null</c> when the parser gets as far
+    /// as that check.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The parser is run on a General JSON JWS that carries the signature's own entry and an empty
+    /// payload, answered from <paramref name="answer"/>, with a <see cref="SignatureCheckProbe"/>
+    /// in place of the crypto provider. For a signature whose key it has, everything the parser
+    /// does before it calls the provider's <c>Verify</c> reads the protected header and the key
+    /// only: it refuses an <c>alg</c> that is missing or "none", a <c>crit</c> member,
+    /// <c>b64</c> false, a key without <c>crv</c>, an <c>alg</c> that is not the one of the key's
+    /// curve, and a key it cannot take the public key bytes from. So a failure of this parse in
+    /// which <c>Verify</c> was not reached is the failure the parse with the payload would have
+    /// ended with, with the same message.
+    /// </para>
+    /// <para>
+    /// This parse can only ever produce a failure. The probe's <c>Verify</c> answers no to every
+    /// signature, so the parser has nothing to accept, and a result from it fails closed. A
+    /// signature is accepted only by the parse with the envelope's payload and the real crypto
+    /// provider.
+    /// </para>
+    /// </remarks>
+    /// <param name="entry">The signature's entry of the envelope's <c>signatures</c> array, as it stands there.</param>
+    /// <param name="answer">The key callback that answers the signature's kid with its resolved key.</param>
+    private static Exception? RefusalBeforeTheSignatureCheck(string entry, Func<string, Jwk?> answer)
+    {
+        var probe = new SignatureCheckProbe();
+        try
+        {
+            _ = DpSig.JwsParser.Parse(string.Concat("{\"payload\":\"\",\"signatures\":[", entry, "]}"), answer, probe);
+        }
+        catch (Exception ex) when (ex is DataProofsDotnet.Jose.JoseCryptoException or DataProofsDotnet.Jose.MalformedJoseException)
+        {
+            return probe.VerifyWasReached ? null : ex;
+        }
+
+        throw new InvalidOperationException("The JWS parser accepted a signature it was given no means to check.");
     }
 
     /// <summary>
@@ -911,6 +971,44 @@ internal static class EnvelopeReader
         => requested => string.Equals(requested, kid, StringComparison.Ordinal)
             ? key
             : throw new InvalidOperationException("The JWS parser asked for a signer key it had not named.");
+
+    /// <summary>
+    /// A crypto provider for <see cref="RefusalBeforeTheSignatureCheck"/>: its <c>Verify</c> records
+    /// that the JWS parser reached the signature check and answers no. It verifies nothing and
+    /// accepts nothing. The JWS parser calls no other member; each of them throws.
+    /// </summary>
+    private sealed class SignatureCheckProbe : DataProofsDotnet.Jose.IJoseCryptoProvider
+    {
+        /// <summary>Whether the parser called <see cref="Verify"/>.</summary>
+        public bool VerifyWasReached { get; private set; }
+
+        public bool Verify(string joseAlg, ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> data, ReadOnlySpan<byte> signature)
+        {
+            VerifyWasReached = true;
+            return false;
+        }
+
+        public byte[] DeriveSharedSecret(string crv, ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> publicKey)
+            => throw NotPartOfAProbe();
+
+        public (byte[] Ciphertext, byte[] Tag) AeadEncrypt(string enc, ReadOnlySpan<byte> cek, ReadOnlySpan<byte> iv, ReadOnlySpan<byte> aad, ReadOnlySpan<byte> plaintext)
+            => throw NotPartOfAProbe();
+
+        public byte[] AeadDecrypt(string enc, ReadOnlySpan<byte> cek, ReadOnlySpan<byte> iv, ReadOnlySpan<byte> aad, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag)
+            => throw NotPartOfAProbe();
+
+        public byte[] KeyWrap(string alg, ReadOnlySpan<byte> kek, ReadOnlySpan<byte> cek)
+            => throw NotPartOfAProbe();
+
+        public byte[] KeyUnwrap(string alg, ReadOnlySpan<byte> kek, ReadOnlySpan<byte> wrapped)
+            => throw NotPartOfAProbe();
+
+        public void Fill(Span<byte> destination)
+            => throw NotPartOfAProbe();
+
+        private static NotSupportedException NotPartOfAProbe()
+            => new("Only the signature check of a JWS parse is part of a probe.");
+    }
 
     /// <summary>
     /// The sender-key callback of a JWE parser's first pass: it stops the pass at the parser's key
