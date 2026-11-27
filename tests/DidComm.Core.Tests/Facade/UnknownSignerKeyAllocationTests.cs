@@ -176,12 +176,107 @@ public sealed class KnownSignerKeyAllocationTests(ITestOutputHelper output)
 }
 
 /// <summary>
+/// What one <see cref="DidCommClient.UnpackAsync"/> call allocates for a signed envelope whose
+/// signatures have known keys and are refused by the parser from their protected header grows, for
+/// each signature, by far less than a copy of the payload, also after a lookup had to be waited
+/// for: such a signature is refused without the payload being read again for it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <strong>The input:</strong> the General JSON JWS of <see cref="UnknownSignerKeyAllocationTests"/>
+/// (a payload of about 256 kB) with entries whose protected header says <c>alg</c> "none". The
+/// parser refuses such a signature once it has the key, before it checks the signature. In the
+/// first test every entry names the one kid whose key the signer's DID document publishes, with 64
+/// and with 1,024 entries; the resolver's answer has to be waited for, and the client resolves the
+/// kid once, so one lookup is waited for and the others are answered from it. In the second test
+/// every entry has a kid of its own, the document publishes a key for each of 256 kids, and every
+/// lookup has to be waited for, with 64 and with 256 entries.
+/// </para>
+/// <para>
+/// <strong>What is asserted:</strong> each unpack ends with the <see cref="MalformedMessageException"/>
+/// carrying the parser's message for the last signature; the lookups made and waited for are the
+/// ones described; and the bytes allocated grow by less than one eighth of the payload's size for
+/// each added signature, the bound of <see cref="UnknownSignerKeyAllocationTests"/>, about 32 kB.
+/// The growth measured is about 6 kB for each added entry in the first test and about 10 kB in the
+/// second, where each entry's lookup reads a document of 256 keys. When each such signature was
+/// handed to the parser in a JWS of its own that carried the payload (<c>9046d00</c>), it was about
+/// 2,020,000 bytes in both.
+/// </para>
+/// <para>
+/// The counter and the held lookups are the ones <see cref="UnknownSignerKeyAllocationTests"/>
+/// describes. No time is measured.
+/// </para>
+/// </remarks>
+public sealed class HeaderRefusedSignatureAllocationTests(ITestOutputHelper output)
+{
+    private const int FewOfOneKid = 64;
+    private const int ManyOfOneKid = 1024;
+    private const int FewOfOwnKids = 64;
+    private const int ManyOfOwnKids = 256;
+
+    [Fact]
+    public async Task Unpack_of_a_JWS_whose_entries_repeat_one_known_kid_and_say_alg_none_allocates_far_less_than_a_payload_copy_for_each_entry_after_the_lookup_was_waited_for()
+    {
+        var signed = await RepeatedSignatureJws.SignAsync(UnknownSignerKeyAllocationTests.PayloadBytes);
+        var few = signed.WithAlgNoneSignatures(FewOfOneKid, oneKid: true).ShouldFitTheReceiveLimit();
+        var many = signed.WithAlgNoneSignatures(ManyOfOneKid, oneKid: true).ShouldFitTheReceiveLimit();
+        var document = signed.SignerDocumentWithTheSigningKey();
+
+        var forEachAddedSignature = MeasureTheGrowth(signed, few, FewOfOneKid, many, ManyOfOneKid, document, lookups: _ => 1);
+
+        forEachAddedSignature.Should().BeLessThan(signed.PayloadBytes / 8.0,
+            "a signature the parser refuses from its header must not take a copy of the payload");
+    }
+
+    [Fact]
+    public async Task Unpack_of_a_JWS_whose_entries_have_known_kids_of_their_own_and_say_alg_none_allocates_far_less_than_a_payload_copy_for_each_entry_when_every_lookup_has_to_be_waited_for()
+    {
+        var signed = await RepeatedSignatureJws.SignAsync(UnknownSignerKeyAllocationTests.PayloadBytes);
+        var few = signed.WithAlgNoneSignatures(FewOfOwnKids, oneKid: false).ShouldFitTheReceiveLimit();
+        var many = signed.WithAlgNoneSignatures(ManyOfOwnKids, oneKid: false).ShouldFitTheReceiveLimit();
+        var document = RepeatedSignatureJws.SignerDocumentWithOtherKeys(ManyOfOwnKids);
+
+        var forEachAddedSignature = MeasureTheGrowth(signed, few, FewOfOwnKids, many, ManyOfOwnKids, document, lookups: signatures => signatures);
+
+        forEachAddedSignature.Should().BeLessThan(signed.PayloadBytes / 8.0,
+            "a signature the parser refuses from its header must not take a copy of the payload");
+    }
+
+    /// <summary>
+    /// Unpack both inputs with lookups that have to be waited for, each once unmeasured and once
+    /// measured, assert how each ended and the lookups made, and return the bytes allocated for
+    /// each signature the second input has more than the first.
+    /// </summary>
+    private double MeasureTheGrowth(
+        RepeatedSignatureJws signed, string few, int fewSignatures, string many, int manySignatures, DidDocument document, Func<int, int> lookups)
+    {
+        // Nothing is awaited from here on, so every unpack below runs on this one thread.
+        UnpackAllocation.Measure(few, document, lookupsWait: true);
+        UnpackAllocation.Measure(many, document, lookupsWait: true);
+        var fewRun = UnpackAllocation.Measure(few, document, lookupsWait: true);
+        var manyRun = UnpackAllocation.Measure(many, document, lookupsWait: true);
+
+        var forEachAddedSignature = (manyRun.ThreadBytes - fewRun.ThreadBytes) / (double)(manySignatures - fewSignatures);
+        output.WriteLine(FormattableString.Invariant($"payload: {signed.PayloadBytes:N0} bytes"));
+        output.WriteLine(FormattableString.Invariant($"{fewSignatures} signatures: wire {Encoding.UTF8.GetByteCount(few):N0} bytes, allocated {fewRun.ThreadBytes:N0} bytes"));
+        output.WriteLine(FormattableString.Invariant($"{manySignatures} signatures: wire {Encoding.UTF8.GetByteCount(many):N0} bytes, allocated {manyRun.ThreadBytes:N0} bytes"));
+        output.WriteLine(FormattableString.Invariant($"allocated for each added signature: {forEachAddedSignature:N0} bytes"));
+
+        fewRun.ShouldHaveBeenRefusedForAlgNoneAfter(lookups(fewSignatures));
+        manyRun.ShouldHaveBeenRefusedForAlgNoneAfter(lookups(manySignatures));
+        return forEachAddedSignature;
+    }
+}
+
+/// <summary>
 /// Figures, not a check of the suite: the bytes one <see cref="DidCommClient.UnpackAsync"/> call
 /// allocates for the input of <see cref="UnknownSignerKeyAllocationTests"/> with 64, 256 and 1,024
 /// signatures whose keys are unknown; with 64 signatures whose keys are known and none of which
 /// verifies; for the two 64-signature inputs again with lookups that have to be waited for; and
 /// with one signature, whose key is known and verifies it or is not known, with a lookup that
-/// answers at once or has to be waited for. Skipped unless <c>DIDCOMM_111_SIGNER_KEY_FIGURES=1</c>.
+/// answers at once or has to be waited for; and with 64 and 256 entries that repeat one known kid
+/// and say <c>alg</c> "none", with a lookup that answers at once or has to be waited for. Skipped
+/// unless <c>DIDCOMM_111_SIGNER_KEY_FIGURES=1</c>.
 /// </summary>
 /// <remarks>
 /// Each input is unpacked once unmeasured and then three times measured. Every line gives the wire
@@ -200,6 +295,7 @@ public sealed class SignerKeyAllocationFigures(ITestOutputHelper output)
     private static readonly int[] UnknownKeySignatures = [64, 256, 1024];
     private const int KnownKeySignatures = 64;
     private const int WaitedForSignatures = 64;
+    private static readonly int[] AlgNoneSignatures = [64, 256];
 
     [SignerKeyFiguresFact]
     public async Task Allocated_bytes_of_one_unpack_by_number_of_signatures_and_by_whether_their_keys_are_known()
@@ -253,6 +349,16 @@ public sealed class SignerKeyAllocationFigures(ITestOutputHelper output)
                 run.ShouldHaveLookedUpEveryKidAndFailedWith(RepeatedSignatureJws.NoKeyFor(1), 1);
                 run.LookupsWaitedFor.Should().Be(1);
             });
+
+        var signingKey = signed.SignerDocumentWithTheSigningKey();
+        foreach (var signatures in AlgNoneSignatures)
+        {
+            var packed = signed.WithAlgNoneSignatures(signatures, oneKid: true);
+            Report($"alg none, one known kid repeated, {signatures} entries", packed, signingKey, lookupsWait: false,
+                run => run.ShouldHaveBeenRefusedForAlgNoneAfter(lookups: 1, waitedFor: 0));
+            Report($"alg none, one known kid repeated, {signatures} entries, the lookup waited for", packed, signingKey, lookupsWait: true,
+                run => run.ShouldHaveBeenRefusedForAlgNoneAfter(lookups: 1));
+        }
     }
 
     private void Report(string input, string packed, DidDocument document, bool lookupsWait, Action<UnpackAllocation.Run> check)
@@ -354,6 +460,33 @@ internal sealed class RepeatedSignatureJws
         return new JsonObject { ["payload"] = _payload, ["signatures"] = entries }.ToJsonString();
     }
 
+    /// <summary>The parser's message for a signature whose protected header says <c>alg</c> "none".</summary>
+    public const string AlgNoneRefusal = "JWS protected header 'alg' is missing or \"none\"; unsigned JWS is not accepted.";
+
+    private static readonly string AlgNoneProtected = DataProofsDotnet.Jose.Base64Url.Encode(
+        Encoding.UTF8.GetBytes("""{"typ":"application/didcomm-signed+json","alg":"none"}"""));
+
+    /// <summary>
+    /// The JWS with <paramref name="signatures"/> entries whose protected header says <c>alg</c>
+    /// "none": the parser refuses each once it has the key, before it checks the signature. With
+    /// <paramref name="oneKid"/> every entry names the first <see cref="Kid"/>; otherwise the
+    /// entries are under <see cref="Kid"/> 1 to <paramref name="signatures"/> in order.
+    /// </summary>
+    public string WithAlgNoneSignatures(int signatures, bool oneKid)
+    {
+        var entries = new JsonArray();
+        for (var position = 1; position <= signatures; position++)
+        {
+            entries.Add(new JsonObject
+            {
+                ["protected"] = AlgNoneProtected,
+                ["header"] = new JsonObject { ["kid"] = Kid(oneKid ? 1 : position) },
+                ["signature"] = _signature,
+            });
+        }
+        return new JsonObject { ["payload"] = _payload, ["signatures"] = entries }.ToJsonString();
+    }
+
     /// <summary>The signer's DID document with no authentication keys: no kid of the JWS has a key.</summary>
     public static DidDocument SignerDocumentWithoutAuthenticationKeys() => new() { Id = new Did(Signer) };
 
@@ -428,6 +561,20 @@ internal static class UnpackAllocation
         {
             Failure.Should().BeOfType<CryptoException>().Which.Message.Should().Be(message);
             Lookups.Should().Be(signatures, "every signature's kid is looked up once");
+            LookupsOnAnotherThread.Should().Be(0, "the lookups must run on the measuring thread");
+        }
+
+        /// <summary>
+        /// Assert the unpack resolved the signer's document <paramref name="lookups"/> times, on
+        /// the measuring thread, <paramref name="waitedFor"/> of them waited for (all of them when
+        /// not given), and ended with a <see cref="MalformedMessageException"/> carrying the
+        /// parser's message for a signature whose protected header says <c>alg</c> "none".
+        /// </summary>
+        public void ShouldHaveBeenRefusedForAlgNoneAfter(int lookups, int? waitedFor = null)
+        {
+            Failure.Should().BeOfType<MalformedMessageException>().Which.Message.Should().Be(RepeatedSignatureJws.AlgNoneRefusal);
+            Lookups.Should().Be(lookups);
+            LookupsWaitedFor.Should().Be(waitedFor ?? lookups);
             LookupsOnAnotherThread.Should().Be(0, "the lookups must run on the measuring thread");
         }
     }
