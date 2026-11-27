@@ -20,9 +20,11 @@ namespace DidComm.Resolution;
 /// <para>
 /// Captures are memoized per (kid, relationship): if the envelope layer asks for the same kid
 /// twice within one operation it receives the same JWK instance, resolved once — key material
-/// cannot shift mid-operation. Every lookup is awaited with the unpack's cancellation token,
-/// before the JOSE layer's synchronous callbacks run; those callbacks answer from the result (see
-/// <c>EnvelopeReader</c>).
+/// cannot shift mid-operation. Every lookup is made with the unpack's cancellation token, and none
+/// is ever waited for inside one of the JOSE layer's synchronous callbacks: a sender-key lookup is
+/// awaited before the JWE parser's callback runs, and a signer-key lookup either has its answer at
+/// once, which answers the JWS parser's callback, or is awaited outside the parser, whose callback
+/// then answers from the result (see <c>EnvelopeReader</c>).
 /// </para>
 /// <para>
 /// When the key service lacks the capability, the lookups delegate to the legacy

@@ -13,10 +13,13 @@ namespace DidComm.Resolution;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Both lookups are awaited, with the unpack's cancellation token, before DataProofs' synchronous
-/// JWS verify (<c>JwsParser.Parse</c>) and authcrypt sender-key callback
-/// (<c>IJweSenderKeyResolver.TryGet</c>) run; those callbacks answer from the resolved key (see
-/// <c>EnvelopeReader</c>). Each call resolves once; nothing is kept between calls.
+/// Both lookups are called with the unpack's cancellation token, and neither is ever waited for
+/// inside a callback of DataProofs' parsers, which are synchronous. The sender-key lookup is awaited
+/// before the authcrypt sender-key callback (<c>IJweSenderKeyResolver.TryGet</c>) runs; the callback
+/// answers from the resolved key. The signer-key lookup is called when the JWS verify
+/// (<c>JwsParser.Parse</c>) asks for a key: an answer it has at once is handed to the parser, and
+/// one that has to be waited for is awaited outside the parser, which is then answered from the
+/// resolved key (see <c>EnvelopeReader</c>). Each call resolves once; nothing is kept between calls.
 /// </para>
 /// <para>
 /// The DID portion of the kid is extracted by <see cref="DidSubject.DidSubjectOf"/>; for a

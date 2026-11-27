@@ -997,11 +997,13 @@ public sealed partial class DidCommClient
         var signerLookup = bindingContext.SignerLookup;
         var resolverCheck = BuildResolverAuthorizationPredicate();
 
-        // Every key lookup is awaited with this call's token. The recipient (secret-key) path runs
+        // Every key lookup is made with this call's token. The recipient (secret-key) path runs
         // ECDH key agreement through the KeyOperationResolver's opaque-or-extractable IEcdhKey
-        // handles. The sender and signer public keys are resolved by the envelope layer before
-        // DataProofs' synchronous IJweSenderKeyResolver / JwsParser callbacks need them, and those
-        // callbacks answer from the result (EnvelopeReader.ParseJweAsync / VerifyJwsAsync).
+        // handles. DataProofs asks for the sender and signer public keys through synchronous
+        // callbacks (IJweSenderKeyResolver / JwsParser), and the envelope layer never waits for a
+        // lookup inside one: the sender key is resolved before its callback runs, and a signer key
+        // is handed to the parser when its lookup answers at once and is otherwise awaited outside
+        // the parser (EnvelopeReader.ParseJweAsync / VerifyJwsAsync).
         // The restricted shape supplies no sender or signer lookup: no DID a sender chose is resolved.
         var internalResult = await EnvelopeReader.UnpackAsync(
             packed, _keyOps,
