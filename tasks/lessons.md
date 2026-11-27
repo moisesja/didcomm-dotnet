@@ -1534,3 +1534,20 @@ Format per entry:
   awaited, check `IsCompletedSuccessfully` inside the callback and answer from it; when it is
   false, keep the lookup and let the pass finish with the answer that skips. Measure the at-once
   and the waited-for case. See [[L-085]].
+
+## L-087 — A cost per item is compared with the base for every way the base can finish an item, not only the most expensive one.
+
+- **Lesson:** When a loop takes over what one pass of a parser did, list every way that pass could
+  finish one item: skip it, refuse it from its headers, check it in full. Each of those is a path
+  of the loop, and each is measured against the base with many items and a large payload.
+- **Why:** #111 (PR #145, review round 2): round 1 measured signatures whose key is not known
+  (skipped) and signatures whose key is known and which do not verify (checked in full). A
+  signature whose key is known and whose protected header says `alg` "none" is refused by the
+  parser before it reads the payload; after a lookup had to be waited for, the loop still gave each
+  such signature a copy and a parse of the payload: 518 MB for 256 entries against 1.8 MB on the
+  base. The rows already in the table could not show it, because none had a known key together
+  with a refusal that comes before the check.
+- **How to apply:** Read the parser's loop body top to bottom and write one row for each `continue`
+  or `return` in it, not one row for each kind of key. Where the loop cannot call the parser's own
+  early exits, ask the parser about the item alone, without the large part, and take its answer
+  only as a refusal. See [[L-085]], [[L-086]].
