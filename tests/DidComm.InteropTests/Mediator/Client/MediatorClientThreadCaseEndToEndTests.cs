@@ -132,6 +132,6 @@ internal sealed class LetterIdExchange(IMediatorExchange inner, IMessageIdGenera
 
     }
 
-    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
-        => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
+    public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
+        => inner.UnpackDeliveredBatchAsync(scope, messages, requestId, ct);
 }

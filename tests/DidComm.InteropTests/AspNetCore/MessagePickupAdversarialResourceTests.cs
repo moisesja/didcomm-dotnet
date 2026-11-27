@@ -327,10 +327,12 @@ public sealed class MessagePickupAdversarialResourceTests(ITestOutputHelper outp
         private readonly TestPeer _mallory;
         private readonly DidCommClient _client;
         private readonly string _serverDid;
+        private readonly IDisposable _floor;
 
-        private SessionRig(string serverDid, TestPeer alice, TestPeer carol, TestPeer mallory, DidCommClient client)
+        private SessionRig(string serverDid, TestPeer alice, TestPeer carol, TestPeer mallory, DidCommClient client, IDisposable floor)
         {
             _serverDid = serverDid;
+            _floor = floor;
             Alice = alice;
             _carol = carol;
             _mallory = mallory;
@@ -341,13 +343,12 @@ public sealed class MessagePickupAdversarialResourceTests(ITestOutputHelper outp
 
         public static async Task<SessionRig> CreateAsync()
         {
-            ThreadPool.GetMinThreads(out var worker, out var io);
-            if (worker < 48)
-                ThreadPool.SetMinThreads(48, io);
+            // Held until the rig is disposed (DidComm.TestSupport.ThreadPoolFloor, counted).
+            var floor = DidComm.TestSupport.ThreadPoolFloor.Raise(48);
             var secrets = new InMemorySecretsResolver();
             var (server, alice, carol, mallory) = await ReturnRouteTestHost.CreateIdentitiesAsync(secrets);
             var keys = new YieldingKeyService(alice.Services.GetRequiredService<IDidKeyService>());
-            return new SessionRig(server.Did, alice, carol, mallory, new DidCommClient(secrets, keys, new DidCommOptions()));
+            return new SessionRig(server.Did, alice, carol, mallory, new DidCommClient(secrets, keys, new DidCommOptions()), floor);
         }
 
         public HttpReturnRouteSession NewHttpSession() => new(_client, Alice.Did, _serverDid, null);
@@ -388,6 +389,7 @@ public sealed class MessagePickupAdversarialResourceTests(ITestOutputHelper outp
             await Alice.DisposeAsync();
             await _carol.DisposeAsync();
             await _mallory.DisposeAsync();
+            _floor.Dispose();
         }
     }
 

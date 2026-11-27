@@ -36,13 +36,12 @@ public sealed class QaSerialTiming
 /// </summary>
 internal static class Qa
 {
-    /// <summary>The thread-pool floor the QA tests raise to before blocking threads (CI runners have 2 cores).</summary>
-    public static void RaiseThreadPoolFloor(int minimum = 64)
-    {
-        ThreadPool.GetMinThreads(out var worker, out var io);
-        if (worker < minimum || io < minimum)
-            ThreadPool.SetMinThreads(Math.Max(worker, minimum), Math.Max(io, minimum));
-    }
+    /// <summary>
+    /// The thread-pool floor the QA tests raise to before blocking threads (CI runners have 2 cores),
+    /// worker and I/O, until the result is disposed (<see cref="DidComm.TestSupport.ThreadPoolFloor"/>,
+    /// counted: never lowered while another test holds a raise). Hold it for the whole test.
+    /// </summary>
+    public static IDisposable RaiseThreadPoolFloor(int minimum = 64) => DidComm.TestSupport.ThreadPoolFloor.Raise(minimum, minimum);
 
     /// <summary>Set a raw <c>delay_milli</c> header value on a forward.</summary>
     public static Action<Message> DelayRaw(JsonElement value)
@@ -252,6 +251,28 @@ internal sealed class QaManualTimeProvider : TimeProvider
         }
     }
 
+    /// <summary>
+    /// The earliest instant any scheduled timer is due at, or <c>null</c> when none is scheduled: for
+    /// a test that moves the clock one firing at a time (<see cref="Advance"/> by the difference from
+    /// <see cref="TimeProvider.GetUtcNow"/>).
+    /// </summary>
+    public DateTimeOffset? NextDueAt
+    {
+        get
+        {
+            lock (_gate)
+            {
+                DateTimeOffset? next = null;
+                foreach (var timer in _timers)
+                {
+                    if (timer.DueAt is { } due && (next is null || due < next))
+                        next = due;
+                }
+                return next;
+            }
+        }
+    }
+
     /// <summary>How many timers created after <paramref name="mark"/> are scheduled now.</summary>
     /// <param name="mark">A value <see cref="Mark"/> returned earlier.</param>
     public int ScheduledTimersSince(long mark)
@@ -366,7 +387,10 @@ internal sealed class QaManualTimeProvider : TimeProvider
 
 /// <summary>
 /// A host <see cref="DidComm.Mediator.Pickup.IMessageStore"/> around the product's in-memory store: counts enqueues
-/// (the sink's only write) and can hold the next N enqueues at the door until released.
+/// (the sink's only write) and can hold the next N enqueues at the door until released. A held enqueue
+/// waits for its release or for the cancellation of its own token (the mediator shutting down, which a
+/// test that failed before the release reaches when it disposes the server), never for a length of
+/// time: a park that let itself go after a while would change what a slow run checks (L-065).
 /// </summary>
 internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
 {
@@ -398,7 +422,7 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
     {
         Interlocked.Increment(ref _entered);
         if (_parked.TryDequeue(out var parked))
-            await parked.ArriveAsync();
+            await parked.ArriveAsync(ct);
         var outcome = await Inner.EnqueueAsync(message, lease, now, ct);
         Interlocked.Increment(ref _enqueued);
         return outcome;
@@ -424,10 +448,10 @@ internal sealed class QaParkingStore : DidComm.Mediator.Pickup.IMessageStore
 
         public void Release() => _gate.TrySetResult();
 
-        internal async Task ArriveAsync()
+        internal async Task ArriveAsync(CancellationToken ct)
         {
             _arrived.TrySetResult();
-            await Task.WhenAny(_gate.Task, Task.Delay(MediatorTestServer.Timeout));
+            await _gate.Task.WaitAsync(ct);
         }
     }
 }

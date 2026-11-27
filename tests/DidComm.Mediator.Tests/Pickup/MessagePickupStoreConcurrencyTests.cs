@@ -25,7 +25,7 @@ public sealed class MessagePickupStoreConcurrencyTests(ITestOutputHelper output)
     /// </summary>
     private static async Task<T[][]> RaceAsync<T>(int racers, int rounds, Func<int, int, ValueTask<T>> call)
     {
-        RaiseThreadPoolFloor(racers);
+        using var floor = RaiseThreadPoolFloor(racers);
         using var barrier = new Barrier(racers);
         var tasks = Enumerable.Range(0, racers).Select(racer => Task.Run(async () =>
         {
@@ -271,7 +271,7 @@ public sealed class MessagePickupStoreConcurrencyTests(ITestOutputHelper output)
         });
         await observing.Task.WaitAsync(Patience);
 
-        RaiseThreadPoolFloor(workers + 1);
+        using var floor = RaiseThreadPoolFloor(workers + 1);
         using var barrier = new Barrier(workers);
         var running = Enumerable.Range(0, workers).Select(worker => Task.Run(async () =>
         {

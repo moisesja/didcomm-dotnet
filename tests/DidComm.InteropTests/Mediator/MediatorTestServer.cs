@@ -266,7 +266,11 @@ internal sealed class InboxServer : IAsyncDisposable
     /// <summary>The status every request is answered with (202 by default).</summary>
     public int Status { get; set; } = StatusCodes.Status202Accepted;
 
-    /// <summary>When set, each request waits for it (bounded) before it is recorded and answered.</summary>
+    /// <summary>
+    /// When set, each request waits for it before it is recorded and answered; one whose client goes
+    /// away first is left unanswered and unrecorded. Never for a length of time: disposing this server
+    /// opens the gate.
+    /// </summary>
     public TaskCompletionSource? Gate { get; set; }
 
     /// <summary>Requests that reached the endpoint (counted before the gate).</summary>
@@ -287,7 +291,17 @@ internal sealed class InboxServer : IAsyncDisposable
         {
             Interlocked.Increment(ref inbox!._entered);
             if (inbox.Gate is { } gate)
-                await Task.WhenAny(gate.Task, Task.Delay(MediatorTestServer.Timeout));
+            {
+                try
+                {
+                    await gate.Task.WaitAsync(context.RequestAborted);
+                }
+                catch (OperationCanceledException) when (context.RequestAborted.IsCancellationRequested)
+                {
+                    context.Abort();
+                    return Results.Empty;
+                }
+            }
             using var ms = new MemoryStream();
             await context.Request.Body.CopyToAsync(ms);
             inbox._received.Enqueue((context.Request.Path.Value ?? string.Empty, ms.ToArray()));

@@ -151,7 +151,7 @@ public sealed class PushDispatcherAdv5Tests
     [Fact]
     public async Task Defect5_a_stale_grant_entry_never_lets_a_second_operation_of_the_same_grant_start()
     {
-        MessagePickupLive.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(2);
         var logger = new SaturationParkingLogger();
         var script = new LiveScript("a", "b", "c", "h");
         await using var world = await LivePushWorld.StartAsync(o => o.PushConcurrency = 2, services: s => s.AddSingleton<ILogger<PushDispatcher>>(logger));

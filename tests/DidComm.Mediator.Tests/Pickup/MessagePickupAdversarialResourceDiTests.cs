@@ -58,7 +58,7 @@ public sealed class MessagePickupAdversarialResourceDiTests
     [MemberData(nameof(CollaboratorsThatTakeTheQueue))]
     public async Task A_host_store_that_takes_the_queue_in_its_constructor_fails_fast_with_a_circular_dependency_message_instead_of_hanging(string which)
     {
-        MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+        using var floor = MessagePickupAdversarialResource.RaiseThreadPoolFloor();
         var sp = Build(
             b =>
             {
@@ -206,7 +206,7 @@ public sealed class MessagePickupAdversarialResourceDiTests
     [InlineData(true)]
     public async Task Leases_released_in_the_background_after_the_container_was_disposed_leave_no_unobserved_exception(bool faultedTask)
     {
-        MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+        using var floor = MessagePickupAdversarialResource.RaiseThreadPoolFloor();
         var unobserved = 0;
         var releases = 0;
         void OnUnobserved(object? sender, UnobservedTaskExceptionEventArgs e)

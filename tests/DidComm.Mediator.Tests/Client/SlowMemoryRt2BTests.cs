@@ -1,0 +1,127 @@
+using AwesomeAssertions;
+using DidComm.Exceptions;
+using DidComm.Facade;
+using DidComm.Mediator.Client;
+using DidComm.Mediator.Client.Internal;
+using DidComm.Mediator.Tests.Pipeline;
+using Xunit;
+
+namespace DidComm.Mediator.Tests.Client;
+
+/// <summary>
+/// #111 red-team pass 2, RT2-B: what the memory remembers after fix round 1 (owner decision C,
+/// "Every failure, fair to late starts (Recommended)"; the pause cap of Q budgets; RT1B-2's single strike per
+/// pause). Every timing is driven by a manual clock; real time is only a hang guard.
+/// </summary>
+public sealed class SlowMemoryRt2BTests
+{
+    private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout; // 20 s
+    private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
+    private static readonly DeliveryScope Bob = new(FakePickupExchange.M, FakePickupExchange.L);
+    private const string AliceKid = "did:example:alice#key-x25519-1";
+
+    /// <summary>
+    /// I-9 (as amended by decision C): nothing is written for a message still running when the
+    /// caller cancels. The host's lookup ends at once when its token is cancelled and reports that
+    /// as a resolution failure (a resolver that maps every error, its cancellation included, to
+    /// "notFound"), from inside its cancellation callback. The message had been opening for 1 s
+    /// when the caller cancelled. It is not remembered, and the delivery ends cancelled.
+    /// </summary>
+    /// <remarks>
+    /// The lookup registers its callback once <c>UnpackAllAsync</c> has returned and the lookup is
+    /// parked, so it runs before the worker's and the delivery's; the caller cancels from a pool
+    /// thread, where continuations run inline. (As first written, the lookup's continuation hopped
+    /// threads and the order of two registrations decided the outcome.)
+    /// </remarks>
+    [Fact]
+    public async Task A_message_running_when_the_caller_cancels_is_not_remembered_when_its_lookup_reports_the_cancellation_as_a_failure()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
+        using var caller = new CancellationTokenSource();
+
+        var delivery = unpacker.UnpackAllAsync(Bob, new[] { Alice("alice-1") }, "request-1", caller.Token);
+        await register.OpenAsync(1, RealTime);
+        await calls.WaitForAsync(1, RealTime);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Task.Run(caller.Cancel).WaitAsync(RealTime);
+        var ended = await Task.WhenAny(delivery, Task.Delay(RealTime));
+
+        ended.Should().BeSameAs(delivery, "the delivery ends when the caller cancels");
+        unpacker.Memory.HeldBack(Bob, new[] { "alice-1" }).Should().Equal(new[] { false },
+            "it was running when the caller cancelled (the delivery ended {0}); remembered, it would not be opened again for {1} min",
+            delivery.Status, unpacker.Memory.FirstPause.TotalMinutes);
+        delivery.Status.Should().Be(TaskStatus.Canceled);
+    }
+
+    /// <summary>
+    /// I-9 (as amended by decision C): nothing is written for a message still running when the
+    /// caller cancels, in a delivery of four. Each host lookup ends at once when its token is
+    /// cancelled and reports that as a resolution failure, from inside its cancellation callback
+    /// (registered once <c>UnpackAllAsync</c> has returned and the lookups are parked; the caller
+    /// cancels from a pool thread).
+    /// None of the four is remembered, and the delivery ends cancelled.
+    /// </summary>
+    [Fact]
+    public async Task Messages_running_when_the_caller_cancels_are_not_remembered_when_their_lookups_report_the_cancellation_as_a_failure()
+    {
+        var time = new ManualTimeProvider();
+        var calls = new HostCallLog();
+        var register = new RegistrationGate();
+        var unpacker = new DeliveredMessageUnpacker(CallbackLookups.ReportsCancellationAsFailure(calls, register), Budget, time);
+        using var caller = new CancellationTokenSource();
+        var ids = new[] { "alice-1", "alice-2", "alice-3", "alice-4" };
+
+        var delivery = unpacker.UnpackAllAsync(Bob, ids.Select(Alice).ToArray(), "request-1", caller.Token);
+        await register.OpenAsync(ids.Length, RealTime);
+        await calls.WaitForAsync(ids.Length, RealTime);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await Task.Run(caller.Cancel).WaitAsync(RealTime);
+        var ended = await Task.WhenAny(delivery, Task.Delay(RealTime));
+
+        ended.Should().BeSameAs(delivery, "the delivery ends when the caller cancels");
+        unpacker.Memory.Count.Should().Be(0, "all four were running when the caller cancelled (the delivery ended {0})", delivery.Status);
+        delivery.Status.Should().Be(TaskStatus.Canceled);
+    }
+
+    /// <summary>
+    /// What a step back of the host clock does to a message that fails again: it is held back for
+    /// the same pause once more, not for the next, doubled pause. An honest message whose sender's
+    /// DID host is unreachable from minute 0 to minute 11 fails at minute 0 (paused 10 min) and at
+    /// minute 10 (paused 20 min, so without a step it is opened again at minute 30, when it opens).
+    /// With the host clock stepping back one minute at minute 10.5, it is opened once more (a
+    /// reading below the strike's counts as due) and fails. Checked here: at minute 30 it is still
+    /// held back, and at minute 31 it is not; a third strike's 40 min would have held it back until
+    /// minute 50.5. (That the pause is counted from the repeat failure, so that the message is due
+    /// at minute 30.5, half a minute later than without the step, is measured to the tick by
+    /// <c>SlowMemoryClockStepTests.After_a_step_back_the_message_is_due_one_pause_after_its_repeat_failure</c>.)
+    /// </summary>
+    [Fact]
+    public void After_a_clock_step_back_a_message_that_fails_again_is_held_back_for_the_same_pause_again_and_not_for_the_doubled_one()
+    {
+        var clock = new Qa1Clock();
+        var memory = new SlowMemory(clock, TimeSpan.FromTicks(Budget.Ticks * 30), TimeSpan.FromTicks(Budget.Ticks * SlowMemory.EntriesPerPartition), SlowMemory.EntriesPerPartition, SlowMemory.MaxPartitions);
+        var id = new[] { "alice-1" };
+
+        memory.Strike(Bob, "alice-1"); // minute 0: it fails (its sender's host is unreachable)
+        clock.Inner.Advance(TimeSpan.FromMinutes(10));
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false }, "its first pause has ended");
+        memory.Strike(Bob, "alice-1"); // minute 10: it fails again, paused 20 min (until minute 30)
+        clock.Inner.Advance(TimeSpan.FromSeconds(30));
+        clock.Step(TimeSpan.FromMinutes(-1)); // minute 10.5: the host clock steps back one minute
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false }, "precondition: a reading below the strike's counts as due (I-12), so the message is opened once more");
+        memory.Strike(Bob, "alice-1"); // opened once more, it fails (its sender's host is unreachable until minute 11)
+
+        clock.Inner.Advance(TimeSpan.FromMinutes(19.5)); // minute 30: without the step it is opened again now
+        memory.HeldBack(Bob, id).Should().Equal(new[] { true }, "at minute 30, where its pause ends without the step, it is still held back");
+        clock.Inner.Advance(TimeSpan.FromMinutes(1)); // minute 31
+        memory.HeldBack(Bob, id).Should().Equal(new[] { false },
+            "the repeat failure added no strike: a third strike's pause of {0} min would hold the message back until minute {1}",
+            memory.PauseAfter(3).TotalMinutes, 10.5 + memory.PauseAfter(3).TotalMinutes);
+        memory.PauseAfter(3).Should().Be(2 * memory.PauseAfter(2), "the control: a third strike's pause is the doubled one");
+    }
+
+    private static DeliveredInput Alice(string id) => new(id, TestJwe.Bytes(TestJwe.Authcrypt(AliceKid, id)));
+}

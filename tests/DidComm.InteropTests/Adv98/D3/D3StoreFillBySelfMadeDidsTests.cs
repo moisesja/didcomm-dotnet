@@ -21,7 +21,7 @@ public sealed class D3StoreFillBySelfMadeDidsTests
     [Fact]
     public async Task D3_E16b_under_open_enrolment_fifty_self_made_grants_fill_the_store_and_another_tenants_forward_is_dropped()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         await using var mediator = await MediatorTestServer.StartAsync();
         var bob = await mediator.NewPeerAsync();
         await mediator.EnrolAsync(bob);
@@ -50,7 +50,7 @@ public sealed class D3StoreFillBySelfMadeDidsTests
     [Fact]
     public async Task D3_E16b_under_an_allow_list_policy_the_stranger_gets_no_grant_and_the_tenants_forward_is_queued()
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         var allowed = new HashSet<string>(StringComparer.Ordinal);
         await using var mediator = await MediatorTestServer.StartAsync(o => o.ConfigureServices = s => s.AddSingleton<IMediationPolicy>(new D3AllowListPolicy(allowed)));
         var bob = await mediator.NewPeerAsync();

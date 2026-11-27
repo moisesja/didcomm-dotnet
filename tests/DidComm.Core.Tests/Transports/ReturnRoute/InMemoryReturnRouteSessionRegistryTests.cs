@@ -15,7 +15,7 @@ namespace DidComm.Tests.Transports.ReturnRoute;
 /// subscriber backpressure (the oldest dropped and counted), so a blocked subscriber delays no call
 /// and parks one pool thread at most; concurrency owned by the store (L-028, L-044).
 /// </summary>
-public sealed class InMemoryReturnRouteSessionRegistryTests
+public sealed class InMemoryReturnRouteSessionRegistryTests : IDisposable
 {
     private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(10);
 
@@ -24,8 +24,10 @@ public sealed class InMemoryReturnRouteSessionRegistryTests
 
     // The registry's notifier runs on a pool thread, and most tests here either park it (a gated
     // subscriber) or block their own pool thread until it delivers: two parties at most at once (see
-    // ThreadPoolFloor).
-    public InMemoryReturnRouteSessionRegistryTests() => ThreadPoolFloor.Raise(2);
+    // ThreadPoolFloor). Held for each test and put back when it ends (xunit disposes the instance).
+    private readonly IDisposable _floor = DidComm.TestSupport.ThreadPoolFloor.ForParked(2);
+
+    public void Dispose() => _floor.Dispose();
 
     private static readonly AsyncLocal<string?> Ambient = new();
 

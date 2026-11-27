@@ -18,9 +18,11 @@ namespace DidComm.Mediator.Tests.Client;
 /// <summary>
 /// The cycle of <see cref="PickupClient.ReceiveLiveAsync"/> (#96 design §4.8, D-17): how a stream
 /// starts (refused before anything is sent over HTTP or for a second stream of the same pair), the
-/// order live-on → drain, the periodic cycle on the injected monotonic clock (which is how delayed
-/// messages are picked up, FR-PICK-08), the back-off after a failed step, the end after five
-/// failures in a row, a protocol error ending the stream at once, and live-off at the end.
+/// order live-on → drain, the periodic cycle on the alarms the stream arms on the injected clock
+/// (which is how delayed messages are picked up, FR-PICK-08), the back-off after a failed step, the
+/// end once a run of failures has outlasted RequestTimeout + 30 s, a protocol error ending the stream
+/// at once, and live-off at the end. A run of failures keeps its give-up alarm scheduled, so the
+/// tests that move the clock through back-offs wait for each back-off's own alarm first (L-065).
 /// </summary>
 public sealed class PickupClientLiveCycleTests
 {
@@ -146,10 +148,14 @@ public sealed class PickupClientLiveCycleTests
     [Fact]
     public async Task The_drain_stops_at_a_status_or_after_50_rounds()
     {
-        // Every round delivers the same message again (as a mediator that keeps redelivering would):
-        // the first time it is yielded; later rounds find it remembered and acknowledge it.
+        // Every round delivers the same message again under a new queue id (as a mediator that keeps
+        // a replayed forward would): the first time it is yielded; later rounds bring a new id, so the
+        // drain goes on, and find the message remembered and acknowledge it. Updated in #111 (QA2-3):
+        // it used the same id every round, which now ends the drain at its second round, since that id
+        // was already taken in this drain.
         var (exchange, client) = Live();
-        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        var round = 0;
+        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ($"q{Interlocked.Increment(ref round)}", "ok:m1")));
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
         (await Next(stream)).Id.Should().Be("q1");
@@ -158,8 +164,34 @@ public sealed class PickupClientLiveCycleTests
         await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
 
         exchange.SentOf(MessagePickup.DeliveryRequestType).Should().HaveCount(LiveDeliveryStream.MaxDrainRounds);
-        exchange.AcknowledgedIds.Should().HaveCount(LiveDeliveryStream.MaxDrainRounds).And.OnlyContain(id => id == "q1");
+        exchange.AcknowledgedIds.Should().Equal(Enumerable.Range(1, LiveDeliveryStream.MaxDrainRounds).Select(n => $"q{n}"));
         waiting.IsCompleted.Should().BeFalse("a repeat is acknowledged, never yielded again");
+        await StopAsync(stream, waiting, cts);
+    }
+
+    /// <summary>
+    /// QA2-3: a mediator that keeps a message after its acknowledgement and delivers it again under
+    /// the same id in the next round. The id was taken in this drain, so the round brings nothing new
+    /// and ends the drain: two delivery requests, the message opened and yielded once, acknowledged
+    /// once.
+    /// </summary>
+    [Fact]
+    public async Task A_round_that_brings_again_an_id_taken_in_this_drain_ends_the_drain()
+    {
+        var (exchange, client) = Live();
+        exchange.On(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")));
+        using var cts = new CancellationTokenSource();
+        var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        (await Next(stream)).Id.Should().Be("q1");
+
+        var mark = exchange.Clock.Mark();
+        var waiting = stream.MoveNextAsync().AsTask();
+        await exchange.Clock.WaitForTimerAsync(exchange.Options.LivePollInterval, mark, PickupTest.Timeout); // the drain ended: the next cycle's alarm
+
+        Types(exchange).Should().Equal(new[] { LiveOn, Drain, Ack, Drain }, "the second round brings only an id already taken in this drain");
+        exchange.Unpacked.Should().Equal("ok:m1");
+        exchange.AcknowledgedIds.Should().Equal("q1");
+        waiting.IsCompleted.Should().BeFalse();
         await StopAsync(stream, waiting, cts);
     }
 
@@ -241,15 +273,17 @@ public sealed class PickupClientLiveCycleTests
             : Task.FromResult(Status(r, live: r.Live)));
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Delivery(r, ("q1", "ok:m1")), r => Status(r));
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+        var mark = exchange.Clock.Mark();
         var first = stream.MoveNextAsync().AsTask();
 
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(TimeSpan.FromSeconds(1), mark, PickupTest.Timeout); // the first back-off's alarm
         Types(exchange).Should().Equal(LiveOn);
         exchange.Clock.Advance(TimeSpan.FromMilliseconds(999));
         Types(exchange).Should().Equal(LiveOn);
+        mark = exchange.Clock.Mark();
         exchange.Clock.Advance(TimeSpan.FromMilliseconds(1));
         await exchange.WaitForSentAsync(2);
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(TimeSpan.FromSeconds(2), mark, PickupTest.Timeout); // the second back-off's alarm
         Types(exchange).Should().Equal(LiveOn, LiveOn);
 
         exchange.Clock.Advance(TimeSpan.FromMilliseconds(1999));
@@ -274,12 +308,14 @@ public sealed class PickupClientLiveCycleTests
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
         await Next(stream);
 
+        var mark = exchange.Clock.Mark();
         var waiting = stream.MoveNextAsync().AsTask();
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(LiveDeliveryStream.FirstBackoff, mark, PickupTest.Timeout); // the back-off's alarm
         Types(exchange).Should().Equal(LiveOn, Drain, Ack);
+        mark = exchange.Clock.Mark();
         exchange.Clock.Advance(TimeSpan.FromSeconds(1));
         await exchange.WaitForSentAsync(6);
-        await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await exchange.Clock.WaitForTimerAsync(exchange.Options.LivePollInterval, mark, PickupTest.Timeout); // the drain ended: the next cycle's alarm
 
         Types(exchange).Should().Equal(LiveOn, Drain, Ack, Ack, LiveOn, Drain);
         exchange.AcknowledgedIds.Should().Equal(new[] { "q1", "q1" }, "the ids are kept and acknowledged again after the pause");
@@ -303,14 +339,10 @@ public sealed class PickupClientLiveCycleTests
             return Task.FromException<InboundMessageSnapshot>(error);
         });
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+        var mark = exchange.Clock.Mark();
         var first = stream.MoveNextAsync().AsTask();
 
-        foreach (var pause in new[] { 1, 2, 4, 8, 16, 30 })
-        {
-            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            first.IsCompleted.Should().BeFalse("a run of failures shorter than RequestTimeout + 30 s is retried");
-            exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
-        }
+        await BackOffAsync(exchange, first, mark, new[] { 1, 2, 4, 8, 16, 30 }, "a run of failures shorter than RequestTimeout + 30 s is retried");
 
         var thrown = (await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TimeoutException>()).Which;
         thrown.Should().BeSameAs(failures[6], "the first failure more than RequestTimeout + 30 s into the run ends the stream with its exception");
@@ -333,14 +365,10 @@ public sealed class PickupClientLiveCycleTests
             return Task.FromException<InboundMessageSnapshot>(new TransportException("down"));
         });
         await using var stream = client.ReceiveLiveAsync(M, L).GetAsyncEnumerator();
+        var mark = exchange.Clock.Mark();
         var first = stream.MoveNextAsync().AsTask();
 
-        foreach (var pause in new[] { 1, 2, 4, 8, 16, 30, 30, 30, 30 })
-        {
-            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            first.IsCompleted.Should().BeFalse();
-            exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
-        }
+        await BackOffAsync(exchange, first, mark, new[] { 1, 2, 4, 8, 16, 30, 30, 30, 30 }, "a run of failures shorter than RequestTimeout + 30 s is retried");
 
         await FluentActions.Awaiting(() => PickupTest.Within(first)).Should().ThrowAsync<TransportException>();
         failures.Should().Be(10);
@@ -364,14 +392,12 @@ public sealed class PickupClientLiveCycleTests
         exchange.OnSequence(MessagePickup.DeliveryRequestType, r => Status(r), r => Delivery(r, ("q1", "ok:m1")), r => Status(r));
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var mark = exchange.Clock.Mark();
         var first = stream.MoveNextAsync().AsTask();
 
-        foreach (var pause in new[] { 1, 2, 4, 8, 60, 1, 2, 4, 8 })
-        {
-            await exchange.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
-            first.IsCompleted.Should().BeFalse();
-            exchange.Clock.Advance(TimeSpan.FromSeconds(pause));
-        }
+        // Four back-offs, the next cycle's alarm (one interval after the drain that completed), four
+        // back-offs again.
+        await BackOffAsync(exchange, first, mark, new[] { 1, 2, 4, 8, 60, 1, 2, 4, 8 }, "never more than four failures in a row");
 
         (await PickupTest.Within(first)).Should().BeTrue();
         stream.Current.Id.Should().Be("q1");
@@ -634,21 +660,33 @@ public sealed class PickupClientLiveCycleTests
     }
 
     [Fact]
-    public async Task A_clock_that_passes_the_cycle_while_the_wait_is_being_set_runs_the_cycle_instead_of_waiting_another_interval()
+    public async Task A_clock_that_moves_on_as_the_next_cycle_is_armed_runs_the_cycle_when_its_alarm_fires_and_not_before()
     {
-        // The first timer the stream sets moves the clock a whole interval on before it is created,
-        // as a manual clock moved by another thread at that moment would (the interop delayed-message
-        // test once timed out this way): the stream must see the cycle is due, with no further move.
+        // The first timer the stream sets — the next cycle's alarm, armed when the first drain ends —
+        // moves the clock a whole interval on just before it is created, as a host clock stepped
+        // forward at that moment would. Updated in #111: the stream used to judge "due" by a reading
+        // taken before its wait's timer existed, so such a move made the cycle due at once (and the
+        // property was that it did, rather than wait another interval). Now an alarm counts from its
+        // arming and nothing compares readings: the cycle runs when its alarm fires, one interval
+        // after it was armed — no early cycle, and no wait beyond the alarm.
         var inner = new FakePickupExchange { Route = WebSocketRoute };
-        var exchange = new TimeShiftedExchange(inner, new MovesOnFirstTimer(inner.Clock, inner.Options.LivePollInterval));
+        var interval = inner.Options.LivePollInterval;
+        var exchange = new TimeShiftedExchange(inner, new MovesOnFirstTimer(inner.Clock, interval));
         var client = new PickupClient(exchange, logger: null);
         using var cts = new CancellationTokenSource();
         var stream = client.ReceiveLiveAsync(M, L, ct: cts.Token).GetAsyncEnumerator();
+        var mark = inner.Clock.Mark();
         var first = stream.MoveNextAsync().AsTask();
 
+        await inner.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout); // the next cycle's alarm
+        Types(inner).Should().Equal(new[] { LiveOn, Drain }, "a move of the clock as the alarm is armed makes no cycle due");
+        inner.Clock.Advance(interval - TimeSpan.FromTicks(1)).Should().Be(0, "one tick before an interval has passed since the alarm was armed, nothing fires");
+        Types(inner).Should().Equal(LiveOn, Drain);
+        mark = inner.Clock.Mark();
+        inner.Clock.Advance(TimeSpan.FromTicks(1)).Should().Be(1, "an interval after it was armed, the alarm fires");
         await inner.WaitForSentAsync(4);
         Types(inner).Should().Equal(LiveOn, Drain, LiveOn, Drain);
-        await inner.Clock.WaitForScheduledTimersAsync(1, PickupTest.Timeout);
+        await inner.Clock.WaitForTimerAsync(interval, mark, PickupTest.Timeout); // the second drain ended: the next alarm
         await StopAsync(stream, first, cts);
     }
 
@@ -693,11 +731,27 @@ public sealed class PickupClientLiveCycleTests
 
             => inner.SendOneWayAsync(route, request, name, mediatorDid, localDid, ct);
 
-        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
-            => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
+        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
+            => inner.UnpackDeliveredBatchAsync(scope, messages, requestId, ct);
     }
 
     // ---- the back-off schedule ----------------------------------------------------------------
+
+    // Move the clock through the stream's back-offs (or, for a pause that is the interval, to its next
+    // cycle), each pause once the alarm of that length has been armed since the clock last moved
+    // (L-065 rule 3: the give-up alarm stays scheduled through a run, so "a timer is scheduled" is no
+    // rendezvous), checking before each move that the stream still runs.
+    private static async Task BackOffAsync(FakePickupExchange exchange, Task first, long mark, IEnumerable<int> pauses, string because)
+    {
+        foreach (var pause in pauses)
+        {
+            var length = TimeSpan.FromSeconds(pause);
+            await exchange.Clock.WaitForTimerAsync(length, mark, PickupTest.Timeout);
+            first.IsCompleted.Should().BeFalse(because);
+            mark = exchange.Clock.Mark();
+            exchange.Clock.Advance(length);
+        }
+    }
 
     [Theory]
     [InlineData(1, 1)]

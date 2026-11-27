@@ -41,11 +41,14 @@ namespace DidComm.InteropTests.Mediator;
 /// "past the deadline" needs no real waiting; the slow cleanup is held by the test, not slept.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
-public sealed class MediatorAcknowledgementDeadlineKestrelTests
+public sealed class MediatorAcknowledgementDeadlineKestrelTests : IDisposable
 {
     private const string DeadlineLine = "was not committed within its deadline";
 
-    public MediatorAcknowledgementDeadlineKestrelTests() => Qa.RaiseThreadPoolFloor();
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = Qa.RaiseThreadPoolFloor();
+
+    public void Dispose() => _floor.Dispose();
 
     [Theory]
     [InlineData(false)]
@@ -68,10 +71,12 @@ public sealed class MediatorAcknowledgementDeadlineKestrelTests
         await cleanup.Started.Task.WaitAsync(MediatorTestServer.Timeout);
         var timersAfterHandingOver = time.ScheduledTimers;
         time.Advance(DidCommEndpointRouteBuilderExtensions.ForwardResponseDeadline); // the cleanup outlasts the deadline
+        var cleanupRanPastTheDeadline = !cleanup.Finished.Task.IsCompleted;
         cleanup.Release.SetResult();
         await host.Handler.FlushAsync(MediatorTestServer.Timeout);
         var queued = host.Store.MessageCount;
 
+        cleanupRanPastTheDeadline.Should().BeTrue("precondition: the later completion callback was still running when the deadline passed");
         response.Status.Should().Be(HttpStatusCode.Accepted);
         host.Outcomes.Should().Equal(new[] { ForwardOutcomes.Queued }, "never Dropped-Unacknowledged after the client has its 202");
         queued.Should().Be(1, "the sender holds a 202, so the forward is relayed, exactly once");
@@ -99,10 +104,12 @@ public sealed class MediatorAcknowledgementDeadlineKestrelTests
         var timersAfterHandingOver = time.ScheduledTimers;
         time.Advance(new MessagePickupOptions().LeaseTimeout); // the cleanup outlasts the lease deadline
         var linesAtTheLease = host.Logs.Entries.Count(e => e.Contains(DeadlineLine, StringComparison.Ordinal));
+        var cleanupRanPastTheLease = !cleanup.Finished.Task.IsCompleted;
         cleanup.Release.SetResult();
         var unpacked = await bob.Client.UnpackAsync(response.Body);
         var delivered = new PickupAnswer(unpacked.Message, Encoding.UTF8.GetBytes(response.Body)).Delivery(request.Id);
 
+        cleanupRanPastTheLease.Should().BeTrue("precondition: the later completion callback was still running when the lease deadline passed");
         response.Status.Should().Be(HttpStatusCode.OK);
         linesAtTheLease.Should().Be(0, "a delivery the client has read is never aborted");
         timersAfterHandingOver.Should().Be(host.IdleTimers, "handing the 200 to the transport ended its deadline");
@@ -110,12 +117,18 @@ public sealed class MediatorAcknowledgementDeadlineKestrelTests
     }
 }
 
-/// <summary>A held completion callback: <see cref="Started"/> once it runs, <see cref="Release"/> to let it finish.</summary>
+/// <summary>
+/// A held completion callback: <see cref="Started"/> once it runs, <see cref="Release"/> to let it
+/// finish, <see cref="Finished"/> once it has. It is held until released, never for a length of time;
+/// disposing the host releases every hold it made.
+/// </summary>
 internal sealed class DeadlineCompletionHold
 {
     public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public TaskCompletionSource Finished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 }
 
 /// <summary>
@@ -126,6 +139,8 @@ internal sealed class DeadlineCompletionHold
 internal sealed class DeadlineKestrelMediator : IAsyncDisposable
 {
     private readonly ConcurrentQueue<DeadlineCompletionHold> _holds = new();
+    // Every hold made, taken by a POST or not: disposal releases them all.
+    private readonly ConcurrentQueue<DeadlineCompletionHold> _made = new();
     private readonly List<IAsyncDisposable> _owned = new();
 
     private readonly MediatorTestMeterFactory _meters;
@@ -205,7 +220,14 @@ internal sealed class DeadlineKestrelMediator : IAsyncDisposable
                 {
                     var held = (DeadlineCompletionHold)state;
                     held.Started.TrySetResult();
-                    await Task.WhenAny(held.Release.Task, Task.Delay(MediatorTestServer.Timeout));
+                    try
+                    {
+                        await held.Release.Task;
+                    }
+                    finally
+                    {
+                        held.Finished.TrySetResult();
+                    }
                 }, hold);
             }
         });
@@ -223,6 +245,7 @@ internal sealed class DeadlineKestrelMediator : IAsyncDisposable
     public DeadlineCompletionHold HoldCompletionOfNextPost()
     {
         var hold = new DeadlineCompletionHold();
+        _made.Enqueue(hold);
         _holds.Enqueue(hold);
         return hold;
     }
@@ -281,7 +304,7 @@ internal sealed class DeadlineKestrelMediator : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        while (_holds.TryDequeue(out var hold))
+        foreach (var hold in _made)
             hold.Release.TrySetResult();
         _http.Dispose();
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));

@@ -56,8 +56,8 @@ internal static class EnvelopeReader
     /// <summary>Unpack <paramref name="packed"/> into its inner plaintext + metadata.</summary>
     /// <param name="packed">A packed DIDComm message: plaintext JWM, signed JWS, or encrypted JWE.</param>
     /// <param name="recipientKeys">Resolves the recipient ECDH key-agreement handle (opaque or extractable) for the decrypt path, and answers held-ness for recipient selection.</param>
-    /// <param name="senderLookup">Internal lookup for sender public keys (authcrypt path); MAY be null when no authcrypt is expected.</param>
-    /// <param name="signerLookup">Function returning the public JWK of a signer kid (verify path); MAY be null when no signed layers are expected.</param>
+    /// <param name="senderLookup">Internal lookup for sender public keys (authcrypt path), awaited with <paramref name="ct"/> before the JWE parser needs the key; MAY be null when no authcrypt is expected.</param>
+    /// <param name="signerLookup">Function resolving the public JWK of a signer kid (verify path), called with <paramref name="ct"/> for each signature in turn; an answer it has at once is handed to the JWS parser, and a lookup that has to be waited for is awaited outside the parser. MAY be null when no signed layers are expected.</param>
     /// <param name="cryptoProvider">JOSE crypto provider (NetCrypto-backed).</param>
     /// <param name="resolverCheck">
     /// FR-CONSIST-06 resolver-backed authorization predicate <c>(assertedDid, kid, relationship, ct) =&gt; isAuthorized</c>.
@@ -96,7 +96,7 @@ internal static class EnvelopeReader
         string packed,
         KeyOperationResolver recipientKeys,
         IInternalSenderKeyLookup? senderLookup,
-        Func<string, Jwk?>? signerLookup,
+        Func<string, CancellationToken, ValueTask<Jwk?>>? signerLookup,
         JoseCryptoProvider cryptoProvider,
         Func<string, string, string, CancellationToken, Task<bool>>? resolverCheck = null,
         UnpackKeyBindingContext? bindingContext = null,
@@ -109,11 +109,10 @@ internal static class EnvelopeReader
         ArgumentNullException.ThrowIfNull(cryptoProvider);
 
         // FR-API-09 (#80): DataProofs reads the JWS signer kid and the authcrypt sender kid out of
-        // the envelope and passes them straight to these two lookups, so the lookups are the first
-        // point where didcomm sees those values, at every layer. Wrap both so a kid over either
-        // identifier limit is refused before the inner lookup can DID-parse or resolve it.
-        signerLookup = BoundSignerLookup(signerLookup);
-        senderLookup = senderLookup is null ? null : new BoundedSenderKeyLookup(senderLookup);
+        // the envelope and names them when it asks for their keys, so its key request is the first
+        // point where didcomm sees those values, at every layer. ParseJweAsync and VerifyJwsAsync
+        // refuse a kid over either identifier limit there, before the lookup can DID-parse or
+        // resolve it.
 
         var stack = new List<EnvelopeKind>();
         // Per-layer composition trace (outer→inner) carrying the authenticated/anonymous distinction
@@ -347,7 +346,7 @@ internal static class EnvelopeReader
                     DpSig.JwsParseResult jwsResult;
                     try
                     {
-                        jwsResult = DpSig.JwsParser.Parse(current, signerLookup, cryptoProvider);
+                        jwsResult = await VerifyJwsAsync(current, signerLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
                     {
@@ -461,7 +460,7 @@ internal static class EnvelopeReader
 
                         var (recipientKey, heldKid) = await ResolveRecipientKeyOrDecoyAsync(recipientKeys, candidateKids, cryptoProvider, ct).ConfigureAwait(false);
                         decryptingKid = heldKid;
-                        jweResult = await DpEnc.JweParser.ParseAsync(parseInput, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
+                        jweResult = await ParseJweAsync(parseInput, recipientKey, senderLookup, cryptoProvider, ct).ConfigureAwait(false);
                     }
                     catch (DataProofsDotnet.Jose.MalformedJoseException ex)
                     {
@@ -698,52 +697,370 @@ internal static class EnvelopeReader
     }
 
     /// <summary>
-    /// Wrap the JWS signer lookup so a kid over the limits is refused before the inner lookup runs
-    /// (FR-API-09, #80). DataProofs' <c>JwsParser</c> calls the lookup outside its own error
-    /// handling, so the <see cref="MalformedMessageException"/> reaches the Signed branch's catch
-    /// filters, which pass every <see cref="DidCommException"/> through unchanged. The kid may come
-    /// from the protected or the unprotected header; the lookup sees it either way.
-    /// </summary>
-    private static Func<string, Jwk?>? BoundSignerLookup(Func<string, Jwk?>? inner)
-    {
-        if (inner is null)
-            return null;
-        return kid =>
-        {
-            RejectKeyIdOverLimits(kid, "JWS signer 'kid'");
-            return inner(kid);
-        };
-    }
-
-    /// <summary>
-    /// Authcrypt sender-key lookup that refuses a kid over the limits before the wrapped lookup
-    /// resolves it (FR-API-09, #80).
+    /// Decrypt one JWE layer with DataProofs' <c>JweParser.ParseAsync</c>, resolving the authcrypt
+    /// sender's public key first, through <paramref name="senderLookup"/>, with <paramref name="ct"/>.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The lookup, not the peeked <c>skid</c>, is the place to check. DataProofs' <c>ResolveSender</c>
-    /// calls <c>TryGet</c> with the <c>skid</c> when the protected header has one, and otherwise with
-    /// the kid it decodes from <c>apu</c>, which a check on <c>skid</c> alone would never see.
-    /// <c>ResolveSender</c> calls <c>TryGet</c> outside any catch, so the exception reaches the
-    /// Encrypted branch's filters, which let <see cref="MalformedMessageException"/> through.
+    /// The parser asks for the sender's key through a synchronous callback
+    /// (<c>IJweSenderKeyResolver.TryGet</c>), at most once per parse: only for ECDH-1PU, only once its
+    /// header checks pass (<c>crit</c>, <c>enc</c>, the <c>apv</c> commitment, the <c>epk</c>, and
+    /// <c>skid</c> agreeing with <c>apu</c>), with the <c>skid</c> or else the kid decoded from
+    /// <c>apu</c>, and before any key agreement. So the parser alone decides whether a lookup happens
+    /// and for which kid. The first pass is the real parse: an anoncrypt layer never asks and is
+    /// decrypted by it. When the parser asks, the pass stops there with the kid; the kid is checked
+    /// against the FR-API-09 limits, the key is resolved, and a second pass answers from it. The
+    /// lookup therefore happens for the same envelopes, with the same kid and at the same point as the
+    /// parser's own request: after the recipient key (or the decoy) was chosen, before the key
+    /// agreement, on the held path and the decoy path alike.
     /// </para>
     /// <para>
-    /// The refusal is not a new recipient-possession signal. Whether it fires depends only on the
-    /// sender kid, which is envelope content, not on which recipient key (if any) this agent holds,
-    /// and <c>ResolveSender</c> reaches this lookup on the held path and the decoy path alike.
+    /// The FR-API-09 refusal is not a new recipient-possession signal. Whether it fires depends only
+    /// on the sender kid, which is envelope content, not on which recipient key (if any) this agent
+    /// holds.
     /// </para>
     /// </remarks>
-    private sealed class BoundedSenderKeyLookup : IInternalSenderKeyLookup
+    private static async Task<DpEnc.JweParseResult> ParseJweAsync(
+        string jwe,
+        DpEnc.IEcdhKey recipientKey,
+        IInternalSenderKeyLookup? senderLookup,
+        JoseCryptoProvider cryptoProvider,
+        CancellationToken ct)
     {
-        private readonly IInternalSenderKeyLookup _inner;
+        if (senderLookup is null)
+            return await DpEnc.JweParser.ParseAsync(jwe, recipientKey, null, cryptoProvider, ct).ConfigureAwait(false);
 
-        public BoundedSenderKeyLookup(IInternalSenderKeyLookup inner) => _inner = inner;
+        string skid;
+        try
+        {
+            return await DpEnc.JweParser.ParseAsync(jwe, recipientKey, SenderKeyRequest.Instance, cryptoProvider, ct).ConfigureAwait(false);
+        }
+        catch (KeyRequestedException requested)
+        {
+            skid = requested.Kid;
+        }
+
+        RejectKeyIdOverLimits(skid, "JWE sender 'skid'");
+        var senderKey = await senderLookup.ResolveAsync(skid, ct).ConfigureAwait(false);
+        return await DpEnc.JweParser.ParseAsync(jwe, recipientKey, new ResolvedSenderKey(skid, senderKey), cryptoProvider, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Verify one JWS layer with DataProofs' <c>JwsParser.Parse</c>, answering its requests for
+    /// signer keys from <paramref name="signerLookup"/>, called with <paramref name="ct"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The parser asks for signer keys through a synchronous callback: for each signature in order,
+    /// with that signature's kid (the unprotected header's, else the protected header's), until one
+    /// verifies; a <c>null</c> answer skips the signature. The first signature that verifies is its
+    /// result, and when none does it fails with the last signature's failure.
+    /// </para>
+    /// <para>
+    /// <strong>The pass.</strong> The parser runs once on the JWS as it stands, and every kid it asks
+    /// for is recorded, in order. The kid is checked against the FR-API-09 limits and looked up, and
+    /// a lookup that has its answer when it returns is the answer to the parser: a key, with which
+    /// the parser checks the signature, or <c>null</c>, on which it skips the signature. For as long
+    /// as every lookup answers that way this is the only parse of the JWS: its result is the result,
+    /// and its failure is the failure. A kid over the limits is refused, and a lookup that throws
+    /// when it is called fails, from inside the callback; the parser lets either exception through
+    /// unchanged.
+    /// </para>
+    /// <para>
+    /// <strong>From the first lookup that has to be waited for.</strong> A lookup that does not have
+    /// its answer when it returns is never waited for inside the parser's callback. It is kept, and
+    /// the callback answers <c>null</c> for that signature and for every later one, whose kids it
+    /// only records: no limits check and no lookup for them yet. So the same pass goes on to name
+    /// every remaining kid, verifies nothing more, and ends with the parser's own failure for a
+    /// signature that has no key, which is the last signature's; that failure is kept. The
+    /// signatures before the kept lookup's failed or were skipped inside the pass; they are not
+    /// looked up or verified again. A lookup that returns already failed or cancelled is kept the
+    /// same way, so its exception is thrown where it is awaited.
+    /// </para>
+    /// <para>
+    /// The kept lookup is then awaited, once, outside the parser, and the verification goes on from
+    /// its signature, one signature at a time and in order. Each later kid is checked against the
+    /// limits and looked up when its turn comes, with the lookup awaited. A signature whose key is
+    /// not known is skipped, as the parser skips it: the parser is not run for it. A JWS with one
+    /// signature (what this library writes) whose key is known is verified by the parser as it
+    /// stands, answering from the resolved key.
+    /// </para>
+    /// <para>
+    /// With several signatures, a signature whose key is known is first put to the parser alone,
+    /// without the payload (<see cref="RefusalBeforeTheSignatureCheck"/>). When the parser refuses
+    /// it from its protected header or its key, before it checks the signature, that refusal is the
+    /// signature's failure, and the payload is not copied or parsed for it. That first parse can
+    /// only refuse; it never accepts a signature. A signature the parser gets as far as checking is
+    /// then verified by the parser, answering from the resolved key, inside a General JSON JWS of
+    /// its own that carries the envelope's own <c>payload</c> member and that signature's own entry,
+    /// so the parser reads exactly the protected header, unprotected header, signature and payload
+    /// it would have read for it. That is one parse of the payload for each signature whose key is
+    /// known and which reaches the signature check, from the first whose lookup had to be waited
+    /// for on, until one verifies, and none for a signature whose key is not known or which the
+    /// parser refuses before the check: the <c>payload</c> member is not read out of the envelope
+    /// until the first such signature needs it. The first signature that verifies is the result.
+    /// When none verifies the last signature's failure is the one reported: the parser's failure
+    /// for that signature when its key was known, and the failure the pass ended with when it was
+    /// not.
+    /// </para>
+    /// <para>
+    /// Either way a kid is looked up once, in signature order, and only once every signature before
+    /// it has failed or was skipped.
+    /// </para>
+    /// </remarks>
+    private static async Task<DpSig.JwsParseResult> VerifyJwsAsync(
+        string jws,
+        Func<string, CancellationToken, ValueTask<Jwk?>> signerLookup,
+        JoseCryptoProvider cryptoProvider,
+        CancellationToken ct)
+    {
+        var kids = new List<string>();
+        var start = -1;
+        ValueTask<Jwk?> awaited = default;
+        Exception noKeyForTheLast;
+        try
+        {
+            return DpSig.JwsParser.Parse(jws, kid =>
+            {
+                kids.Add(kid);
+                if (start >= 0)
+                    return null;
+
+                var lookup = ResolveSignerKeyAsync(kid, signerLookup, ct);
+                if (lookup.IsCompletedSuccessfully)
+                    return lookup.Result;
+
+                start = kids.Count - 1;
+                awaited = lookup;
+                return null;
+            }, cryptoProvider);
+        }
+        catch (DataProofsDotnet.Jose.JoseCryptoException ex) when (start >= 0)
+        {
+            // From `start` on every signature was named and skipped: this is the parser's "no key"
+            // failure for the last one, kept for when that signature's key turns out not to be
+            // known. A failure of a pass in which no lookup was kept is not caught.
+            noKeyForTheLast = ex;
+        }
+
+        var key = await awaited.ConfigureAwait(false);
+        if (kids.Count == 1)
+        {
+            if (key is null)
+                throw noKeyForTheLast;
+            return DpSig.JwsParser.Parse(jws, AnswerFrom(kids[0], key), cryptoProvider);
+        }
+
+        using var document = JsonDocument.Parse(jws, DidCommJson.StrictDocument);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("payload", out var payload)
+            || !root.TryGetProperty("signatures", out var entries)
+            || entries.ValueKind != JsonValueKind.Array
+            || entries.GetArrayLength() != kids.Count)
+        {
+            throw new InvalidOperationException("The JWS signatures do not match the signer keys the parser named.");
+        }
+
+        string? payloadMember = null;
+        Exception? lastFailure = null;
+        var index = 0;
+        foreach (var entry in entries.EnumerateArray())
+        {
+            var at = index++;
+            if (at < start)
+                continue;
+
+            var kid = kids[at];
+            if (at > start)
+                key = await ResolveSignerKeyAsync(kid, signerLookup, ct).ConfigureAwait(false);
+            if (key is null)
+            {
+                // Skipped, as the parser skips it. Its failure is reported only when it is the last
+                // signature, and that failure is the one the pass ended with.
+                lastFailure = null;
+                continue;
+            }
+
+            var entryText = entry.GetRawText();
+            var answer = AnswerFrom(kid, key);
+            if (RefusalBeforeTheSignatureCheck(entryText, answer) is { } refusal)
+            {
+                // The parser refuses this signature without reading the payload: that is its
+                // failure, and the payload is not copied or parsed for it.
+                lastFailure = refusal;
+                continue;
+            }
+
+            payloadMember ??= payload.GetRawText();
+            var single = string.Concat("{\"payload\":", payloadMember, ",\"signatures\":[", entryText, "]}");
+            try
+            {
+                return DpSig.JwsParser.Parse(single, answer, cryptoProvider);
+            }
+            catch (Exception ex) when (ex is DataProofsDotnet.Jose.JoseCryptoException or DataProofsDotnet.Jose.MalformedJoseException)
+            {
+                lastFailure = ex;
+            }
+        }
+
+        // Every signature failed: report the last one's failure, as the parser itself does.
+        throw lastFailure ?? noKeyForTheLast;
+    }
+
+    /// <summary>
+    /// The parser's failure for one signature whose key is known, when the parser refuses the
+    /// signature before it checks it against the payload; <c>null</c> when the parser gets as far
+    /// as that check.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The parser is run on a General JSON JWS that carries the signature's own entry and an empty
+    /// payload, answered from <paramref name="answer"/>, with a <see cref="SignatureCheckProbe"/>
+    /// in place of the crypto provider. For a signature whose key it has, everything the parser
+    /// does before it calls the provider's <c>Verify</c> reads the protected header and the key
+    /// only: it refuses an <c>alg</c> that is missing or "none", a <c>crit</c> member,
+    /// <c>b64</c> false, a key without <c>crv</c>, an <c>alg</c> that is not the one of the key's
+    /// curve, and a key it cannot take the public key bytes from. So a failure of this parse in
+    /// which <c>Verify</c> was not reached is the failure the parse with the payload would have
+    /// ended with, with the same message.
+    /// </para>
+    /// <para>
+    /// This parse can only ever produce a failure. The probe's <c>Verify</c> answers no to every
+    /// signature, so the parser has nothing to accept, and a result from it fails closed. A
+    /// signature is accepted only by the parse with the envelope's payload and the real crypto
+    /// provider.
+    /// </para>
+    /// </remarks>
+    /// <param name="entry">The signature's entry of the envelope's <c>signatures</c> array, as it stands there.</param>
+    /// <param name="answer">The key callback that answers the signature's kid with its resolved key.</param>
+    private static Exception? RefusalBeforeTheSignatureCheck(string entry, Func<string, Jwk?> answer)
+    {
+        var probe = new SignatureCheckProbe();
+        try
+        {
+            _ = DpSig.JwsParser.Parse(string.Concat("{\"payload\":\"\",\"signatures\":[", entry, "]}"), answer, probe);
+        }
+        catch (Exception ex) when (ex is DataProofsDotnet.Jose.JoseCryptoException or DataProofsDotnet.Jose.MalformedJoseException)
+        {
+            return probe.VerifyWasReached ? null : ex;
+        }
+
+        throw new InvalidOperationException("The JWS parser accepted a signature it was given no means to check.");
+    }
+
+    /// <summary>
+    /// The signer key for <paramref name="kid"/>: the kid is refused when over the FR-API-09 limits
+    /// (<see cref="MalformedMessageException"/>), and otherwise resolved through
+    /// <paramref name="signerLookup"/> with <paramref name="ct"/>.
+    /// </summary>
+    private static ValueTask<Jwk?> ResolveSignerKeyAsync(
+        string kid,
+        Func<string, CancellationToken, ValueTask<Jwk?>> signerLookup,
+        CancellationToken ct)
+    {
+        RejectKeyIdOverLimits(kid, "JWS signer 'kid'");
+        return signerLookup(kid, ct);
+    }
+
+    /// <summary>
+    /// A JWS signer callback that answers <paramref name="kid"/> with the already resolved
+    /// <paramref name="key"/>. The parser is deterministic, so it asks again for the kid it named in
+    /// the pass; any other kid fails closed.
+    /// </summary>
+    private static Func<string, Jwk?> AnswerFrom(string kid, Jwk? key)
+        => requested => string.Equals(requested, kid, StringComparison.Ordinal)
+            ? key
+            : throw new InvalidOperationException("The JWS parser asked for a signer key it had not named.");
+
+    /// <summary>
+    /// A crypto provider for <see cref="RefusalBeforeTheSignatureCheck"/>: its <c>Verify</c> records
+    /// that the JWS parser reached the signature check and answers no. It verifies nothing and
+    /// accepts nothing. The JWS parser calls no other member; each of them throws.
+    /// </summary>
+    private sealed class SignatureCheckProbe : DataProofsDotnet.Jose.IJoseCryptoProvider
+    {
+        /// <summary>Whether the parser called <see cref="Verify"/>.</summary>
+        public bool VerifyWasReached { get; private set; }
+
+        public bool Verify(string joseAlg, ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> data, ReadOnlySpan<byte> signature)
+        {
+            VerifyWasReached = true;
+            return false;
+        }
+
+        public byte[] DeriveSharedSecret(string crv, ReadOnlySpan<byte> privateKey, ReadOnlySpan<byte> publicKey)
+            => throw NotPartOfAProbe();
+
+        public (byte[] Ciphertext, byte[] Tag) AeadEncrypt(string enc, ReadOnlySpan<byte> cek, ReadOnlySpan<byte> iv, ReadOnlySpan<byte> aad, ReadOnlySpan<byte> plaintext)
+            => throw NotPartOfAProbe();
+
+        public byte[] AeadDecrypt(string enc, ReadOnlySpan<byte> cek, ReadOnlySpan<byte> iv, ReadOnlySpan<byte> aad, ReadOnlySpan<byte> ciphertext, ReadOnlySpan<byte> tag)
+            => throw NotPartOfAProbe();
+
+        public byte[] KeyWrap(string alg, ReadOnlySpan<byte> kek, ReadOnlySpan<byte> cek)
+            => throw NotPartOfAProbe();
+
+        public byte[] KeyUnwrap(string alg, ReadOnlySpan<byte> kek, ReadOnlySpan<byte> wrapped)
+            => throw NotPartOfAProbe();
+
+        public void Fill(Span<byte> destination)
+            => throw NotPartOfAProbe();
+
+        private static NotSupportedException NotPartOfAProbe()
+            => new("Only the signature check of a JWS parse is part of a probe.");
+    }
+
+    /// <summary>
+    /// The sender-key callback of a JWE parser's first pass: it stops the pass at the parser's key
+    /// request with a <see cref="KeyRequestedException"/> naming the kid. Stateless.
+    /// </summary>
+    private sealed class SenderKeyRequest : DpEnc.IJweSenderKeyResolver
+    {
+        public static readonly SenderKeyRequest Instance = new();
+
+        private SenderKeyRequest()
+        {
+        }
+
+        public Jwk? TryGet(string skid) => throw new KeyRequestedException(skid);
+    }
+
+    /// <summary>
+    /// Ends a JWE parser's first pass at its sender-key request. Thrown only by
+    /// <see cref="SenderKeyRequest"/> and caught around the same parser call in
+    /// <see cref="ParseJweAsync"/>; the parser calls the callback outside any catch, so the exception
+    /// reaches that call unchanged and never leaves the envelope layer.
+    /// </summary>
+    private sealed class KeyRequestedException : Exception
+    {
+        public KeyRequestedException(string kid)
+            : base("The parser asked for a sender key; it is resolved before the parser runs again.")
+            => Kid = kid;
+
+        /// <summary>The kid the parser asked for (a wire value, kept out of the message).</summary>
+        public string Kid { get; }
+    }
+
+    /// <summary>
+    /// The sender-key callback of a JWE parser's second pass: it answers the kid the first pass
+    /// named with the already resolved key. The parser is deterministic, so it asks for that kid
+    /// again; any other kid fails closed.
+    /// </summary>
+    private sealed class ResolvedSenderKey : DpEnc.IJweSenderKeyResolver
+    {
+        private readonly string _skid;
+        private readonly Jwk? _key;
+
+        public ResolvedSenderKey(string skid, Jwk? key)
+        {
+            _skid = skid;
+            _key = key;
+        }
 
         public Jwk? TryGet(string skid)
-        {
-            RejectKeyIdOverLimits(skid, "JWE sender 'skid'");
-            return _inner.TryGet(skid);
-        }
+            => string.Equals(skid, _skid, StringComparison.Ordinal)
+                ? _key
+                : throw new InvalidOperationException("The JWE parser asked for a sender key it had not named.");
     }
 
     /// <summary>

@@ -11,9 +11,10 @@ using Xunit;
 namespace DidComm.Mediator.Tests.Client;
 
 /// <summary>
-/// ADV-3 red-team pass on the per-delivery budget of fix round 2 (#96, owner decision 2-A and the
-/// equal share of <c>2e45df7</c>): the share arithmetic, the abandoned-unpack bound, host code that
-/// blocks, and the timer and token handling under races. Every timing is driven by the injected
+/// ADV-3 red-team pass on the per-delivery budget of fix round 2 (#96, owner decision 2-A), and
+/// since #111 the reservations of host unpack calls and one budget with no time limit per message
+/// (owner decision E): the bound on host calls, host code that blocks, and the timer and token
+/// handling under races. Every timing is driven by the injected
 /// <see cref="ManualTimeProvider"/> and rendezvous on scheduled timers (L-044); nothing sleeps.
 /// </summary>
 public sealed class DeliveredUnpackAdv3Tests
@@ -21,70 +22,61 @@ public sealed class DeliveredUnpackAdv3Tests
     private static readonly TimeSpan Budget = new MediatorClientOptions().UnpackTimeout;
     private static readonly TimeSpan RealTime = TimeSpan.FromSeconds(10);
 
+    // As many messages of one delivery as are opened at the same time (sixteen: #111, owner decision G).
+    private const int AtOnce = DeliveredMessageUnpacker.FetchConcurrency;
+
     /// <summary>
-    /// ADV3-2 (defect, Low; a known limit deferred to #111, skipped until it is fixed). Property broken — <see cref="DeliveredMessageUnpacker"/> summary:
-    /// "at most <see cref="DeliveredMessageUnpacker.MaxAbandoned"/> abandoned unpacks of this unpacker
-    /// (one per channel, so one per container) still running, beyond which a message fails at once
-    /// without starting"; <see cref="MediatorClientOptions.UnpackTimeout"/>: "keeps one of the
-    /// container's 16 slots" (L-059: bound background work started by an outside event).
-    /// <para>
-    /// Attack: the bound is a check (<c>_abandoned &gt;= MaxAbandoned</c>) when a worker starts a
-    /// message, not a reservation. Every delivery being opened at the same moment passes the check
-    /// with the count still at 0, and each of its four workers then abandons an unpack at its share.
-    /// Nothing bounds how many deliveries are opened at once: the unpack phase of a fetch is after
-    /// its request left the pending map (<see cref="MediatorClientOptions.MaxPendingRequests"/> does
-    /// not cover it), and 16 live streams each open their own. Eight deliveries opened together (a
-    /// multi-tenant host whose per-tenant fetch loops run at once, each fed one message per worker by
-    /// a sender whose DID lookup ignores cancellation) leave 32 abandoned unpacks running — twice the
-    /// bound; 16 live streams, 64.
-    /// </para>
+    /// ADV3-2 (fixed by #111, I-1): the bound on host unpack calls is a reservation, taken with its
+    /// check in one step before the call exists. Twenty deliveries of sixteen messages whose lookups
+    /// ignore cancellation are opened together (320 messages), each from its own mailbox (so no
+    /// partition bound refuses anything): exactly C = 256 calls start and stay reserved, exactly 64
+    /// messages are refused for the container, and never more than 256 calls run.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): the abandoned-unpack bound is checked when an unpack starts, not reserved, so deliveries opened together can exceed it.")]
-    public async Task ADV3_2_deliveries_opened_together_all_pass_the_bound_check_and_leave_more_abandoned_unpacks_than_the_bound()
+    [Fact]
+    public async Task ADV3_2_deliveries_opened_together_reserve_at_most_the_containers_bound()
     {
         var time = new ManualTimeProvider();
         var never = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var unpacker = new DeliveredMessageUnpacker((_, _) => never.Task, Budget, time); // ignores its token
-        const int deliveries = 8;
+        var calls = new HostCallLog();
+        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
+        {
+            calls.Enter(text, ct);
+            return never.Task; // ignores its token
+        }, Budget, time);
+        const int deliveries = UnpackReservations.MaxReserved / DeliveredMessageUnpacker.FetchConcurrency + 4;
         try
         {
             var batches = Enumerable.Range(0, deliveries)
-                .Select(d => unpacker.UnpackAllAsync(Payloads(DeliveredMessageUnpacker.FetchConcurrency, $"mallory-{d}-"), $"request-{d}", default))
+                .Select(d => unpacker.UnpackAllAsync(new DeliveryScope(FakePickupExchange.M, $"did:example:local-{d}"),
+                    Payloads(DeliveredMessageUnpacker.FetchConcurrency, $"mallory-{d}-").Select((p, i) => new DeliveredInput($"q-{d}-{i}", p)).ToArray(),
+                    $"request-{d}", default))
                 .ToArray();
-            await time.WaitForScheduledTimersAsync(deliveries * (1 + DeliveredMessageUnpacker.FetchConcurrency), RealTime);
+            await calls.WaitForAsync(UnpackReservations.MaxReserved, RealTime);
             time.Advance(Budget);
+            var outcomes = new List<DeliveredOutcome>();
             foreach (var batch in batches)
-                (await batch.WaitAsync(RealTime)).Should().OnlyContain(o => !o.Succeeded);
+                outcomes.AddRange(await batch.WaitAsync(RealTime));
 
-            unpacker.Abandoned.Should().BeLessThanOrEqualTo(DeliveredMessageUnpacker.MaxAbandoned,
-                "the abandoned-unpack bound is documented as a bound on unpacks still running after their deadline");
+            unpacker.Reserved.Should().Be(UnpackReservations.MaxReserved, "every call started is reserved until it ends");
+            outcomes.Count(o => o.Error is TimeoutException t && t.Message.Contains("capacity exhausted")).Should().Be(deliveries * DeliveredMessageUnpacker.FetchConcurrency - UnpackReservations.MaxReserved);
+            calls.Count.Should().Be(UnpackReservations.MaxReserved, "a refused message never starts");
+            calls.MaxRunning.Should().BeLessThanOrEqualTo(UnpackReservations.MaxReserved);
         }
         finally
         {
             never.TrySetCanceled();
         }
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("each reservation is given back when its call ends");
     }
 
     /// <summary>
-    /// ADV3-3 (defect, Low; a known limit deferred to #111, skipped until it is fixed). Property broken — owner decision 2-A on the L-063 stop (plan
-    /// progress log): "One decrypt budget per FetchAsync ... messages not opened by then are
-    /// failures"; the share (<c>2e45df7</c>) exists so "a message slow to open cannot keep the
-    /// messages behind it from their turn" (<see cref="DeliveredMessageUnpacker"/> summary).
-    /// <para>
-    /// Attack: the share is fixed when the delivery starts, from the message count alone
-    /// (<see cref="DeliveredMessageUnpacker.ShareOf"/>: budget ÷ rounds of four), whatever the other
-    /// messages cost. An outsider queues 99 messages that fail at once (any bytes the recipient's key
-    /// does not open: the mediator cannot tell), and the client never discards a failure, so they
-    /// come back at every lease. A <c>FetchAsync(limit: 100)</c> then gives an honest message whose
-    /// sender's DID takes 2 s to resolve (a did:webvh log fetched and verified over the network) a
-    /// share of 0.8 s: it fails as "used up its share", although nothing else is being opened and
-    /// 96 % of the 20 s budget is unused. It fails again at every redelivery while the junk is
-    /// queued, and an application that follows the advice to discard what keeps failing discards
-    /// it. Alone, the same message opens.
-    /// </para>
+    /// ADV3-3 (fixed by #111): ninety-nine messages that fail at once and an honest message first
+    /// whose sender's DID takes 2 s to resolve, in one delivery of a hundred under the default 20 s
+    /// budget. A message has no time limit of its own (owner decision E; before, a share of the
+    /// budget sized from the count, 0.8 s here), so it opens; alone, it opens too.
     /// </summary>
-    [Fact(Skip = "Known limit, deferred to #111 (slow-sender hardening): a message's share is fixed from the delivery's size, so junk that fails at once leaves an honest message only its share.")]
-    public async Task ADV3_3_junk_that_fails_at_once_cuts_an_honest_messages_share_though_the_budget_is_unused()
+    [Fact]
+    public async Task ADV3_3_junk_that_fails_at_once_leaves_an_honest_message_first_the_time_to_open()
     {
         var time = new ManualTimeProvider();
         var resolution = TimeSpan.FromSeconds(2);
@@ -96,44 +88,39 @@ public sealed class DeliveredUnpackAdv3Tests
             return Opened(text);
         }, Budget, time);
 
-        // Control: alone, the honest message opens.
+        // Control: alone, the honest message opens. The clock moves once its own lookup's timer exists.
+        var mark = time.Mark();
         var alone = unpacker.UnpackAllAsync(Payloads(1, "alice-"), "request-1", default);
-        await time.WaitForScheduledTimersAsync(3, RealTime); // budget, share, resolution
+        await time.WaitForTimerAsync(resolution, mark, RealTime);
         time.Advance(resolution);
         (await alone.WaitAsync(RealTime)).Single().Succeeded.Should().BeTrue();
 
         var padded = Payloads(99, "junk-").Prepend((ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes("alice-0")).ToArray();
+        mark = time.Mark();
         var batch = unpacker.UnpackAllAsync(padded, "request-2", default);
-        await time.WaitForScheduledTimersAsync(3, RealTime);
-        var share = DeliveredMessageUnpacker.ShareOf(Budget, padded.Length);
+        await time.WaitForTimerAsync(resolution, mark, RealTime);
         time.Advance(resolution);
         var outcomes = await batch.WaitAsync(RealTime);
 
         outcomes.Skip(1).Should().OnlyContain(o => o.Error is CryptoException, "the junk failed at once");
-        outcomes[0].Succeeded.Should().BeTrue(
-            "the delivery spent {0} of its {1} budget on its only slow message, which needed {2}; with the share fixed at {3} it failed as out of time",
-            share, Budget, resolution, share);
+        outcomes[0].Succeeded.Should().BeTrue("it runs until it opens: its {0} lookup fits in the budget of {1}", resolution, Budget);
     }
 
     /// <summary>
-    /// ADV3-4 (defect, Low; fixed in fix round 3: every unpack runs on a thread-pool work item of its own). Property broken — <see cref="PickupClient.FetchAsync"/> remarks:
-    /// "So a fetch ends within the budget even when some senders' DIDs resolve slowly or never";
-    /// <see cref="DeliveredMessageUnpacker"/>: "The returned task is complete when the last message
-    /// has ended or, at the latest, when the budget runs out".
-    /// <para>
-    /// Attack: the workers start inside <c>UnpackAllAsync</c> on the caller's own stack
-    /// (<c>Delivery.Start</c> calls <c>RunWorkerAsync</c>, which calls the unpack synchronously
-    /// before its first await), so the unpack's synchronous part — host code: the DID resolver, the
-    /// secrets resolver — runs before the caller even holds the task. A resolver that blocks its
-    /// thread (sync-over-async HTTP for the attacker's did:webvh, ignoring the token) blocks the
-    /// caller's <c>FetchAsync</c> for as long as the attacker holds the connection: the budget fires
-    /// and fills in the outcome, but the caller cannot get to it. The blocked unpack also holds no
-    /// abandoned slot (it has no task yet), so the bound of 16 does not count it.
-    /// </para>
+    /// ADV3-4 (fixed in #96 fix round 3: every unpack runs on a thread-pool work item of its own;
+    /// since #111 its call is reserved before it starts). An unpack whose host code blocks its thread
+    /// and ignores its token: the caller of <c>UnpackAllAsync</c> holds the delivery's task while the
+    /// host code still blocks, the budget decides the message's outcome (out of time) while it still
+    /// blocks, and the call keeps its reservation until its thread comes back. Checked against
+    /// <see cref="PickupClient.FetchAsync"/>'s remarks ("a fetch ends within the budget even when some
+    /// senders' DIDs resolve slowly or never") and <see cref="DeliveredMessageUnpacker"/>'s ("the
+    /// returned task is complete when the last message has ended or, at the latest, when the budget
+    /// runs out").
     /// </summary>
     [Fact]
-    public async Task ADV3_4_an_unpack_that_blocks_its_thread_holds_the_caller_past_the_budget_and_takes_no_slot()
+    public async Task ADV3_4_an_unpack_that_blocks_its_thread_leaves_the_caller_its_task_and_the_budget_its_outcome_and_keeps_its_reservation()
     {
+        using var floor = new PoolFloor(parked: 1); // the unpack below parks a pool thread on the gate
         var time = new ManualTimeProvider();
         using var gate = new ManualResetEventSlim(false);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -152,12 +139,12 @@ public sealed class DeliveredUnpackAdv3Tests
             // Fix round 3: awaited (bounded) rather than read after the budget, a rendezvous instead
             // of a race with the caller's thread; before the fix the caller stays blocked here.
             var delivery = await call.WaitAsync(RealTime);
-            await time.WaitForScheduledTimersAsync(2, RealTime); // the budget and the share
+            await time.WaitForScheduledTimersAsync(1, RealTime); // the budget
             time.Advance(Budget); // the budget fires: the outcome is decided
 
             call.IsCompleted.Should().BeTrue("the delivery's budget ran out, so the caller must hold its (failed) outcome; it is still blocked inside UnpackAllAsync");
             (await delivery.WaitAsync(RealTime)).Single().Error.Should().BeOfType<TimeoutException>("the budget decides the outcome while the resolver still blocks its thread");
-            unpacker.Abandoned.Should().Be(1, "an unpack still running after its budget keeps an abandoned slot");
+            unpacker.Reserved.Should().Be(1, "an unpack still running after its budget keeps its reservation");
         }
         finally
         {
@@ -167,80 +154,97 @@ public sealed class DeliveredUnpackAdv3Tests
     }
 
     /// <summary>
-    /// Held (passes): the share and the budget fire at the same instant (a delivery of up to four
-    /// messages: share = budget), the caller cancels at that instant too, and a callback host code
-    /// registered on the share's token throws — the call ends cancelled, nothing escapes onto the
-    /// timer thread or into the caller's <c>Cancel()</c>, and every slot comes back.
+    /// Held (passes): the caller cancels at the instant the budget ends, and a callback host code
+    /// registered on its token throws — the call ends cancelled, nothing escapes onto the timer
+    /// thread or into the caller's <c>Cancel()</c>, and every reservation comes back.
     /// </summary>
     [Fact]
-    public async Task Share_budget_and_caller_ending_together_with_a_throwing_host_callback_end_cleanly()
+    public async Task Budget_and_caller_ending_together_with_a_throwing_host_callback_end_cleanly()
     {
         var time = new ManualTimeProvider();
         using var caller = new CancellationTokenSource();
+        using var registered = new SemaphoreSlim(0);
         var unpacker = new DeliveredMessageUnpacker(async (text, ct) =>
         {
             ct.Register(() => throw new InvalidOperationException("host callback"));
-            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            var stall = Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            registered.Release();
+            await stall;
             return Opened(text);
         }, Budget, time);
-        // The caller cancels from a timer of its own, due at the same instant as the budget and the
-        // shares and created first, so it fires first: its Cancel() runs the budget's and the shares'
-        // cancellations, and the throwing host callbacks, inline.
+        // The caller cancels from a timer of its own, due at the same instant as the budget and
+        // created first, so it fires first: its Cancel() runs the budget's cancellation, and the
+        // throwing host callbacks, inline.
         using var callerTimer = time.CreateTimer(_ => caller.Cancel(), null, Budget, Timeout.InfiniteTimeSpan);
         var batch = unpacker.UnpackAllAsync(Payloads(4, "m-"), "request-1", caller.Token);
-        await time.WaitForScheduledTimersAsync(6, RealTime);
+        for (var i = 0; i < 4; i++)
+            (await registered.WaitAsync(RealTime)).Should().BeTrue("each host call registered its callback");
+        time.ScheduledTimers.Should().Be(2, "the caller's timer and the budget");
 
         FluentActions.Invoking(() => { time.Advance(Budget); }).Should().NotThrow("nothing a host callback throws escapes into the caller's Cancel() or onto a timer");
 
         await FluentActions.Awaiting(() => batch.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
     /// <summary>
-    /// Held (passes): a host callback on the share's token completes the unpack <em>successfully</em>
-    /// inside the share's own <c>Cancel()</c> (registered after the worker's wait, so it runs first).
-    /// The message is a success exactly once, the delivery completes, the next message still gets
-    /// its own share, and no slot or timer is left behind.
+    /// Held (passes): a host callback on the call's token completes the unpack <em>successfully</em>
+    /// inside the budget's own <c>Cancel()</c>. Whichever comes first, that result or the delivery's
+    /// end, each message has exactly one outcome; the message that waited for a worker (the
+    /// seventeenth: one more than are opened at once) is not started; and no reservation or timer
+    /// is left behind (the budget may be disposed inside its own <c>Cancel()</c>). Each message
+    /// names a sender of its own, so no partition's bound stands between the seventeenth and a
+    /// worker: it waits for a worker only.
     /// </summary>
     [Fact]
-    public async Task An_unpack_that_completes_inside_its_shares_cancel_is_recorded_once_and_leaves_nothing_behind()
+    public async Task An_unpack_that_completes_inside_the_budgets_cancel_is_recorded_once_and_leaves_nothing_behind()
     {
         var time = new ManualTimeProvider();
-        var unpacker = new DeliveredMessageUnpacker((text, ct) =>
+        using var registered = new SemaphoreSlim(0);
+        var started = 0;
+        var unpacker = new DeliveredMessageUnpacker((packed, ct) =>
         {
+            Interlocked.Increment(ref started);
+            var text = TestJwe.LabelOf(packed);
             var done = new TaskCompletionSource<DeliveredUnpack>();
-            // Completes synchronously, on the share's timer thread, when the share runs out.
+            // Completes synchronously, on the budget's timer thread, when the budget runs out.
             _ = Task.Run(async () =>
             {
                 await Task.Yield();
                 ct.Register(() => done.TrySetResult(Opened(text)));
+                registered.Release();
             });
             return done.Task;
         }, Budget, time);
-        var payloads = Payloads(5, "m-"); // two rounds: four, then one
+        // Sixteen at once; the seventeenth waits for a worker.
+        var payloads = Enumerable.Range(0, AtOnce + 1)
+            .Select(i => TestJwe.Bytes(TestJwe.Authcrypt($"did:example:sender-{i}#key-1", "m-" + i)))
+            .ToArray();
         var batch = unpacker.UnpackAllAsync(payloads, "request-1", default);
-        var share = DeliveredMessageUnpacker.ShareOf(Budget, payloads.Length);
 
-        await time.WaitForScheduledTimersAsync(5, RealTime);
-        time.Advance(share);
-        await time.WaitForScheduledTimersAsync(2, RealTime); // the budget and the fifth message's share
-        time.Advance(share);
+        for (var i = 0; i < AtOnce; i++)
+            (await registered.WaitAsync(RealTime)).Should().BeTrue("each host call registered its callback");
+        time.ScheduledTimers.Should().Be(1, "the budget");
+        time.Advance(Budget);
         var outcomes = await batch.WaitAsync(RealTime);
 
-        outcomes.Should().HaveCount(5);
-        // Whichever won (the late result or the share), each message has exactly one outcome.
+        outcomes.Should().HaveCount(AtOnce + 1);
+        // Whichever won (the late result or the budget), each message has exactly one outcome.
         outcomes.Should().OnlyContain(o => o.Succeeded || o.Error is TimeoutException);
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+        outcomes[AtOnce].Error.Should().BeOfType<TimeoutException>("the delivery's token was cancelled before a worker was free for it");
+        Volatile.Read(ref started).Should().Be(AtOnce);
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
     }
 
     /// <summary>
     /// Held (passes): thousands of deliveries with every kind of message — opens at once, fails at
-    /// once, throws synchronously, honours its share, ignores its token and ends later, plus callers
-    /// that cancel mid-delivery — leave the abandoned count at exactly zero once the late unpacks
-    /// end (it never drifts up or down), and no timer scheduled.
+    /// once, throws synchronously, honours its token, ignores its token and ends later, plus callers
+    /// that cancel mid-delivery — leave the reserved count at exactly zero once the late unpacks
+    /// end (it never drifts up or down), and no timer scheduled. A delivery has up to three times as
+    /// many messages as are opened at once, so in the larger ones messages wait for a worker.
     /// </summary>
     [Fact]
-    public async Task Thousands_of_mixed_deliveries_leave_no_abandoned_slot_and_no_timer()
+    public async Task Thousands_of_mixed_deliveries_leave_no_reservation_and_no_timer()
     {
         var time = new ManualTimeProvider();
         var late = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -257,7 +261,7 @@ public sealed class DeliveredUnpackAdv3Tests
         }, Budget, time);
         var kinds = new[] { "o", "f", "s", "l" };
         var random = new Random(96);
-        var maxAbandoned = 0;
+        var maxReserved = 0;
 
         for (var round = 0; round < 300; round++)
         {
@@ -265,15 +269,14 @@ public sealed class DeliveredUnpackAdv3Tests
             var batches = new List<(Task<IReadOnlyList<DeliveredOutcome>> Task, bool Cancelled)>();
             for (var d = 0; d < 6; d++)
             {
-                var count = random.Next(1, 13);
+                var count = random.Next(1, 3 * AtOnce + 1);
                 var payloads = Enumerable.Range(0, count).Select(i => (ReadOnlyMemory<byte>)Encoding.UTF8.GetBytes(kinds[random.Next(kinds.Length)] + "-" + round + "-" + d + "-" + i)).ToArray();
                 var cancelled = d == 5;
                 batches.Add((unpacker.UnpackAllAsync(payloads, "request", cancelled ? cancel.Token : default), cancelled));
             }
-            var cancelledInFlight = round % 3 == 0 && !batches[5].Task.IsCompleted;
             if (round % 3 == 0)
                 cancel.Cancel();
-            // Run every share and budget out.
+            // Run every budget out.
             for (var step = 0; step < 4 && batches.Any(b => !b.Task.IsCompleted); step++)
             {
                 time.Advance(Budget);
@@ -281,23 +284,26 @@ public sealed class DeliveredUnpackAdv3Tests
             }
             foreach (var (task, cancelled) in batches)
             {
-                if (cancelled && cancelledInFlight)
-                    await FluentActions.Awaiting(() => task.WaitAsync(RealTime)).Should().ThrowAsync<OperationCanceledException>();
-                else
-                    (await task.WaitAsync(RealTime)).Should().NotContainNulls();
+                // A cancelled caller's delivery may have ended on its own first (its unpacks run on
+                // the pool): either way it is cancelled, or it has one outcome per message (L-044).
+                await ((Task)task).ContinueWith(static _ => { }, TaskScheduler.Default).WaitAsync(RealTime);
+                if (cancelled && task.IsCanceled)
+                    continue;
+                task.IsCompletedSuccessfully.Should().BeTrue();
+                (await task).Should().NotContainNulls();
             }
-            maxAbandoned = Math.Max(maxAbandoned, unpacker.Abandoned);
+            maxReserved = Math.Max(maxReserved, unpacker.Reserved);
             if (round % 50 == 49)
             {
                 late.TrySetResult(Opened("late"));
-                SpinWait.SpinUntil(() => unpacker.Abandoned == 0, RealTime).Should().BeTrue("every abandoned unpack gave its slot back once it ended");
+                SpinWait.SpinUntil(() => unpacker.Reserved == 0, RealTime).Should().BeTrue("every unpack let go gave its reservation back once it ended");
                 late = new TaskCompletionSource<DeliveredUnpack>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
         }
 
         late.TrySetResult(Opened("late"));
-        SpinWait.SpinUntil(() => unpacker.Abandoned == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
-        maxAbandoned.Should().BeGreaterThan(0, "the run did abandon unpacks");
+        SpinWait.SpinUntil(() => unpacker.Reserved == 0 && time.ScheduledTimers == 0, RealTime).Should().BeTrue();
+        maxReserved.Should().BeGreaterThan(0, "the run did let unpacks go");
     }
 
     private static ReadOnlyMemory<byte>[] Payloads(int count, string prefix)

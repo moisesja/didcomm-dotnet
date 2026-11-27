@@ -77,7 +77,7 @@ public sealed class DirectPushStarvationAdv110Tests
     [Fact]
     public async Task Recipients_whose_endpoint_name_lookups_stall_past_the_deadline_never_stop_another_recipients_live_push()
     {
-        MessagePickupLive.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupLive.RaiseThreadPoolFloor(2);
         await using var direct = await StallWorld.StartAsync(o => o.PushConcurrency = 1);
         var fixture = direct.World.Fixture;
         var (healthy, session) = await direct.World.LiveGrantAsync("adv1a-healthy");

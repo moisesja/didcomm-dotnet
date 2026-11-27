@@ -135,7 +135,8 @@ internal sealed class FakePickupExchange : IMediatorExchange
     /// <summary>
     /// When set (<see cref="UseBudget"/>), batches go through the real <see cref="DeliveredMessageUnpacker"/>
     /// on <see cref="Clock"/>, its unpack step being <see cref="Unpacker"/>: one budget per delivery,
-    /// four at a time. Otherwise a batch is opened one message after the other, without a budget.
+    /// at most <see cref="DeliveredMessageUnpacker.FetchConcurrency"/> (sixteen) at a time. Otherwise
+    /// a batch is opened one message after the other, without a budget.
     /// </summary>
     public DeliveredMessageUnpacker? Budgeted { get; private set; }
 
@@ -296,19 +297,19 @@ internal sealed class FakePickupExchange : IMediatorExchange
         return await Unpacker(text, ct);
     }
 
-    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
+    public async Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
     {
         lock (_gate)
-            _batches.Add((requestId, payloads.Count));
+            _batches.Add((requestId, messages.Count));
         if (Budgeted is { } budgeted)
         {
-            var opened = await budgeted.UnpackAllAsync(payloads, requestId, ct);
+            var opened = await budgeted.UnpackAllAsync(scope, messages, requestId, ct);
             AfterBatchUnpack?.Invoke();
             return opened;
         }
-        var outcomes = new List<DeliveredOutcome>(payloads.Count);
-        foreach (var payload in payloads)
-            outcomes.Add(await UnpackDeliveredAsync(payload, ct));
+        var outcomes = new List<DeliveredOutcome>(messages.Count);
+        foreach (var message in messages)
+            outcomes.Add(await UnpackDeliveredAsync(message.Payload, ct));
         AfterBatchUnpack?.Invoke();
         return outcomes;
     }

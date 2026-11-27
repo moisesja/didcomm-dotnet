@@ -348,7 +348,7 @@ didcomm-dotnet is delivered in six phases (see [PRD §12](docs/didcomm-dotnet_PR
 | **4** | Routing & mediation (Forward protocol, mediator-as-DID-endpoint, rewrapping) | ✅ Complete |
 | **5** | Transports (HTTPS + ASP.NET Core receive, WebSocket) | ✅ Complete |
 | **6** | Protocols, cross-message concerns, live interop, samples, release | ✅ Complete |
-| **7** | Mediator service: return route, Coordinate Mediation, Message Pickup, `AddMediator()`, the recipient client, sample 11 | 🚧 In progress — the client's slow-sender hardening (#111) remains ([#88](https://github.com/moisesja/didcomm-dotnet/issues/88)) |
+| **7** | Mediator service: return route, Coordinate Mediation, Message Pickup, `AddMediator()`, the recipient client, sample 11 | ✅ Built — the client's slow-sender hardening (#111) was the last issue on the epic ([#88](https://github.com/moisesja/didcomm-dotnet/issues/88)) |
 
 Phase 6, in detail:
 

@@ -1374,3 +1374,180 @@ Format per entry:
 - **How to apply:** Before a hand-back lists a finding as "out of scope", search the open issues. No
   issue → fix it here (size is not a stop). An open issue → leave it there and name it. A stop or a
   private item → raise it, don't fix or file it. See [[L-046]] and [[L-073]].
+
+## L-076 — An option or a report never says "closes X" without a named test that fails before and passes after.
+
+- **Lesson:** A claim of the form "X is closed / cannot happen / is bounded by N" is written only next
+  to the name of the test that proves it, and that test fails without the change it proves. This
+  holds for an option put to the owner as much as for a report, a commit message or a doc. When the
+  test does not exist yet, the sentence says "not verified".
+- **Why:** #111, 2026-11-24: two options were put to the owner with claims that later proved wrong
+  ("closes both findings by construction"; "honest senders are never cut"). Each had been reasoned,
+  not tested, and each cost a round.
+- **How to apply:** Before an option or a hand-back leaves the session, list its claims and write a
+  test name beside each. A claim with no test is removed or marked "not verified". Words such as "by
+  construction", "cannot" and "always" are a prompt to look for the test. See [[L-073]].
+
+## L-077 — Cancellation versus failure is decided by the token's state, never by the exception's type.
+
+- **Lesson:** When awaited work ends with an exception, decide whether it was ended from outside by
+  reading the tokens that end it (the deadline's, the caller's, the owner's shutdown), not by
+  catching `OperationCanceledException`. Host code may report its cancellation as a failure of its
+  own, and may do so from a callback that runs before ours.
+- **Why:** #111: a delivered message's lookup that reported its cancellation as a resolution failure
+  was recorded as the message's own failure, and the message was remembered. The same shape was in
+  the live stream's three request steps and in the channel's sends and endpoint lookup. Tests that
+  covered the case passed only because of the order in which two registrations happened to run.
+- **How to apply:** Write `catch (Exception) when (<the tokens say it is being ended>)` before the
+  catch for a failure of its own. Read every token that can end the work, the caller's included:
+  callbacks run last-registered first, so a callback host code registered on the caller's token runs
+  before the one that cancels ours. Prove each reading with a mutant that removes it.
+
+## L-078 — A test of cancellation ordering cancels from a thread-pool thread.
+
+- **Lesson:** A test that depends on which continuation runs inside a `Cancel()` makes the
+  cancellation (or the clock advance that fires the deadline) from `Task.Run`, and makes the order of
+  the registrations explicit with a gate the test opens.
+- **Why:** #111: xunit's synchronization context changes where continuations run, so a continuation
+  that runs inline in production did not run inline in the test, and the defect of [[L-077]] stayed
+  hidden behind a race between two registrations.
+- **How to apply:** Have the host code under test register its callback only after the test has seen
+  the call reach its wait; then cancel from `Task.Run` and await that task. Run the test 50 times.
+  See [[L-065]].
+
+## L-079 — A figure is measured by a named test, or it is not written.
+
+- **Lesson:** A time, a count or a bound that reaches the owner, a doc or a commit message comes from
+  a test that prints or asserts it, named with the figure. A hand trace or an estimate is labelled as
+  one, and is replaced by the measurement before a decision rests on it. Measure before and after.
+- **Why:** #111: the owner chose to remove the per-message time limits on a figure of "about 500 s at
+  limit 10" that nobody had measured. Measured afterwards on the manual clock, with 99 messages that
+  never open in front at the default lease: 200 s with the limits, 1340 s without, with a second
+  learning pass.
+- **How to apply:** When an option changes a rate or a bound, run the acceptance matrix on both sides
+  first and put both columns in the option. Give the test's name and the line that prints the figure.
+  Tune no constant to improve a figure; report the cell. See [[L-076]].
+
+## L-080 — Before comparing against a base, show that the base gives one number.
+
+- **Lesson:** A sentence of the form "never slower than before" compares two things that must each be
+  a number. Run the base several times first. If it varies from run to run, the comparison is a
+  distribution on that side, and the sentence says so or is not written.
+- **Why:** #111: the owner was told that opening sixteen messages at once was "never slower than
+  before the change in any of the 96 cases". That had been measured against one run of a base that
+  does not give one number: in fifteen runs of the base 35 of its 64 named-sender cases varied, and in
+  ten some run was faster than the new code. The cause was a race in the base (messages refused
+  inside a delivery, which cost no time). The coordinator had to correct the sentence with the owner.
+- **How to apply:** Measure both sides at least five times before a "never / always / in every case"
+  comparison leaves the session. Report the base's spread beside the new figure, name both runs, and
+  say what was checked about the cause and in how many cases. See [[L-079]].
+
+## L-081 — A flag handed to hosts for a decision is made from the same decision the library makes.
+
+- **Lesson:** When the library tells a host "leave this one, I am not done with it", that signal and
+  the library's own bookkeeping must come from one decision, made once. Two rules that draw their
+  lines in different places leave a gap, and a host that follows the documented advice falls into it.
+- **Why:** #111: the first form of the flag on a delivered item said "not attempted" (no host call was
+  created), while the client's memory said "not counted" (the message had not had the whole time).
+  A message that started late and was cut, or whose call never got a thread, was between the two:
+  the client would open it again, and a host that discarded "what was tried" deleted it first. An
+  independent review found both cases; the flag was renamed and now says exactly what the memory says.
+- **How to apply:** For every host-facing signal, write the invariant that ties it to the internal
+  state ("true if and only if nothing was counted against the message") and test that equivalence
+  over mixed inputs, reading the internal state itself and not the signal. See [[L-076]].
+
+## L-082 — A gate run while other work loads the machine is not a gate; and a merge of two test-harness changes is run before anyone builds on it.
+
+- **Lesson:** Runs that decide something (a gate, a 50-run loop, a real-clock measurement) are made
+  with nothing else running, and the load average is recorded with the result. After merging two
+  branches that both touch test harnesses, run the suite on the merged head before handing that head
+  to anyone else.
+- **Why:** #111: six agents' test loops ran at once and the load average reached 220 on 14 cores;
+  tests took minutes and tripped their real-time hang guards, the suite's results in that hour meant
+  nothing, and one failure showed as a null reference in a test's own print line. Twice a harness that
+  waits for "no reservation held" was merged with a test that holds reservations itself, each green on
+  its own branch and red together.
+- **How to apply:** One measuring run at a time; give each agent its turn for loops, and say in the
+  report what else was running. A real-time guard that trips under load is re-run on a quiet machine
+  before it is diagnosed; a wrong value is diagnosed at once. See [[L-065]].
+
+## L-083 — When the scope is closed, finish; every pass added after that costs the owner a round.
+
+- **Lesson:** Once the design is decided and the findings are settled, the remaining work is a fixed
+  list: merge, the sentences that depend on the last fix, the plan, the gate, the hand-back. A new
+  review pass, a new measurement or another wording round is proposed to the coordinator, not
+  started.
+- **Why:** #111: after the last decision, further passes kept being added (a second review pass on
+  the delta, follow-up attacks, re-measurements, wording rounds), each reasonable alone, and the
+  owner asked why it was taking so long. The coordinator closed the scope in so many words.
+- **How to apply:** At each hand-back, list what is left as a closed list and its order. Anything
+  seen on the way that is outside the list goes into the report as "seen, not verified, not
+  changed", with where it is. See [[L-063]].
+
+## L-084 — A wording rule is kept in the brief, and the scan before the first push reads the plan as well.
+
+- **Lesson:** A rule about how something is to be worded belongs in the brief the agents work from.
+  The plan records what was built and decided, in the wording the rule asks for, and does not
+  restate the rule. The scan before the first push covers the plan and every commit's diff, not only
+  the sources and the docs.
+- **Why:** #111: the plan restated one of the coordinator's wording rules next to a quotation of
+  his; the scan before the first push found it, and it was taken out at the head.
+- **How to apply:** When a docs agent is told to record the coordinator's rulings, say which are
+  recorded in his words and which stay in the brief. Run the scan over `git log -p` of the branch
+  before the hand-back that precedes the first push.
+
+## L-085 — When one parser pass becomes a pass per item, measure the path that skips an item, with many items and a large payload.
+
+- **Lesson:** A change that replaces one pass over an input by one pass for each item in it is
+  measured before the PR on the path where an item is skipped, with many items and a payload near
+  the receive limit, against the base. Allocated bytes of one call are enough to see it.
+- **Why:** #111 (PR #145, review round 1): to resolve signer keys asynchronously, the reader had
+  the JWS parser verify one signature at a time, and ran it also for a signature whose key was not
+  known. With 1,024 such signatures and a payload of about 256 kB one unpack allocated about 2 GB,
+  against about 5 MB on the base. The tests written with that change covered cancellation and the
+  order of lookups; none had more than a few signatures or a large payload, so all were green.
+- **How to apply:** For each loop that calls a parser, name the cases in which the call can be
+  left out and write one test that bounds the growth for each added item on that path (two sizes,
+  the same payload, a wide margin, the calling thread's allocation counter when the path does not
+  leave the thread). Measure the path that cannot leave the call out as well, and state its figure
+  beside the base's even when it is not changed. See [[L-080]].
+
+## L-086 — A row measured to show what did not change is compared with the base before it is called unchanged; where the base did the work in one pass, the one pass is kept, and it is not ended when it can finish by skipping.
+
+- **Lesson:** A figure put in a reply under "not changed" is read against the base's figure for the
+  same input first. Equal before and after a fix is not equal to the base. And when a synchronous
+  step becomes awaited, the pass the base made stays: it answers from every lookup that is
+  complete, and at the first that is not, it is not ended but finishes with the answer that skips,
+  so that it still yields what the item-by-item step needs.
+- **Why:** #111 (PR #145, review round 1, the second change): the reply stated 198.6 MB for 64
+  known signer keys "before and after this fix" beside 68.9 MB on the base, 2.9 times, and called
+  the path not changed. The awaited lookup had replaced the parser's one pass by a naming pass and
+  a parse for each known key, also when every lookup answered at once. Running the parser once and
+  answering from each lookup that is complete brought the row, and every ordinary signed message,
+  back to the base's figure. The first form of that change ended the pass with an exception at the
+  first lookup that was not complete and named the kids in a second pass: one parse more than the
+  head before it whenever a lookup had to be waited for, which showed only when the waited-for rows
+  were measured against that head. In the form kept, the callback answers `null` from that
+  signature on and the same pass names the rest.
+- **How to apply:** In a figures table, give the base and the head before the change a column each
+  and read every row across before writing the sentence about it. For a callback that became
+  awaited, check `IsCompletedSuccessfully` inside the callback and answer from it; when it is
+  false, keep the lookup and let the pass finish with the answer that skips. Measure the at-once
+  and the waited-for case. See [[L-085]].
+
+## L-087 — A cost per item is compared with the base for every way the base can finish an item, not only the most expensive one.
+
+- **Lesson:** When a loop takes over what one pass of a parser did, list every way that pass could
+  finish one item: skip it, refuse it from its headers, check it in full. Each of those is a path
+  of the loop, and each is measured against the base with many items and a large payload.
+- **Why:** #111 (PR #145, review round 2): round 1 measured signatures whose key is not known
+  (skipped) and signatures whose key is known and which do not verify (checked in full). A
+  signature whose key is known and whose protected header says `alg` "none" is refused by the
+  parser before it reads the payload; after a lookup had to be waited for, the loop still gave each
+  such signature a copy and a parse of the payload: 518 MB for 256 entries against 1.8 MB on the
+  base. The rows already in the table could not show it, because none had a known key together
+  with a refusal that comes before the check.
+- **How to apply:** Read the parser's loop body top to bottom and write one row for each `continue`
+  or `return` in it, not one row for each kind of key. Where the loop cannot call the parser's own
+  early exits, ask the parser about the item alone, without the large part, and take its answer
+  only as a refusal. See [[L-085]], [[L-086]].

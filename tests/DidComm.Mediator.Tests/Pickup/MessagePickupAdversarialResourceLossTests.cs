@@ -12,9 +12,12 @@ namespace DidComm.Mediator.Tests.Pickup;
 /// lease that ran out, a connection closed mid-delivery). Every interleaving is driven through a
 /// rendezvous; no assertion depends on which racer won.
 /// </summary>
-public sealed class MessagePickupAdversarialResourceLossTests
+public sealed class MessagePickupAdversarialResourceLossTests : IDisposable
 {
-    public MessagePickupAdversarialResourceLossTests() => MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = MessagePickupAdversarialResource.RaiseThreadPoolFloor();
+
+    public void Dispose() => _floor.Dispose();
 
     // ---- the delivery-time registration purge (FR-PICK-03, owner decision) ---------------------
 

@@ -423,7 +423,7 @@ public sealed class DirectPushStepTests
     {
         // The push worker's deadline (WaitAsync) can only govern a call that has returned its task.
         // One pool thread is parked in the directory below: raise the floor first (L-065).
-        MessagePickupStoreKit.RaiseThreadPoolFloor(2);
+        using var floor = MessagePickupStoreKit.RaiseThreadPoolFloor(2);
         using var world = DirectPushWorld.Create(kind);
         var peer = await world.GrantAsync("alice");
         await world.QueueAsync(peer, seed: 1);

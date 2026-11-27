@@ -154,7 +154,11 @@ public sealed class MediatorAcknowledgementTests
         await mediator.FlushAsync();
     }
 
-    /// <summary>A host <see cref="IMessageStore"/> around the product's in-memory store that can hold the next enqueue at the door.</summary>
+    /// <summary>
+    /// A host <see cref="IMessageStore"/> around the product's in-memory store that can hold the next
+    /// enqueue at the door, until it is released or its own token is cancelled (the mediator shutting
+    /// down), never for a length of time.
+    /// </summary>
     private sealed class EnqueueParkingStore(InMemoryMessageStore inner) : IMessageStore
     {
         private Parked? _next;
@@ -174,7 +178,7 @@ public sealed class MediatorAcknowledgementTests
         public async ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct)
         {
             if (Interlocked.Exchange(ref _next, null) is { } parked)
-                await parked.ArriveAsync();
+                await parked.ArriveAsync(ct);
             Interlocked.Increment(ref _enqueued);
             return await Inner.EnqueueAsync(message, lease, now, ct);
         }
@@ -199,11 +203,11 @@ public sealed class MediatorAcknowledgementTests
 
             public void Release() => _gate.TrySetResult();
 
-            internal async Task ArriveAsync()
+            internal async Task ArriveAsync(CancellationToken ct)
             {
                 _arrived.TrySetResult();
-                // Bounded, so a test that failed before Release() does not hold the pump for ever.
-                await Task.WhenAny(_gate.Task, Task.Delay(MediatorTestServer.Timeout));
+                // A test that failed before Release() ends the wait when it disposes the server.
+                await _gate.Task.WaitAsync(ct);
             }
         }
     }

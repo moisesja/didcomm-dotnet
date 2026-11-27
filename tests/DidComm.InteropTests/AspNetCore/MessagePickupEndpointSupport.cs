@@ -496,6 +496,7 @@ internal sealed class PickupEndpointHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        _parking?.ResumeAll();
         await Host.DisposeAsync();
         foreach (var peer in _ownPeers)
             await peer.DisposeAsync();
@@ -624,13 +625,16 @@ internal sealed record PickupDrainStep(IReadOnlyList<DeliveredMessage> Delivered
 /// remembers every lease taken (the request, so a test knows the id and owner of the lease, and
 /// the ids it handed out), every id acknowledged and every id given back, and it can hold the next
 /// <see cref="ReleaseAsync"/> — a lease being given back by its id — at the door until the test
-/// lets it in.
+/// lets it in. A held give-back waits for that, or for its own token (the product gives back with
+/// none it cancels), never for a length of time; disposing the host lets every held one in
+/// (<see cref="ResumeAll"/>).
 /// </summary>
 internal sealed class PickupParkingStore : IMessageStore
 {
     private readonly ConcurrentQueue<(MessageLeaseRequest Request, IReadOnlyList<string> Ids)> _leases = new();
     private readonly ConcurrentQueue<string> _acknowledged = new();
     private readonly ConcurrentQueue<string> _givenBack = new();
+    private readonly ConcurrentQueue<PickupParkedRelease> _parks = new();
     private PickupParkedRelease? _next;
 
     public PickupParkingStore(InMemoryMessageStore inner) => Inner = inner;
@@ -655,7 +659,15 @@ internal sealed class PickupParkingStore : IMessageStore
     {
         var parked = new PickupParkedRelease();
         Interlocked.Exchange(ref _next, parked).Should().BeNull("one give-back is parked at a time");
+        _parks.Enqueue(parked);
         return parked;
+    }
+
+    /// <summary>Let every give-back parked so far in (the host's disposal: a test that failed before it let one in ends at once).</summary>
+    public void ResumeAll()
+    {
+        foreach (var parked in _parks)
+            parked.Resume();
     }
 
     public ValueTask<EnqueueOutcome> EnqueueAsync(QueuedMessage message, MessageLease? lease, DateTimeOffset now, CancellationToken ct)
@@ -695,7 +707,7 @@ internal sealed class PickupParkingStore : IMessageStore
 
         try
         {
-            await parked.ArriveAsync(messageIds.ToArray(), leaseId);
+            await parked.ArriveAsync(messageIds.ToArray(), leaseId, ct);
             var released = await Inner.ReleaseAsync(grantPeerDid, messageIds, leaseId, ct);
             parked.Finish(released);
             return released;
@@ -756,11 +768,11 @@ internal sealed class PickupParkedRelease
     /// <summary>Let the give-back in.</summary>
     public void Resume() => _gate.TrySetResult();
 
-    internal async Task ArriveAsync(IReadOnlyList<string> ids, string leaseId)
+    internal async Task ArriveAsync(IReadOnlyList<string> ids, string leaseId, CancellationToken ct)
     {
         _arrived.TrySetResult((ids, leaseId));
-        // Bounded, so a test that failed before Resume() does not leave the server waiting for ever.
-        await Task.WhenAny(_gate.Task, Task.Delay(PickupEndpointHost.Timeout));
+        // A test that failed before Resume() ends the wait when it disposes the host (ResumeAll).
+        await _gate.Task.WaitAsync(ct);
     }
 
     internal void Finish(int released) => _finished.TrySetResult(released);

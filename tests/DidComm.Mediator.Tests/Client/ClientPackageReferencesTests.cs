@@ -43,8 +43,11 @@ public sealed class ClientPackageReferencesTests
             .Order(StringComparer.Ordinal)
             .ToList();
 
+        // DataProofsDotnet.Jose is Core's own JOSE dependency, so every wallet already carries it; the
+        // client reads an outer envelope's protected header with it, as Core does (#111, I-14).
         references.Should().Equal(
             [
+                "DataProofsDotnet.Jose",
                 "DidComm.Core",
                 "DidComm.Extensions.DependencyInjection",
                 "Microsoft.Extensions.DependencyInjection.Abstractions",

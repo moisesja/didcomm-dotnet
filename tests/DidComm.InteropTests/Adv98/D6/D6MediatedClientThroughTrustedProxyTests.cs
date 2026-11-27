@@ -53,7 +53,7 @@ public sealed class D6MediatedClientThroughTrustedProxyTests(ITestOutputHelper o
     [InlineData("DefaultProxy")]
     public async Task Enrol_register_fetch_and_live_all_ride_the_TrustedProxy_and_the_process_proxy_sees_nothing(string processProxy)
     {
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
         await using var trap = new StandInProxy(c => c.StatusAsync("403 Forbidden", "Connection: close"));
         await using var mediator = await D6KestrelMediator.StartAsync(MediatorHost);
         await using var proxy = new D6ForwardingProxy(MediatorHost);

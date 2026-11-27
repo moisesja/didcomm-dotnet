@@ -49,7 +49,7 @@ public sealed class D4KestrelAcknowledgementTests
     public D4KestrelAcknowledgementTests(ITestOutputHelper output)
     {
         _output = output;
-        Qa.RaiseThreadPoolFloor();
+        using var floor = Qa.RaiseThreadPoolFloor();
     }
 
     [Fact]
@@ -213,9 +213,12 @@ public sealed class D4KestrelAcknowledgementTests
 /// never the dead one.
 /// </summary>
 [Collection(QaSerialTiming.Name)]
-public sealed class D4KestrelLiveResetTests
+public sealed class D4KestrelLiveResetTests : IDisposable
 {
-    public D4KestrelLiveResetTests() => Qa.RaiseThreadPoolFloor();
+    // Held for each test and put back when it ends (xunit disposes the instance after its test).
+    private readonly IDisposable _floor = Qa.RaiseThreadPoolFloor();
+
+    public void Dispose() => _floor.Dispose();
 
     [Fact]
     public async Task D4_A_live_push_reset_unread_is_redelivered_on_the_next_socket_and_the_next_arrival_goes_there_on_Kestrel()

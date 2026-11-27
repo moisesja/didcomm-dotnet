@@ -297,7 +297,7 @@ public sealed class PickupClientAckWithoutStatusTests
         public Task SendOneWayAsync(MediatorRoute route, Message request, string name, string mediatorDid, string localDid, CancellationToken ct)
             => inner.SendOneWayAsync(route, request, name, mediatorDid, localDid, ct);
 
-        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(IReadOnlyList<ReadOnlyMemory<byte>> payloads, string? requestId, CancellationToken ct)
-            => inner.UnpackDeliveredBatchAsync(payloads, requestId, ct);
+        public Task<IReadOnlyList<DeliveredOutcome>> UnpackDeliveredBatchAsync(DeliveryScope scope, IReadOnlyList<DeliveredInput> messages, string? requestId, CancellationToken ct)
+            => inner.UnpackDeliveredBatchAsync(scope, messages, requestId, ct);
     }
 }
