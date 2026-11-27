@@ -1512,19 +1512,25 @@ Format per entry:
   leave the thread). Measure the path that cannot leave the call out as well, and state its figure
   beside the base's even when it is not changed. See [[L-080]].
 
-## L-086 — A row measured to show what did not change is compared with the base before it is called unchanged; where the base did the work in one pass, the one pass is kept for the case that needs no waiting.
+## L-086 — A row measured to show what did not change is compared with the base before it is called unchanged; where the base did the work in one pass, the one pass is kept, and it is not ended when it can finish by skipping.
 
 - **Lesson:** A figure put in a reply under "not changed" is read against the base's figure for the
   same input first. Equal before and after a fix is not equal to the base. And when a synchronous
-  step becomes awaited, the pass the base made stays for every case in which nothing has to be
-  waited for; only from the first real wait does the work go item by item.
+  step becomes awaited, the pass the base made stays: it answers from every lookup that is
+  complete, and at the first that is not, it is not ended but finishes with the answer that skips,
+  so that it still yields what the item-by-item step needs.
 - **Why:** #111 (PR #145, review round 1, the second change): the reply stated 198.6 MB for 64
   known signer keys "before and after this fix" beside 68.9 MB on the base, 2.9 times, and called
   the path not changed. The awaited lookup had replaced the parser's one pass by a naming pass and
   a parse for each known key, also when every lookup answered at once. Running the parser once and
-  leaving it only at a lookup that is not complete brought the row, and every ordinary signed
-  message, back to the base's figure.
-- **How to apply:** In a figures table, give the base a column and read each row across before
-  writing the sentence about it. For a callback that became awaited, check `IsCompletedSuccessfully`
-  inside the callback, answer from it, and leave the pass only when it is false; then measure both
-  the at-once and the waited-for case against the head before it. See [[L-085]].
+  answering from each lookup that is complete brought the row, and every ordinary signed message,
+  back to the base's figure. The first form of that change ended the pass with an exception at the
+  first lookup that was not complete and named the kids in a second pass: one parse more than the
+  head before it whenever a lookup had to be waited for, which showed only when the waited-for rows
+  were measured against that head. In the form kept, the callback answers `null` from that
+  signature on and the same pass names the rest.
+- **How to apply:** In a figures table, give the base and the head before the change a column each
+  and read every row across before writing the sentence about it. For a callback that became
+  awaited, check `IsCompletedSuccessfully` inside the callback and answer from it; when it is
+  false, keep the lookup and let the pass finish with the answer that skips. Measure the at-once
+  and the waited-for case. See [[L-085]].
