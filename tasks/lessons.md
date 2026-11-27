@@ -1511,3 +1511,20 @@ Format per entry:
   the same payload, a wide margin, the calling thread's allocation counter when the path does not
   leave the thread). Measure the path that cannot leave the call out as well, and state its figure
   beside the base's even when it is not changed. See [[L-080]].
+
+## L-086 — A row measured to show what did not change is compared with the base before it is called unchanged; where the base did the work in one pass, the one pass is kept for the case that needs no waiting.
+
+- **Lesson:** A figure put in a reply under "not changed" is read against the base's figure for the
+  same input first. Equal before and after a fix is not equal to the base. And when a synchronous
+  step becomes awaited, the pass the base made stays for every case in which nothing has to be
+  waited for; only from the first real wait does the work go item by item.
+- **Why:** #111 (PR #145, review round 1, the second change): the reply stated 198.6 MB for 64
+  known signer keys "before and after this fix" beside 68.9 MB on the base, 2.9 times, and called
+  the path not changed. The awaited lookup had replaced the parser's one pass by a naming pass and
+  a parse for each known key, also when every lookup answered at once. Running the parser once and
+  leaving it only at a lookup that is not complete brought the row, and every ordinary signed
+  message, back to the base's figure.
+- **How to apply:** In a figures table, give the base a column and read each row across before
+  writing the sentence about it. For a callback that became awaited, check `IsCompletedSuccessfully`
+  inside the callback, answer from it, and leave the pass only when it is false; then measure both
+  the at-once and the waited-for case against the head before it. See [[L-085]].
